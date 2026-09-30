@@ -1,24 +1,43 @@
-# Acknowledgments 
+<img width="160" align="right" alt="SkyEmu seagull" src="https://user-images.githubusercontent.com/7118296/175460369-6f38ae2a-8fe4-4068-9268-0c7a3125482c.png">
 
-# GBA / NDS
+# Acknowledgments
 
-- **[Fleroviux](https://github.com/fleroviux)**: For producing the excellent NanoBoyAdvance GBA emulator, sharing countless reverse engineering research/test roms and for being a good friend. NBA was used to generate golden test vectors which were essential to the early bring up of the SkyEmu GBA core and without our back and forth collaboration SkyEmu would have never reached this level.  
-- **Martin Korth (Nocash)**: For his reverse engineering and documentation work on the GBA and NDS published at [GBATEK](https://problemkaputt.de/gbatek.htm). It was the single source of documentation for this HW that I referred to the most while developing SkyEmu. 
-- **[Vicki Pfau (Endrift)](https://github.com/endrift)**: For producing the excellent GBA-suite test rom which was invaluable to replicating many of the edge cases in the GBA HW. 
-- **[Zayd](https://github.com/GhostRain0), [LadyStarbreeze](https://github.com/LadyStarbreeze), [wheremyfoodat](https://github.com/wheremyfoodat), [DenSinH](https://github.com/DenSinH/), [destoer](https://github.com/destoer/), [jsmolka](github.com/jsmolka/), [TONC](https://www.coranac.com/tonc/text/)**: For producing test roms that were used at varying stages of the development of the emulator. 
-- **[Cult of GBA (DinSinH + Fleroviux)](https://github.com/Cult-of-GBA/BIOS)**: For the open source replacement BIOS for the GBA that ships with SkyEmu
+SkyEmu is written by Skyler "Sky" Saleh. These are the people and projects Sky thanks for making it possible.
+SkyEmu OMEGA builds on all of their work.
 
-My other friends @ the EmuDev, GbaDev, and PandaSemi Discord servers. 
+## Game Boy Advance and Nintendo DS
 
-# GB / GBC
-- The [gbdev Pan Docs](https://gbdev.io/pandocs/) community documentation
-- **Blargg** and **Mooneye**: For their GB test roms
-- **[Kivan](https://github.com/kivan117)**: For his GB color palette 
+- **[Fleroviux](https://github.com/fleroviux)**, for the excellent NanoBoyAdvance GBA emulator, countless
+  reverse engineering findings and test ROMs, and for being a good friend. NanoBoyAdvance generated the golden
+  test vectors that were essential to bringing up the SkyEmu GBA core, and without that back and forth
+  collaboration SkyEmu would never have reached this level.
+- **Martin Korth (Nocash)**, for reverse engineering and documenting the GBA and NDS in
+  [GBATEK](https://problemkaputt.de/gbatek.htm), the documentation referred to most while developing SkyEmu.
+- **[Vicki Pfau (Endrift)](https://github.com/endrift)**, for the GBA Suite test ROM, which was invaluable for
+  replicating many edge cases of the hardware.
+- **[Zayd](https://github.com/GhostRain0), [LadyStarbreeze](https://github.com/LadyStarbreeze),
+  [wheremyfoodat](https://github.com/wheremyfoodat), [DenSinH](https://github.com/DenSinH/),
+  [destoer](https://github.com/destoer/), [jsmolka](https://github.com/jsmolka/) and
+  [TONC](https://www.coranac.com/tonc/text/)**, for test ROMs used at different stages of development.
+- **[Cult of GBA (DenSinH and Fleroviux)](https://github.com/Cult-of-GBA/BIOS)**, for the open source replacement
+  GBA BIOS that ships with SkyEmu.
 
+## Game Boy and Game Boy Color
 
-# Other
-- **Near**: For the general encouragement, discussions, and blog posts I used while I was starting out in emulation. Rest in peace friend. 
-- **Nintendo**: For creating the original HW, games and ecosystem that these emulator cores try to preserve. Thank you for bringing joy to my childhood and millions of others. Additionally for the Links Awakening Game, who the Seagull mascot for SkyEmu references.
-- **[Ian Wiggins](https://github.com/iWiggins)** for his user testing of the emulator, bug reports and feature suggestions. 
-- My friends and other developers @ the EmuDev, GbaDev, and PandaSemi Discord servers. 
-<img width="200" align="right" alt="SkyEmu Seagull 2" src="https://user-images.githubusercontent.com/7118296/175460369-6f38ae2a-8fe4-4068-9268-0c7a3125482c.png">
+- The [gbdev Pan Docs](https://gbdev.io/pandocs/) community documentation.
+- **Blargg** and **Mooneye**, for their Game Boy test ROMs.
+- **[Kivan](https://github.com/kivan117)**, for the Game Boy color palette.
+
+## Everyone else
+
+- **Near**, for the encouragement, discussions and blog posts that helped when starting out in emulation. Rest
+  in peace, friend.
+- **Nintendo**, for creating the hardware, games and ecosystem these cores try to preserve, and for bringing joy
+  to millions of childhoods. SkyEmu's seagull mascot is a nod to *Link's Awakening*.
+- **[Ian Wiggins](https://github.com/iWiggins)**, for user testing, bug reports and feature suggestions.
+- Friends and fellow developers in the EmuDev, GbaDev and PandaSemi Discord servers.
+
+## SkyEmu OMEGA
+
+- **[toanlcgift](https://github.com/toanlcgift)**, for turning SkyEmu into a Windows DLL, an Android library and
+  iOS/macOS static libraries with their host APIs.

@@ -239,7 +239,7 @@ SKYEMU_API void se_send_key(const char* key, float value);
 /*
  * SkyEmu Framebuffer Interface
  * 
- * The framebuffer is in BGRA format (4 bytes per pixel).
+ * The framebuffer is RGBA: 4 bytes per pixel in red, green, blue, alpha order.
  */
 
 /* System types matching SkyEmu's internal definitions */
@@ -270,7 +270,7 @@ SKYEMU_API void se_get_framebuffer_dimensions(int* width, int* height);
 /* Get the number of framebuffers for the current system */
 SKYEMU_API int se_get_framebuffer_count(void);
 
-/* Get a pointer to the framebuffer data (BGRA format) */
+/* Get a pointer to the framebuffer data (RGBA format) */
 SKYEMU_API const uint8_t* se_get_framebuffer(int screen_index);
 
 /* Copy the framebuffer to a caller-provided buffer */

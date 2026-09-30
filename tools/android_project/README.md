@@ -1,52 +1,44 @@
-Native Activity
-===============
-Native Activity is an Android sample that initializes a GLES 2.0 context and reads accelerometer data from C code using [Native Activity](http://developer.android.com/reference/android/app/NativeActivity.html).
+<sub>[SkyEmu OMEGA](../../README.md) › [Docs](../../docs/README.md) › Android project</sub>
 
-This sample uses the new [Android Studio CMake plugin](http://tools.android.com/tech-docs/external-c-builds) with C++ support.
+# SkyEmu for Android
 
-Pre-requisites
---------------
-- Android Studio 2.2+ with [NDK](https://developer.android.com/ndk/) bundle.
+This Gradle project builds SkyEmu for Android as an **Android library module**: the native emulator
+(`libSkyEmu.so`, compiled from the repository's top-level `CMakeLists.txt`) plus the Java classes a host app uses
+to show and control it. The GUI uses [Material 3](../../docs/DESIGN_SYSTEMS.md) by default, with Material You
+colors on Android 12 and later.
 
-Getting Started
----------------
-1. [Download Android Studio](http://developer.android.com/sdk/index.html)
-1. Launch Android Studio.
-1. Open the sample directory.
-1. Open *File/Project Structure...*
-  - Click *Download* or *Select NDK location*.
-1. Click *Tools/Android/Sync Project with Gradle Files*.
-1. Click *Run/Run 'app'*.
+## Requirements
 
-Screenshots
------------
-![screenshot](screenshot.png)
+| | |
+|---|---|
+| Android Gradle Plugin | 8.7.0 (Gradle 8.9 through the wrapper) |
+| JDK | 17 |
+| NDK | 28.2.13676358 |
+| CMake | 3.18.1 |
+| compileSdk / targetSdk | 35 |
+| minSdk | 24 (Android 7.0) |
+| ABIs | arm64-v8a, armeabi-v7a, x86, x86_64 |
 
-Support
--------
-If you've found an error in these samples, please [file an issue](https://github.com/googlesamples/android-ndk/issues/new).
+## Build
 
-Patches are encouraged, and may be submitted by [forking this project](https://github.com/googlesamples/android-ndk/fork) and
-submitting a pull request through GitHub. Please see [CONTRIBUTING.md](../CONTRIBUTING.md) for more details.
+```sh
+cd tools/android_project
+./gradlew assembleRelease
+```
 
-- [Stack Overflow](http://stackoverflow.com/questions/tagged/android-ndk)
-- [Android Tools Feedbacks](http://tools.android.com/feedback)
+Or open this folder in Android Studio and let it sync. The release build is signed with the open signing key in
+this folder, replace it with your own for distribution.
 
-License
--------
-Copyright 2015 Google, Inc.
+## What is inside
 
-Licensed to the Apache Software Foundation (ASF) under one or more contributor
-license agreements.  See the NOTICE file distributed with this work for
-additional information regarding copyright ownership.  The ASF licenses this
-file to you under the Apache License, Version 2.0 (the "License"); you may not
-use this file except in compliance with the License.  You may obtain a copy of
-the License at
+| Path | Contents |
+|---|---|
+| `app/build.gradle` | Library module (`com.android.library`, namespace `com.skyemu`) and the NDK / CMake setup |
+| `app/src/main/AndroidManifest.xml` | `EnhancedNativeActivity`, file associations for `.gb`, `.gbc`, `.gba`, `.nds` and `.zip`, and the `skyemu://oauth` link used for sign-in |
+| `app/src/main/java/com/sky/SkyEmu/EnhancedNativeActivity.java` | The `NativeActivity` that runs SkyEmu: controllers, keyboard, file picker, system theme |
+| `app/src/main/java/com/sky/SkyEmu/MainSkyEmuObject.java` | JNI API for host apps: input, save states, screen and every setting |
+| `app/src/main/res` | Launcher icons and strings |
+| `app/src/main/cpp` | Left over from the Google NDK *Native Activity* sample this project started from (Apache 2.0); not part of the build |
 
-  http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
-WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
-License for the specific language governing permissions and limitations under
-the License.
+How a host app talks to SkyEmu (the activity's methods, the `se_android_*` API and the callbacks native code
+expects) is described in [Embedding › Android library](../../docs/EMBEDDING.md#android-library).

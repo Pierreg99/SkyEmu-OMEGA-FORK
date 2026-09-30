@@ -1,385 +1,295 @@
-# HTTP Control Server
+<sub>[SkyEmu OMEGA](../README.md) › [Docs](README.md) › HTTP control server</sub>
 
-SkyEmu contains a web server that implements a REST-like API that can be used to control SkyEmu from other programs and scripts.
+# HTTP control server
 
-This interface provides access to the following functionality:
-- Loading arbitrary ROM files
-- Retrieving the emulated screen's image
-- Reading/Writing arbitrary memory addresses in the emulated system
-- Stepping the emulator a controlled number of frames
-- Controlling user inputs for the emulator and emulated console
+SkyEmu contains a small web server with a REST-like API, so other programs and scripts can drive the emulator:
+load games, read the screen, read and write memory, step frames, press buttons and change settings.
 
-To enable the server check the "Enable HTTP Control Server" option in the advanced settings and configure the port. 
-
-Additionally, SkyEmu can be launched in a mode optimized for headless display using the following commandline parameters:
-
-``` ./SkyEmu http_server <Server Port> <Path To ROM file> ```
-
-When running using these parameters, SkyEmu won't render the UI and will run without sleeping to synchronize with real time. 
-
-# Overview of API commands
-
-A description of each of the supported API commands is shown below. You can test each command using a standard web browser by visiting a link like below:
-
-```http://localhost:<port>/cmd?Param=Value```
-
-# /ping command
-Returns the word 'pong' used to check if the server is up. 
-
-**Example:**
-
-```http://localhost:8080/ping```
-
-**Result:**
-
-```pong```
-
-# /step command
-
-Steps the emulator forward one or more frames. A frames parameter can be optionally provided to step the emulator a fixed number of frames.
-Otherwise, the emulator steps a single frame. Returns "ok" on completion. 
-
-**Example:**
-
-```http://localhost:8080/step```
-
-**Result:**
-
-The emulator is stepped ahead 1 frame. 
-
-```ok```
-
-**Example:**
-
-```http://localhost:8080/step?frames=100```
-
-**Result:**
-
-The emulator is stepped ahead 100 frames. 
-
-```ok```
-
-# /run command
-
-The emulator is un-paused and runs at 1x speed. Returns "ok" on completion. 
-
-**Example:**
-
-```http://localhost:8080/run```
-
-**Result:**
-
-The emulator is playing at 1x speed. 
-
-```ok```
-
-# /screen command
-
-Returns a png image of the current screen of the emulated system. The parameter embed_state can be set to 1 to embed the emulation save state similar to the /save commands output on emulators that support it (ie. SkyEmu). The default keeps embed_state set to 0. 
-
-The paramater format specifies which image format to use. It can be set to png, jpg, or bmp. If not specified, png is used by default. 
-
-**Example:**
-
-```http://localhost:8080/screen```
-
-**Result:**
-
-```<png image of screen>```
-
-**Example:**
-
-```http://localhost:8080/screen?format=jpg```
-
-**Result:**
-
-```<jpg image of screen>```
-
-**Example:**
-
-```http://localhost:8080/screen?embed_state=1```
-
-**Result:**
-
-```<much larger png image of screen with save state embedded>```
-
-# /read_byte command
-
-Reads one or multiple bytes of data from the emulated system at addresses provided using parameters. The addr parameter can be repeated an arbitrary amount of times to read an arbitrary amount of bytes. 
-
-The paramater map can be used to specify different address maps. This is currently only used in the NDS core where address map 7 is used for the ARM7 address map and 0 and 9 are used for the ARM9 address map. The default address map is 0. The map command only effects bytes read after the parameter and does not persist across API calls. 
-
-**Example (Read a single byte):**
-
-```http://localhost:8080/read_byte?addr=02000004```
-
-**Result:**
-
-1 byte of data is returned in hexadecimal
-
-```f0```
-
-**Example (Read multiple bytes):**
-
-```http://localhost:8080/read_byte?addr=02000004&addr=02000005&addr=02000006```
-
-**Result:**
-
-3 bytes of data are returned in hexadecimal (in the order mem[0x02000004], mem[0x02000005], mem[0x02000006])
-
-```f0bf01```
-
-**Example (Read multiple bytes from different address spaces ):**
-
-```http://localhost:8080/read_byte?addr=02000004&map=7&addr=02000005&addr=02000006```
-
-**Result:**
-
-3 bytes of data are returned in hexadecimal (in the order mem_map0[0x02000004], mem_map7[0x02000005], mem_map7[0x02000006] of map 7)
-
-```f0bf01```
-
-# /write_byte command
-
-Writes one or multiple bytes of data from the emulated system at addresses provided using parameters. Multiple addresses can be written to in a single command. Returns "ok" on completion
-
-The paramater map can be used to specify different address maps. This is currently only used in the NDS core where address map 7 is used for the ARM7 address map and 0 and 9 are used for the ARM9 address map. The default address map is 0. The map command only effects bytes read after the parameter and does not persist across API calls. 
-
-**Example (Write a single byte):**
-
-```http://localhost:8080/write_byte?02000000=ff```
-
-**Result:**
-
-mem[0x02000000] = 0xff; 
-
-```okay```
-
-**Example (Write multiple bytes):**
-
-```http://localhost:8080/write_byte?02000000=ff&02000001=ee&02000002=cc```
-
-**Result:**
-
-mem[0x02000000] = 0xff; 
-
-mem[0x02000001] = 0xee; 
-
-mem[0x02000002] = 0xcc; 
-
-```ok```
-
-**Example (Write multiple bytes from different maps ):**
-
-```http://localhost:8080/write_byte?02000000=ff&map=7&02000001=ee&02000002=cc```
-
-**Result:**
-
-mem_map0[0x02000000] = 0xff; 
-
-mem_map7[0x02000001] = 0xee; 
-
-mem_map7[0x02000002] = 0xcc; 
-
-```ok```
-
-# /input command
-
-Sends an input to the emulated system which will stay until a different input command assigns a new value. The parameters specify the input to set and the value to set it to. In general all inputs that have keybinds in the GUI can be set using this command. A full list of the valid input names and their current state is viewable with the /status command. An arbitrary number of inputs can be set using this command. Returns "ok" on completion. 
-
-**Example (Sends a sequence of commands)**
-
-All buttons start released. 
-
-```http://localhost:8080/input?A=1&Up=1```
-
-A and Up are now being pressed. 
-
-```http://localhost:8080/input?B=1&Up=0```
-
-A and B are now being pressed (and Up was released)
-
-```http://localhost:8080/input?B=0```
-
-A is being pressed (and B was released)
-
-```http://localhost:8080/input?A=0```
-
-No button is being pressed (A was released)
-
-```http://localhost:8080/input?A=0```
-
-*Example (Send a special command to capture a save state slot)*
-
-```http://localhost:8080/input?Capture State 0=1```
-
-Hot key for capturing save state 0 is being pressed. 
-
-```http://localhost:8080/step```
-
-Emulation is stepped, completing the capture into save state 1
-
-```http://localhost:8080/input?Capture State 0=0```
-
-Hot key is released.
-
-# /status command
-
-Returns a json file filled with info about the current state of the emulator and the state of the HTTP Control Server Inputs that are being fed into the emulator. 
-
-**Example**
-
-```http://localhost:8080/status```
-
-**Result:**
+It is available in all native builds (not in the web build). Enable it in **Menu → Advanced → Enable HTTP
+Control Server** and pick the port (8080 by default). Try it from a browser:
 
 ```
+http://localhost:8080/ping
+```
+
+> [!TIP]
+> For bots and automated testing, start SkyEmu headless. It then skips the GUI and runs as fast as possible
+> instead of in real time:
+>
+> ```sh
+> ./SkyEmu http_server <port> <path/to/rom>
+> ```
+
+## Commands
+
+| Command | Purpose | Returns |
+|---|---|---|
+| [`/ping`](#ping) | Check that the server is up | `pong` |
+| [`/status`](#status) | Emulator state and HTTP inputs | JSON |
+| [`/load_rom`](#load_rom) | Load a game | `ok` |
+| [`/run`](#run) | Play at normal speed | `ok` |
+| [`/step`](#step) | Advance a number of frames | `ok` |
+| [`/screen`](#screen) | Screenshot of the emulated screen | PNG, JPG or BMP |
+| [`/input`](#input) | Press or release inputs | `ok` |
+| [`/read_byte`](#read_byte) | Read memory | Hex bytes |
+| [`/write_byte`](#write_byte) | Write memory | `ok` |
+| [`/save`](#save) · [`/load`](#load) | Save or load a save state file | `ok` / `failed` |
+| [`/cheats`](#cheats) · [`/edit_cheat`](#edit_cheat) · [`/remove_cheat`](#remove_cheat) | Manage cheats | Text |
+| [`/settings`](#settings) | All settings | JSON |
+| [`/setting`](#setting) | Change settings | `ok` |
+| [`/show_ui`](#show_ui--hide_ui) · [`/hide_ui`](#show_ui--hide_ui) | Show or hide the GUI | Empty |
+| [`/stretch_on`](#stretch_on--stretch_off) · [`/stretch_off`](#stretch_on--stretch_off) | Stretch the screen to the window | Empty |
+| [`/load_html`](#load_html--indexhtml) · [`/index.html`](#load_html--indexhtml) | Serve a custom web page | HTML |
+| [`/external_menu`](#external_menu) | Ask the host app to open its menu | Empty |
+
+Parameters are passed as a query string: `http://localhost:<port>/<command>?<name>=<value>&...`.
+
+---
+
+### `/ping`
+
+Returns `pong`. Use it to check that the server is running.
+
+```
+http://localhost:8080/ping
+→ pong
+```
+
+When SkyEmu is [embedded](EMBEDDING.md), the host app is notified of every ping.
+
+### `/status`
+
+Returns JSON with the emulator state and the value of every input that the HTTP server holds. The `inputs` keys
+are the valid names for [`/input`](#input).
+
+```
+http://localhost:8080/status
+```
+
+```json
 {
   "emulator": "SkyEmu (6af0053049aa689a79ae653a949ed70e517ce2e1)",
   "run-mode": "RUN",
-  "rom-loaded" : true,
-  "rom-path": "/Users/skylersaleh/Documents/roms/gba/varooom-3d.gba",
-  "save-path": "/Users/skylersaleh/Documents/roms/gba/varooom-3d.sav",
-  "rewind-info" : {
-    "entries-used" : 953,
-    "capacity" : 1048576,
-    "percent_full" : 0.1
-  },
+  "rom-loaded": true,
+  "rom-path": "/Users/sky/roms/gba/varooom-3d.gba",
+  "save-path": "/Users/sky/roms/gba/varooom-3d.sav",
+  "rewind-info": { "entries-used": 953, "capacity": 1048576, "percent_full": 0.1 },
   "inputs": {
     "A": 0.000000,
     "B": 0.000000,
-    "X": 0.000000,
-    "Y": 0.000000,
     "Up": 0.000000,
-    "Down": 0.000000,
-    "Left": 0.000000,
-    "Right": 0.000000,
-    "L": 0.000000,
-    "R": 0.000000,
     "Start": 0.000000,
-    "Select": 0.000000,
-    "Fold Screen (NDS)": 0.000000,
-    "Tap Screen (NDS)": 0.000000,
-    "Emulator /": 0.000000,
-    "Emulator ": 0.000000,
-    "Emulator ": 0.000000,
-    "Emulator ": 0.000000,
     "Capture State 0": 0.000000,
-    "Restore State 0": 0.000000,
-    "Capture State 1": 0.000000,
-    "Restore State 1": 0.000000,
-    "Capture State 2": 0.000000,
-    "Restore State 2": 0.000000,
-    "Capture State 3": 0.000000,
-    "Restore State 3": 0.000000,
-    "Reset Game": 0.000000,
-    "Turbo A": 0.000000,
-    "Turbo B": 0.000000,
-    "Turbo X": 0.000000,
-    "Turbo Y": 0.000000,
-    "Turbo L": 0.000000,
-    "Turbo R": 0.000000,
-    "Solar Sensor+": 0.000000,
-    "Solar Sensor-": 0.000000,
     "Toggle Full Screen": 0.000000
   }
 }
 ```
 
-# /save command
+<sub>The `inputs` object is shortened here, the real response lists every input.</sub>
 
-Saves a save state to a parameter specified "path" on the server.  Returns "ok" on success and "failed" on error. 
+### `/load_rom`
 
-**Example**
-
-```http://localhost:8080/save?path=/tmp/save.png```
-
-**Result:**
-
-A save state is created on the server in /tmp/save.png
-
-```ok```
-
-# /load command
-
-Loads a save state from a parameter specified "path" on the server.  Returns "ok" on success and "failed" on error. 
-
-**Example**
-
-```http://localhost:8080/load?path=/tmp/save.png```
-
-**Result:**
-
-The state of the emulator is restored to where it was at the time the /tmp/save.png save state was taken. 
-
-```ok```
-
-# /load_rom command
-
-Loads a rom from a parameter specified "path" on the server. Can be initially paused by setting the "pause" parameter. Returns "ok" on success.
-
-**Example**
-
-```http://localhost:8080/load_rom?path=/tmp/rom.gba&pause=1```
-
-**Result:**
-
-Loads the rom at /tmp/rom.gba and pauses the emulator.
-
-```ok```
-
-# /cheats command
-
-Lists the current cheats and their status
-
-**Example**
-```http://localhost:8080/cheats```
-
-**Result:**
+| Parameter | Description |
+|---|---|
+| `path` | Path of the ROM on the machine running SkyEmu |
+| `pause` | `1` to load the game paused |
 
 ```
-0 - My first cheat: 12345678 AABBCCDD (enabled)
-1 - My second cheat: 12345678 90ABCDEF (disabled)
+http://localhost:8080/load_rom?path=/tmp/rom.gba&pause=1
+→ ok
 ```
 
-# /remove_cheat command
+### `/run`
 
-Remove one or more cheats
+Unpauses the emulator and runs it at 1× speed.
 
-**Example**
-```http://localhost:8080/remove_cheat?id=0&id=1```
+```
+http://localhost:8080/run
+→ ok
+```
 
-**Result:**
+### `/step`
 
-Removes cheats at index 0 and 1
+Advances the emulator and then pauses it.
 
-```ok```
+| Parameter | Description |
+|---|---|
+| `frames` | Number of frames to emulate, 1 by default |
 
-# /edit_cheat
+```
+http://localhost:8080/step?frames=100
+→ ok
+```
 
-Edits or adds a cheat. If the `id` field is not specified, it will try to add a cheat on the first available id. There's a guarantee for at least 32 cheat slots.
-All of the fields are optional, but at least one field other than `id` must exist. `enabled` defaults to 1.
+### `/screen`
 
-**Example**
-```http://localhost:8080/add_cheat?name=My cheat&code=12345678AABBCCDD&id=0&enabled=1```
+Returns an image of the emulated screen.
 
-**Result:**
+| Parameter | Description |
+|---|---|
+| `format` | `png` (default), `jpg` or `bmp` |
+| `embed_state` | `1` to embed a save state in the PNG, like the files `/save` writes |
 
-The following cheat will be added:
-```0 - My cheat: 12345678 AABBCCDD (enabled)```
+```
+http://localhost:8080/screen?format=jpg
+→ <jpg image>
+```
 
-If a cheat already existed at id 0, because id 0 was specified, the cheat will be overwritten with the new one
+### `/input`
 
-# /setting command (GUI design)
+Sets inputs to a value between `0` (released) and `1` (pressed). An input keeps its value until a later
+`/input` changes it. Every input that has a keybind in the GUI can be set, several per request.
 
-Changes the design of the GUI, see [DESIGN_SYSTEMS.md](DESIGN_SYSTEMS.md). All parameters are optional.
+```
+http://localhost:8080/input?A=1&Up=1     A and Up are pressed
+http://localhost:8080/input?B=1&Up=0     A and B are pressed, Up is released
+http://localhost:8080/input?A=0&B=0      nothing is pressed
+```
 
-- `design`: 0 = platform native, 1 = SkyEmu classic, 2 = Material 3, 3 = Fluent (Windows 11), 4 = Adwaita (GNOME)
-- `color_scheme`: 0 = follow system, 1 = light, 2 = dark, 3 = black
-- `accent`: accent color as hex `RRGGBB`, or `system` to use the accent of the OS
-- `system_font`: 1 = use the platform UI font when available, 0 = bundled font
+Hotkeys work the same way. To capture save state slot 0:
 
-**Example**
-```http://localhost:8080/setting?design=2&color_scheme=1&accent=3584e4```
+```
+http://localhost:8080/input?Capture State 0=1
+http://localhost:8080/step
+http://localhost:8080/input?Capture State 0=0
+```
 
-The current values are reported by `/settings` as `design_system`, `color_scheme`, `use_custom_accent`, `custom_accent` and `use_bundled_font`.
+### `/read_byte`
+
+Reads bytes from the emulated system's memory. Repeat `addr` to read several bytes; they are returned as one hex
+string in request order.
+
+| Parameter | Description |
+|---|---|
+| `addr` | Address in hex |
+| `map` | Address map for the following `addr` parameters. `0` by default; on the DS `7` is the ARM7 and `0` or `9` the ARM9 map. Resets on every request. |
+
+```
+http://localhost:8080/read_byte?addr=02000004
+→ f0
+
+http://localhost:8080/read_byte?addr=02000004&map=7&addr=02000005&addr=02000006
+→ f0bf01          map 0 at 0x02000004, then map 7 at 0x02000005 and 0x02000006
+```
+
+### `/write_byte`
+
+Writes bytes. Each parameter is `<address>=<value>` in hex. `map` works as for [`/read_byte`](#read_byte).
+
+```
+http://localhost:8080/write_byte?02000000=ff&02000001=ee
+→ ok             mem[0x02000000] = 0xff, mem[0x02000001] = 0xee
+```
+
+### `/save`
+
+Writes a save state to `path` on the machine running SkyEmu.
+
+```
+http://localhost:8080/save?path=/tmp/save.png
+→ ok
+```
+
+### `/load`
+
+Restores the save state stored at `path`.
+
+```
+http://localhost:8080/load?path=/tmp/save.png
+→ ok
+```
+
+### `/cheats`
+
+Lists the cheats and whether they are enabled.
+
+```
+http://localhost:8080/cheats
+→ 0 - My first cheat: 12345678 AABBCCDD (enabled)
+  1 - My second cheat: 12345678 90ABCDEF (disabled)
+```
+
+### `/edit_cheat`
+
+Adds or changes a cheat. All parameters are optional, but at least one besides `id` is required. At least 32
+cheat slots are available.
+
+| Parameter | Description |
+|---|---|
+| `id` | Slot to change. Without it, the first free slot is used. |
+| `name` | Name shown in the GUI |
+| `code` | Action Replay code |
+| `enabled` | `1` (default) or `0` |
+
+```
+http://localhost:8080/edit_cheat?name=My cheat&code=12345678AABBCCDD&id=0&enabled=1
+→ ok             0 - My cheat: 12345678 AABBCCDD (enabled)
+```
+
+### `/remove_cheat`
+
+Removes the cheats with the given `id`s.
+
+```
+http://localhost:8080/remove_cheat?id=0&id=1
+→ ok
+```
+
+### `/settings`
+
+Returns every setting as JSON, including `design_system`, `color_scheme`, `use_custom_accent`, `custom_accent`
+and `use_bundled_font`.
+
+```
+http://localhost:8080/settings
+```
+
+### `/setting`
+
+Changes one or more settings. It answers `ok` when a game is loaded and `Failed to load ROM` otherwise, but the
+settings are applied either way.
+
+| Parameter | Values |
+|---|---|
+| `design` | `0` platform native, `1` SkyEmu classic, `2` Material 3, `3` Fluent, `4` Adwaita ([details](DESIGN_SYSTEMS.md)) |
+| `color_scheme` | `0` follow system, `1` light, `2` dark, `3` black |
+| `accent` | Accent color as hex `RRGGBB`, or `system` |
+| `system_font` | `1` platform UI font, `0` bundled font |
+| `theme` | Classic skin: `0` dark, `1` light, `2` black, `3` custom |
+| `language` | Language code such as `en`, `de` or `ja` (locales like `de_DE` work too) |
+| `volume` | `0.0` – `1.0` |
+| `shader` | `0` pixelate, `1` bilinear, `2` LCD, `3` LCD & subpixels, `4` xBRZ |
+| `screen_rotation` | `0`–`3` for 0°, 90°, 180°, 270° |
+| `integer_scaling`, `ghosting`, `color_correction` | Screen options |
+| `gba_color_correction_mode` | `0` SkyEmu, `1` Higan |
+| `nds_layout` | DS screen layout, `0` auto |
+| `gb_palette_0` … `gb_palette_3` | Game Boy palette colors |
+| `force_dmg_mode` | Run Game Boy Color games as original Game Boy |
+| `gui_scale_factor` | GUI scale |
+| `menu`, `menu_bar` | Open the menu, keep the menu bar visible |
+| `ui_type` | `DESKTOP`, `ANDROID`, `IOS` or `WEB` layout |
+| `load_slot`, `capture_slot` | Restore or capture save state slot 0–3 |
+
+Touch control, RetroAchievements and other options use their `/settings` names (for example
+`touch_controls_opacity`, `hardcore_mode`, `enable_download_cache`).
+
+```
+http://localhost:8080/setting?design=2&color_scheme=1&accent=3584e4
+```
+
+### `/show_ui` · `/hide_ui`
+
+Shows or hides the whole SkyEmu GUI, leaving only the game screen.
+
+### `/stretch_on` · `/stretch_off`
+
+Turns *Stretch Screen to Fit* on or off.
+
+### `/load_html` · `/index.html`
+
+`/load_html?path=<file>` loads an HTML file and returns it. Afterwards `/index.html` serves that page, which lets
+a host ship a web remote control for SkyEmu. `pause=1` also pauses the emulator.
+
+### `/external_menu`
+
+Asks the [host app](EMBEDDING.md) to open its own menu (Android, iOS, macOS and the Windows DLL).
