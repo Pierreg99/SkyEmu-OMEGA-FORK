@@ -16,6 +16,11 @@ jobs:
           mkdir build
           cd build
           cmake .. && cmake --build .
+
+      - name: Design token tests 🎨
+        run: |
+          cc -O2 -Wall -Wextra -DSE_PLATFORM_LINUX -Isrc tools/se_design_test.c src/se_design.c -lm -lX11 -o se_design_test
+          ./se_design_test
           
       - name: GH Release 🚀
         # You may pin to the exact commit or the version.

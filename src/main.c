@@ -37,6 +37,7 @@
 #include "cloud.h"
 #include "mutex.h"
 #include "res.h"
+#include "se_design.h"
 #include "sokol_app.h"
 #include "sokol_audio.h"
 #include "sokol_gfx.h"
@@ -244,7 +245,12 @@ typedef struct{
   uint32_t nds_layout; 
   uint32_t touch_screen_show_button_labels;
   uint32_t show_screen_bezel;
-  uint32_t padding[218];
+  uint32_t design_system;     // SE_DESIGN_* (0 = native design of the platform)
+  uint32_t color_scheme;      // SE_COLOR_SCHEME_* (0 = follow the system)
+  uint32_t use_custom_accent; // 0 = system accent (Material You, Windows, GNOME), 1 = custom_accent
+  uint32_t custom_accent;     // 0xRRGGBB
+  uint32_t use_bundled_font;  // 0 = use the platform UI font when it is available, 1 = bundled font
+  uint32_t padding[213];
 }persistent_settings_t; 
 _Static_assert(sizeof(persistent_settings_t)==1024, "persistent_settings_t must be exactly 1024 bytes");
 #define SE_STATS_GRAPH_DATA 256
@@ -521,6 +527,19 @@ typedef struct {
     bool single_panel_mode;    
     //Points to the most recently opened panel. When single panel mode is enabled all other panels should be closed. 
     bool * last_opened_panel;
+    // Platform design system (Material 3, Fluent, Adwaita). Inactive when the classic image skin is used.
+    bool design_active;
+    se_design_tokens_t design;
+    se_system_appearance_t system_appearance;
+    double last_appearance_query;
+    // Appearance pushed by a host app (UWP/WinUI, Android library users) through se_set_system_appearance()
+    bool host_appearance_set;
+    int host_dark;
+    uint32_t host_accent;
+    int loaded_skin_key;  // Skin variant loaded by se_reload_theme() (-1 = layout only skin of the design systems)
+    int font_design_key;  // Design/font combination the font atlas was built for
+    char system_font_path[SB_FILE_PATH_SIZE]; // Platform UI font in use, empty when the bundled font is used
+    int section_text_vtx_start; // First vertex of the text drawn by the last se_section() call
 } gui_state_t;
 
 #define SE_REWIND_BUFFER_SIZE (1024*1024)
@@ -715,8 +734,230 @@ const char* se_localize_and_cache(const char* input_str){
   se_cache_glyphs(localized_string);
   return localized_string;
 }
+/*** Platform design systems (Material 3, Fluent, Adwaita), see se_design.h ***/
+static ImVec4 se_design_vec4(se_color_t c){return (ImVec4){c.r,c.g,c.b,c.a};}
+// Draw list color of a token, honors the global alpha used for disabled widgets
+static ImU32 se_design_u32(se_color_t c){return igGetColorU32Vec4(se_design_vec4(c));}
+static se_color_t se_design_over(se_color_t base, se_color_t over, float alpha){
+  over.a*=alpha;
+  return se_color_blend(base,over);
+}
+static void se_design_push_color(ImGuiCol idx, se_color_t c){igPushStyleColorVec4(idx,se_design_vec4(c));}
+static bool se_design_colors_equal(ImVec4 a, ImVec4 b){return a.x==b.x&&a.y==b.y&&a.z==b.z&&a.w==b.w;}
+// Regions of the image skin that the design systems replace with native looking widgets.
+// The bezel regions stay in use because they drive the screen and controller layout.
+static bool se_theme_region_is_chrome(int region){
+  return region>=SE_REGION_KEY_L&&region<=SE_REGION_KEY_RECT_BLANK_PRESSED;
+}
+static bool se_theme_region_active(int region){
+  if(gui_state.design_active&&se_theme_region_is_chrome(region))return false;
+  return gui_state.theme.regions[region].active;
+}
+// Dear ImGui has a single font weight, a second pass shifted by one point emulates bold
+// (text positions are floored to whole points, smaller offsets would be lost)
+static void se_design_draw_text(ImDrawList* dl, ImVec2 pos, ImU32 col, const char* text, bool bold, float wrap_width){
+  if(bold)ImDrawList_AddTextFontPtr(dl,igGetFont(),igGetFontSize(),(ImVec2){pos.x+1.0f,pos.y},col,text,NULL,wrap_width,NULL);
+  ImDrawList_AddTextFontPtr(dl,igGetFont(),igGetFontSize(),pos,col,text,NULL,wrap_width,NULL);
+}
+static void se_design_draw_text_centered(ImDrawList* dl, ImVec2 min, ImVec2 max, ImU32 col, const char* text, bool bold){
+  ImVec2 size;
+  igCalcTextSize(&size,text,NULL,false,-1);
+  se_design_draw_text(dl,(ImVec2){floorf((min.x+max.x-size.x)*0.5f),floorf((min.y+max.y-size.y)*0.5f)},col,text,bold,0);
+}
+// Push button. Call sites mark a toggled on button by pushing ButtonActive as the Button
+// color, the design systems render that as their selected state.
+static bool se_design_button(const char* label, ImVec2 size){
+  const se_design_tokens_t* t = &gui_state.design;
+  ImGuiStyle* style = igGetStyle();
+  int colors = 0;
+  if(se_design_colors_equal(style->Colors[ImGuiCol_Button],style->Colors[ImGuiCol_ButtonActive])){
+    se_design_push_color(ImGuiCol_Button,t->selected);
+    se_design_push_color(ImGuiCol_ButtonHovered,se_design_over(t->selected,t->on_selected,0.08f));
+    se_design_push_color(ImGuiCol_ButtonActive,se_design_over(t->selected,t->on_selected,0.12f));
+    se_design_push_color(ImGuiCol_Text,t->on_selected);
+    colors = 4;
+  }
+  igPushStyleVarFloat(ImGuiStyleVar_FrameRounding,t->button_rounding);
+  bool result = igButton(label,size);
+  igPopStyleVar(1);
+  igPopStyleColor(colors);
+  return result;
+}
+// Standard icon button that shows its toggled state with a tonal container
+static bool se_design_icon_toggle(const char* icon, ImVec2 size, bool selected){
+  const se_design_tokens_t* t = &gui_state.design;
+  se_color_t bg = selected? t->secondary_container : (se_color_t){0,0,0,0};
+  se_color_t fg = selected? t->on_secondary_container : t->on_surface_variant;
+  se_design_push_color(ImGuiCol_Button,bg);
+  se_design_push_color(ImGuiCol_ButtonHovered,se_design_over(bg,fg,0.08f));
+  se_design_push_color(ImGuiCol_ButtonActive,se_design_over(bg,fg,0.12f));
+  se_design_push_color(ImGuiCol_Text,fg);
+  igPushStyleVarFloat(ImGuiStyleVar_FrameRounding,t->button_rounding);
+  igPushStyleVarFloat(ImGuiStyleVar_FrameBorderSize,0);
+  bool result = igButton(icon,size);
+  igPopStyleVar(2);
+  igPopStyleColor(4);
+  return result;
+}
+// One segment of a button group: Material segmented button, Fluent and libadwaita linked toggles
+static bool se_design_segment(const char* label, ImVec2 size, bool selected, int index, int count, float spacing){
+  const se_design_tokens_t* t = &gui_state.design;
+  ImDrawList* dl = igGetWindowDrawList();
+  ImVec2 p;
+  igGetCursorScreenPos(&p);
+  igPushIDInt(index);
+  bool pressed = igInvisibleButton("##segment",size,ImGuiButtonFlags_None);
+  bool hovered = igIsItemHovered(ImGuiHoveredFlags_None);
+  bool held = igIsItemActive();
+  igPopID();
+  float inset = size.y>=22? 2.f : 0.f;
+  p.y+=inset;
+  ImVec2 max = {p.x+size.x,p.y+size.y-inset*2};
+  float r = fminf(t->button_rounding,(max.y-p.y)*0.5f);
+  ImDrawCornerFlags corners = (index==0? ImDrawCornerFlags_Left:0)|(index==count-1? ImDrawCornerFlags_Right:0);
+  bool outlined = t->design==SE_DESIGN_MATERIAL3;
+  if(selected)ImDrawList_AddRectFilled(dl,p,max,se_design_u32(outlined? t->secondary_container : t->selected),r,corners);
+  else if(!outlined)ImDrawList_AddRectFilled(dl,p,max,se_design_u32(t->control),r,corners);
+  if(held||hovered)ImDrawList_AddRectFilled(dl,p,max,se_design_u32(held? t->state_press : t->state_hover),r,corners);
+  se_color_t stroke = outlined? t->outline : t->outline_variant;
+  if(outlined||t->control_border>0){
+    if(index>0)ImDrawList_AddLine(dl,(ImVec2){p.x-spacing*0.5f,p.y},(ImVec2){p.x-spacing*0.5f,max.y},se_design_u32(stroke),1.0f);
+    if(index==count-1){
+      // Outline of the whole group, drawn last so fills do not cover it
+      float group_x = p.x-(size.x+spacing)*(count-1);
+      ImDrawList_AddRect(dl,(ImVec2){group_x+0.5f,p.y+0.5f},(ImVec2){max.x-0.5f,max.y-0.5f},se_design_u32(stroke),r,ImDrawCornerFlags_All,1.0f);
+    }
+  }
+  se_color_t fg = t->on_surface;
+  if(selected)fg = outlined? t->on_secondary_container : t->on_selected;
+  se_design_draw_text_centered(dl,p,max,se_design_u32(fg),label,false);
+  return pressed;
+}
+// Slider with a track, an active track and a thumb. The value is drawn after the track
+// when there is room for it, otherwise in a value indicator while dragging.
+static bool se_design_slider(const char* label, float* v, float v_min, float v_max, const char* format){
+  const se_design_tokens_t* t = &gui_state.design;
+  ImDrawList* dl = igGetWindowDrawList();
+  float w = igCalcItemWidth();
+  float h = igGetFrameHeight();
+  char value[128];
+  snprintf(value,sizeof(value),format,*v);
+  ImVec2 ts;
+  igCalcTextSize(&ts,value,NULL,false,-1);
+  ImVec2 p;
+  igGetCursorScreenPos(&p);
+  igPushIDStr(label);
+  igInvisibleButton("##slider",(ImVec2){w,h},ImGuiButtonFlags_None);
+  bool hovered = igIsItemHovered(ImGuiHoveredFlags_None);
+  bool active = igIsItemActive();
+  igPopID();
+  float r = fminf(t->slider_thumb_r,h*0.5f-1.f);
+  float gap = 8;
+  bool inline_value = w-ts.x-gap-r*2>=48;
+  float x0 = p.x+r, x1 = p.x+w-r-(inline_value? ts.x+gap : 0);
+  bool changed = false;
+  if(active&&x1>x0&&v_max!=v_min){
+    float f = (igGetIO()->MousePos.x-x0)/(x1-x0);
+    float new_v = v_min+(f<0? 0 : f>1? 1 : f)*(v_max-v_min);
+    if(new_v!=*v){*v = new_v; changed = true;}
+  }
+  float f = v_max!=v_min? (*v-v_min)/(v_max-v_min) : 0;
+  f = f<0? 0 : f>1? 1 : f;
+  float cx = x0+f*(x1-x0), cy = p.y+h*0.5f, th = t->slider_track_h*0.5f;
+  se_color_t rail = t->design==SE_DESIGN_MATERIAL3? t->secondary_container : t->design==SE_DESIGN_FLUENT? t->outline : t->outline_variant;
+  ImDrawList_AddRectFilled(dl,(ImVec2){x0-th,cy-th},(ImVec2){x1+th,cy+th},se_design_u32(rail),th,ImDrawCornerFlags_All);
+  ImDrawList_AddRectFilled(dl,(ImVec2){x0-th,cy-th},(ImVec2){cx,cy+th},se_design_u32(t->primary),th,ImDrawCornerFlags_All);
+  if(t->thumb_ring){
+    // Fluent: solid knob with an accent dot that grows on hover and shrinks while dragging
+    se_color_t knob = se_color_from_rgb(t->dark? 0x454545:0xFFFFFF,1);
+    ImDrawList_AddCircleFilled(dl,(ImVec2){cx,cy},r,se_design_u32(knob),32);
+    ImDrawList_AddCircle(dl,(ImVec2){cx,cy},r,se_design_u32(t->outline_variant),32,1.0f);
+    ImDrawList_AddCircleFilled(dl,(ImVec2){cx,cy},r*(active? 0.45f : hovered? 0.65f : 0.55f),se_design_u32(t->primary),32);
+  }else if(t->thumb_light){
+    // libadwaita: light knob with a soft shadow
+    ImDrawList_AddCircleFilled(dl,(ImVec2){cx,cy+1},r,se_design_u32((se_color_t){0,0,0,0.2f}),32);
+    ImDrawList_AddCircleFilled(dl,(ImVec2){cx,cy},r,se_design_u32(se_color_from_rgb(active? 0xF0F0F0:0xFFFFFF,1)),32);
+    ImDrawList_AddCircle(dl,(ImVec2){cx,cy},r,se_design_u32((se_color_t){0,0,0,0.12f}),32,1.0f);
+  }else{
+    // Material: filled handle with a state layer halo
+    if(hovered||active)ImDrawList_AddCircleFilled(dl,(ImVec2){cx,cy},r*1.7f,se_design_u32(se_design_over((se_color_t){0,0,0,0},t->primary,active? 0.12f:0.08f)),32);
+    ImDrawList_AddCircleFilled(dl,(ImVec2){cx,cy},r,se_design_u32(t->primary),32);
+  }
+  if(inline_value){
+    se_design_draw_text(dl,(ImVec2){p.x+w-ts.x,floorf(cy-ts.y*0.5f)},se_design_u32(t->on_surface_variant),value,false,0);
+  }else if(hovered||active){
+    ImDrawList* fg = igGetForegroundDrawListNil();
+    float pad = 6;
+    ImVec2 bmin = {floorf(cx-ts.x*0.5f-pad),p.y+h+4};
+    ImVec2 bmax = {bmin.x+ts.x+pad*2,bmin.y+ts.y+pad};
+    ImDrawList_AddRectFilled(fg,bmin,bmax,se_design_u32(se_design_over(t->surface_panel,t->on_surface,1.0f)),(bmax.y-bmin.y)*0.5f,ImDrawCornerFlags_All);
+    se_design_draw_text(fg,(ImVec2){bmin.x+pad,bmin.y+pad*0.5f},se_design_u32(t->surface_panel),value,false,0);
+  }
+  return changed;
+}
+static void se_design_section(const char* text){
+  const se_design_tokens_t* t = &gui_state.design;
+  ImDrawList* dl = igGetWindowDrawList();
+  ImGuiStyle* style = igGetStyle();
+  // Call sites may push a Text color to tint the title (e.g. mastered RetroAchievements games)
+  ImVec4 pushed = *igGetStyleColorVec4(ImGuiCol_Text);
+  se_color_t col = t->section_accent? t->accent_text : t->on_surface;
+  if(!se_design_colors_equal(pushed,se_design_vec4(t->on_surface)))col = (se_color_t){pushed.x,pushed.y,pushed.z,pushed.w};
+  ImVec2 p, avail, start;
+  igGetCursorScreenPos(&p);
+  igGetContentRegionAvail(&avail);
+  igGetCursorStartPos(&start);
+  bool first_item = igGetCursorPosY()<=start.y+1.0f;
+  if(!first_item){
+    if(t->section_divider){
+      float y = floorf(p.y+style->ItemSpacing.y*0.5f)+0.5f;
+      ImDrawList_AddLine(dl,(ImVec2){p.x,y},(ImVec2){p.x+avail.x,y},se_design_u32(t->outline_variant),1.0f);
+    }
+    igDummy((ImVec2){0,style->ItemSpacing.y});
+  }
+  igGetCursorScreenPos(&p);
+  ImVec2 ts;
+  igCalcTextSize(&ts,text,NULL,false,avail.x);
+  gui_state.section_text_vtx_start = dl->VtxBuffer.Size;
+  se_design_draw_text(dl,p,se_design_u32(col),text,t->section_bold,avail.x);
+  igDummy(ts);
+}
 bool se_checkbox(const char* label, bool * v){
-  return igCheckbox(se_localize_and_cache(label),v);
+  label = se_localize_and_cache(label);
+  if(!gui_state.design_active)return igCheckbox(label,v);
+  const se_design_tokens_t* t = &gui_state.design;
+  // Checkboxes are ~18px boxes in all three design systems, not full height frames
+  float pad_y = (18.f-igGetFontSize())*0.5f;
+  if(pad_y<1.f)pad_y = 1.f;
+  igPushStyleVarVec2(ImGuiStyleVar_FramePadding,(ImVec2){igGetStyle()->FramePadding.x,pad_y});
+  igPushStyleVarFloat(ImGuiStyleVar_FrameRounding,t->check_rounding);
+  if(*v){
+    igPushStyleVarFloat(ImGuiStyleVar_FrameBorderSize,0);
+    se_design_push_color(ImGuiCol_FrameBg,t->primary);
+    se_design_push_color(ImGuiCol_FrameBgHovered,se_design_over(t->primary,t->on_primary,0.08f));
+    se_design_push_color(ImGuiCol_FrameBgActive,se_design_over(t->primary,t->on_primary,0.12f));
+  }else{
+    igPushStyleVarFloat(ImGuiStyleVar_FrameBorderSize,t->check_border);
+    se_design_push_color(ImGuiCol_FrameBg,(se_color_t){0,0,0,0});
+    se_design_push_color(ImGuiCol_FrameBgHovered,t->state_hover);
+    se_design_push_color(ImGuiCol_FrameBgActive,t->state_press);
+  }
+  se_design_push_color(ImGuiCol_CheckMark,t->on_primary);
+  se_design_push_color(ImGuiCol_Border,t->design==SE_DESIGN_MATERIAL3? t->on_surface_variant : t->outline);
+  bool result = igCheckbox(label,v);
+  igPopStyleColor(5);
+  igPopStyleVar(3);
+  return result;
+}
+// Combo boxes draw their arrow with the Button colors, the design systems use one uniform field
+static void se_design_push_combo_style(){
+  if(!gui_state.design_active)return;
+  ImGuiStyle* style = igGetStyle();
+  igPushStyleColorVec4(ImGuiCol_Button,style->Colors[ImGuiCol_FrameBg]);
+  igPushStyleColorVec4(ImGuiCol_ButtonHovered,style->Colors[ImGuiCol_FrameBgHovered]);
+}
+static void se_design_pop_combo_style(){
+  if(gui_state.design_active)igPopStyleColor(2);
 }
 void se_text(const char* label,...){
   va_list args;
@@ -727,9 +968,21 @@ void se_text(const char* label,...){
 static void se_text_disabled(const char* label,...){
   va_list args;
   va_start(args, label);
-  se_push_disabled();
+  // Secondary text. The design systems draw it with their secondary text color, not faded out.
+  if(gui_state.design_active)igPushStyleColorVec4(ImGuiCol_Text,igGetStyle()->Colors[ImGuiCol_TextDisabled]);
+  else se_push_disabled();
   igTextWrappedV(se_localize_and_cache(label),args);
-  se_pop_disabled();
+  if(gui_state.design_active)igPopStyleColor(1);
+  else se_pop_disabled();
+  va_end(args);
+}
+// Label of a settings row. In the design systems it is aligned with the taller framed widget that
+// follows it on the same line (classic rows keep their original layout).
+static void se_field_label(const char* label,...){
+  if(gui_state.design_active)igAlignTextToFramePadding();
+  va_list args;
+  va_start(args, label);
+  igTextWrappedV(se_localize_and_cache(label),args);
   va_end(args);
 }
 static bool se_combo_str(const char* label,int* current_item,const char* items_separated_by_zeros,int popup_max_height_in_items){
@@ -741,7 +994,10 @@ static bool se_combo_str(const char* label,int* current_item,const char* items_s
     tmp_string+=strlen(tmp_string)+1;
     number_of_strings++;
   }
-  return igComboStr_arr(se_localize_and_cache(label),current_item,localized_combo_options,number_of_strings,popup_max_height_in_items);
+  se_design_push_combo_style();
+  bool result = igComboStr_arr(se_localize_and_cache(label),current_item,localized_combo_options,number_of_strings,popup_max_height_in_items);
+  se_design_pop_combo_style();
+  return result;
 }
 static bool se_input_int(const char* label,int* v,int step,int step_fast,ImGuiInputTextFlags flags){
   return igInputInt(se_localize_and_cache(label),v,step,step_fast,flags);
@@ -777,16 +1033,22 @@ void se_section(const char* label,...){
   va_start(args, label);
   vsnprintf(buffer,sizeof(buffer),se_localize_and_cache(label),args);
   va_end(args);
+  if(gui_state.design_active){
+    se_design_section(buffer);
+    return;
+  }
   ImVec2 text_size; 
   igCalcTextSize(&text_size,buffer,NULL,false,b_max.x-b_min.x);
 
   b_max.y = b_min.y+text_size.y+style->FramePadding.y * 2.0f; 
   
   ImDrawList_AddRectFilled(dl,b_min,b_max,igGetColorU32Col(ImGuiCol_TitleBg,1.0),0,ImDrawCornerFlags_None);
+  gui_state.section_text_vtx_start = dl->VtxBuffer.Size;
   igTextWrapped("%s",buffer);
 }
 static bool se_button_themed(int region, const char* label, ImVec2 size, bool always_draw_label){
   label=se_localize_and_cache(label);
+  if(gui_state.design_active)return se_design_button(label,size);
   ImVec2 label_size;
   igCalcTextSize(&label_size,label, NULL, true,-1.0);
   ImGuiStyle * style = igGetStyle();
@@ -799,7 +1061,7 @@ static bool se_button_themed(int region, const char* label, ImVec2 size, bool al
   pos.x+=v.x-igGetScrollX();
   pos.y+=v.y-igGetScrollY();
   ImGuiStyle restore_style = *style;
-  if(gui_state.theme.regions[region].active){
+  if(se_theme_region_active(region)){
     for(int i=0;i<ImGuiCol_COUNT;++i)style->Colors[i].w = 0.;
     if(always_draw_label){
       style->Colors[ImGuiCol_Text] = restore_style.Colors[ImGuiCol_Text];
@@ -851,6 +1113,7 @@ bool se_slider_float_themed(const char* label, float* p_data, float p_min, float
 
   label = se_localize_and_cache(label);
   format = se_localize_and_cache(format);
+  if(gui_state.design_active)return se_design_slider(label,p_data,p_min,p_max,format);
   const float w = igCalcItemWidth();
 
   ImVec2 label_size;
@@ -872,7 +1135,7 @@ bool se_slider_float_themed(const char* label, float* p_data, float p_min, float
   frame_size.x+=frame_size.x*bar_growth;
   frame_size.y+=frame_size.y*bar_growth;
 
-  if( gui_state.theme.regions[SE_REGION_VOL_EMPTY].active){
+  if(se_theme_region_active(SE_REGION_VOL_EMPTY)){
     for(int i=0;i<ImGuiCol_COUNT;++i)style->Colors[i].w = 0.;
     style->Colors[ImGuiCol_Text] = restore_style.Colors[ImGuiCol_Text];
     style->Colors[ImGuiCol_TextDisabled] = restore_style.Colors[ImGuiCol_TextDisabled];
@@ -917,7 +1180,7 @@ bool se_button(const char* label, ImVec2 size){
 }
 static bool se_input_path(const char* label, char* new_path, ImGuiInputTextFlags flags){
   int win_w = igGetWindowWidth();
-  se_text(label);igSameLine(SE_FIELD_INDENT,0);
+  se_field_label(label);igSameLine(SE_FIELD_INDENT,0);
   igPushIDStr(label);
   bool read_only = (flags&ImGuiInputTextFlags_ReadOnly)!=0;
   float button_w = 25; 
@@ -956,7 +1219,7 @@ static bool se_input_path(const char* label, char* new_path, ImGuiInputTextFlags
 }
 static bool se_input_file_callback(const char* label, char* new_path, const char**types,void (*file_open_fn)(const char*), ImGuiInputTextFlags flags){
   int win_w = igGetWindowWidth();
-  se_text(label);igSameLine(SE_FIELD_INDENT,0);
+  se_field_label(label);igSameLine(SE_FIELD_INDENT,0);
   igPushIDStr(label);
   bool read_only = (flags&ImGuiInputTextFlags_ReadOnly)!=0;
   float button_w = 25; 
@@ -1003,9 +1266,14 @@ static void se_tooltip(const char * tooltip){
   }
 }
 static void se_panel_toggle(int region, bool * is_open, const char* icon, const char* tooltip ){
-  if(gui_state.theme.regions[region].active==false)region = SE_REGION_BLANK;
+  if(se_theme_region_active(region)==false)region = SE_REGION_BLANK;
   igPushIDStr(icon);
-  if(*is_open){
+  if(gui_state.design_active){
+    if(se_design_icon_toggle(icon,(ImVec2){SE_MENU_BAR_BUTTON_WIDTH,show_ui?SE_MENU_BAR_HEIGHT:0},*is_open)){
+      *is_open = !*is_open;
+      if(*is_open)gui_state.last_opened_panel = is_open;
+    }
+  }else if(*is_open){
     igPushStyleColorVec4(ImGuiCol_Button, igGetStyle()->Colors[ImGuiCol_ButtonActive]);
     if (se_button_themed(region + 2, icon, (ImVec2) { SE_MENU_BAR_BUTTON_WIDTH, show_ui ? SE_MENU_BAR_HEIGHT : 0 }, region != SE_REGION_MENU)) { *is_open = !*is_open; }
     igPopStyleColor(1);
@@ -2688,6 +2956,33 @@ SKYEMU_API uint32_t se_get_theme(void) {
     return gui_state.settings.theme;
 }
 
+SKYEMU_API void se_set_design_system(uint32_t design) {
+    gui_state.settings.design_system = design<SE_DESIGN_COUNT? design : SE_DESIGN_AUTO;
+}
+SKYEMU_API uint32_t se_get_design_system(void) {
+    return gui_state.settings.design_system;
+}
+SKYEMU_API void se_set_color_scheme(uint32_t scheme) {
+    gui_state.settings.color_scheme = scheme<SE_COLOR_SCHEME_COUNT? scheme : SE_COLOR_SCHEME_SYSTEM;
+}
+SKYEMU_API uint32_t se_get_color_scheme(void) {
+    return gui_state.settings.color_scheme;
+}
+SKYEMU_API void se_set_accent_color(uint32_t rgb) {
+    gui_state.settings.use_custom_accent = rgb!=SE_ACCENT_NONE;
+    if(gui_state.settings.use_custom_accent)gui_state.settings.custom_accent = rgb&0xffffff;
+}
+SKYEMU_API uint32_t se_get_accent_color(void) {
+    return gui_state.settings.use_custom_accent? gui_state.settings.custom_accent&0xffffff : SE_ACCENT_NONE;
+}
+SKYEMU_API void se_set_system_appearance(int dark, uint32_t accent_rgb) {
+    gui_state.host_appearance_set = true;
+    gui_state.host_dark = dark<0? -1 : dark!=0;
+    gui_state.host_accent = accent_rgb==SE_ACCENT_NONE? SE_ACCENT_NONE : accent_rgb&0xffffff;
+    // Re-query on the next frame so the change is applied right away
+    gui_state.last_appearance_query = 0;
+}
+
 SKYEMU_API void se_set_gb_palette(int index, uint32_t color) {
     if (index >= 0 && index < 4) gui_state.settings.gb_palette[index] = color;
 }
@@ -4247,7 +4542,7 @@ bool se_handle_keybind_settings(int keybind_type, se_keybind_state_t * state){
   bool settings_changed = false; 
   for(int k=0;k<num_keybinds;++k){
     igPushIDInt(k);
-    se_text("%s",se_localize_and_cache(button_labels[k]));
+    se_field_label("%s",se_localize_and_cache(button_labels[k]));
     float active = (state->value[k])>0.4;
     igSameLine(SE_FIELD_INDENT,0);
     if(state->bind_being_set==k)active=true;
@@ -4326,6 +4621,102 @@ bool se_handle_keybind_settings(int keybind_type, se_keybind_state_t * state){
   } 
   igPopID();
   return settings_changed;
+}
+// Touch controls of the design systems: tonal buttons that fill with the accent while pressed.
+// hold/turbo mark buttons latched by the Hold and Turbo modifiers.
+static void se_design_touch_colors(bool pressed, bool hold, bool turbo, float opacity, ImU32* fill, ImU32* stroke, ImU32* label){
+  const se_design_tokens_t* t = &gui_state.design;
+  bool material = t->design==SE_DESIGN_MATERIAL3;
+  se_color_t f = material? t->secondary_container : se_color_blend(t->background,t->surface_popup);
+  se_color_t l = material? t->on_secondary_container : t->on_surface;
+  float fill_alpha = opacity;
+  if(hold){
+    f = se_color_blend(f,t->tertiary_container);
+    l = t->on_tertiary_container;
+  }
+  if(pressed||turbo){
+    f = t->primary;
+    l = t->on_primary;
+    fill_alpha = fminf(1.f,opacity*1.6f);
+  }
+  f.a*=fill_alpha;
+  l.a*=fminf(1.f,opacity*1.8f);
+  se_color_t s = t->outline_variant;
+  s.a = material? 0 : fminf(1.f,s.a*opacity*4.f);
+  *fill = se_design_u32(f);
+  *stroke = se_design_u32(s);
+  *label = se_design_u32(l);
+}
+static float se_design_touch_rounding(float h){
+  switch(gui_state.design.design){
+    case SE_DESIGN_FLUENT: return fminf(8.f,h*0.5f);
+    case SE_DESIGN_ADWAITA: return fminf(12.f,h*0.5f);
+  }
+  return h*0.5f;
+}
+static void se_design_draw_touch_label(ImDrawList* dl, float cx, float cy, float max_h, float max_w, ImU32 col, const char* label){
+  if(!label||!label[0])return;
+  ImFont* font = igGetFont();
+  float size = fminf(max_h,28.f);
+  ImVec2 ts;
+  ImFont_CalcTextSizeA(&ts,font,size,1e30f,0,label,NULL,NULL);
+  if(ts.x>max_w&&ts.x>0){
+    float k = max_w/ts.x;
+    size*=k; ts.x*=k; ts.y*=k;
+  }
+  ImDrawList_AddTextFontPtr(dl,font,size,(ImVec2){floorf(cx-ts.x*0.5f),floorf(cy-ts.y*0.5f)},col,label,NULL,0,NULL);
+}
+static void se_design_draw_touch_rect(ImDrawList* dl, float x, float y, float w, float h, const char* label, bool pressed, bool hold, bool turbo, float opacity){
+  ImU32 fill, stroke, text;
+  se_design_touch_colors(pressed,hold,turbo,opacity,&fill,&stroke,&text);
+  float r = se_design_touch_rounding(h);
+  ImDrawList_AddRectFilled(dl,(ImVec2){x,y},(ImVec2){x+w,y+h},fill,r,ImDrawCornerFlags_All);
+  ImDrawList_AddRect(dl,(ImVec2){x,y},(ImVec2){x+w,y+h},stroke,r,ImDrawCornerFlags_All,1.0f);
+  se_design_draw_touch_label(dl,x+w*0.5f,y+h*0.5f,h*0.45f,w*0.8f,text,label);
+}
+static void se_design_draw_touch_round(ImDrawList* dl, float cx, float cy, float r, const char* label, bool pressed, bool hold, bool turbo, float opacity){
+  ImU32 fill, stroke, text;
+  se_design_touch_colors(pressed,hold,turbo,opacity,&fill,&stroke,&text);
+  ImDrawList_AddCircleFilled(dl,(ImVec2){cx,cy},r,fill,64);
+  ImDrawList_AddCircle(dl,(ImVec2){cx,cy},r,stroke,64,1.0f);
+  se_design_draw_touch_label(dl,cx,cy,r*0.9f,r*1.4f,text,label);
+}
+// D-pad as a rounded cross. arm is half the width of an arm, len half the size of the pad.
+static void se_design_draw_touch_dpad(ImDrawList* dl, float cx, float cy, float arm, float len, int dpad_code, float opacity){
+  ImU32 fill, stroke, text, pressed_fill, pressed_stroke, pressed_text;
+  se_design_touch_colors(false,false,false,opacity,&fill,&stroke,&text);
+  se_design_touch_colors(true,false,false,opacity,&pressed_fill,&pressed_stroke,&pressed_text);
+  float r = fminf(se_design_touch_rounding(arm*2.f),arm);
+  // Only the outer corners of the side arms are rounded so the pieces join without seams
+  ImDrawList_AddRectFilled(dl,(ImVec2){cx-arm,cy-len},(ImVec2){cx+arm,cy+len},fill,r,ImDrawCornerFlags_All);
+  ImDrawList_AddRectFilled(dl,(ImVec2){cx-len,cy-arm},(ImVec2){cx-arm,cy+arm},fill,r,ImDrawCornerFlags_Left);
+  ImDrawList_AddRectFilled(dl,(ImVec2){cx+arm,cy-arm},(ImVec2){cx+len,cy+arm},fill,r,ImDrawCornerFlags_Right);
+  bool up = dpad_code<3, down = dpad_code>=6, left = dpad_code%3==0, right = dpad_code%3==2;
+  if(up)   ImDrawList_AddRectFilled(dl,(ImVec2){cx-arm,cy-len},(ImVec2){cx+arm,cy-arm},pressed_fill,r,ImDrawCornerFlags_Top);
+  if(down) ImDrawList_AddRectFilled(dl,(ImVec2){cx-arm,cy+arm},(ImVec2){cx+arm,cy+len},pressed_fill,r,ImDrawCornerFlags_Bot);
+  if(left) ImDrawList_AddRectFilled(dl,(ImVec2){cx-len,cy-arm},(ImVec2){cx-arm,cy+arm},pressed_fill,r,ImDrawCornerFlags_Left);
+  if(right)ImDrawList_AddRectFilled(dl,(ImVec2){cx+arm,cy-arm},(ImVec2){cx+len,cy+arm},pressed_fill,r,ImDrawCornerFlags_Right);
+  // Direction chevrons
+  float s = arm*0.4f, d = (len+arm)*0.5f;
+  ImDrawList_AddTriangleFilled(dl,(ImVec2){cx,cy-d-s*0.6f},(ImVec2){cx-s,cy-d+s*0.6f},(ImVec2){cx+s,cy-d+s*0.6f},up? pressed_text:text);
+  ImDrawList_AddTriangleFilled(dl,(ImVec2){cx,cy+d+s*0.6f},(ImVec2){cx+s,cy+d-s*0.6f},(ImVec2){cx-s,cy+d-s*0.6f},down? pressed_text:text);
+  ImDrawList_AddTriangleFilled(dl,(ImVec2){cx-d-s*0.6f,cy},(ImVec2){cx-d+s*0.6f,cy+s},(ImVec2){cx-d+s*0.6f,cy-s},left? pressed_text:text);
+  ImDrawList_AddTriangleFilled(dl,(ImVec2){cx+d+s*0.6f,cy},(ImVec2){cx+d-s*0.6f,cy-s},(ImVec2){cx+d-s*0.6f,cy+s},right? pressed_text:text);
+}
+static const char* se_design_touch_label_for(int input_id, int hold_id, int turbo_id){
+  if(input_id==hold_id)return ICON_FK_SNOWFLAKE_O;
+  if(input_id==turbo_id)return ICON_FK_BOLT;
+  switch(input_id){
+    case SE_KEY_A: return "A";
+    case SE_KEY_B: return "B";
+    case SE_KEY_X: return "X";
+    case SE_KEY_Y: return "Y";
+    case SE_KEY_L: return "L";
+    case SE_KEY_R: return "R";
+    case SE_KEY_START: return "START";
+    case SE_KEY_SELECT: return "SELECT";
+  }
+  return NULL;
 }
 void se_draw_onscreen_controller(sb_emu_state_t*state, int mode, float win_x, float win_y, float win_w, float win_h, bool preview, bool center){  
   if (!show_ui)
@@ -4504,6 +4895,11 @@ void se_draw_onscreen_controller(sb_emu_state_t*state, int mode, float win_x, fl
         if(pressed){
           se_draw_theme_region_tint(fallback_region,x,y,w,h,sel_color);
         }
+      }else if(gui_state.design_active){
+        bool hold = SB_BFE(gui_state.touch_controls.hold_toggle,bi,1)||(b->input_id==SE_KEY_HOLD&&gui_state.touch_controls.hold_toggle);
+        bool turbo = SB_BFE(gui_state.touch_controls.turbo_toggle,bi,1)||(b->input_id==SE_KEY_TURBO&&gui_state.touch_controls.turbo_toggle);
+        const char* label = show_labels? se_design_touch_label_for(b->input_id,SE_KEY_HOLD,SE_KEY_TURBO) : NULL;
+        se_design_draw_touch_rect(dl,x,y,w,h,label,pressed,hold,turbo&&press_turbo,opacity);
       }else{
         ImDrawList_AddRect(dl,(ImVec2){x,y},(ImVec2){x+w,y+h},line_color2,0,ImDrawCornerFlags_None,line_w1);  
         ImDrawList_AddRect(dl,(ImVec2){x,y},(ImVec2){x+w,y+h},col,0,ImDrawCornerFlags_None,line_w0);  
@@ -4573,6 +4969,11 @@ void se_draw_onscreen_controller(sb_emu_state_t*state, int mode, float win_x, fl
                                                r*2*themed_scale,
                                                r*2*themed_scale,
                                                sel_color);
+      }else if(gui_state.design_active){
+        bool hold = SB_BFE(gui_state.touch_controls.hold_toggle,bi,1);
+        bool turbo = SB_BFE(gui_state.touch_controls.turbo_toggle,bi,1);
+        const char* label = show_labels? se_design_touch_label_for(b->input_id,SE_KEY_HOLD,SE_KEY_TURBO) : NULL;
+        se_design_draw_touch_round(dl,pos[0],pos[1],r,label,pressed,hold,turbo&&press_turbo,opacity);
       }else{
         if(pressed)  ImDrawList_AddCircleFilled(dl,(ImVec2){pos[0],pos[1]},r,sel_color,128);
         ImDrawList_AddCircle(dl,(ImVec2){pos[0],pos[1]},r,line_color2,128,line_w1);
@@ -4616,6 +5017,9 @@ void se_draw_onscreen_controller(sb_emu_state_t*state, int mode, float win_x, fl
                                       dpad_sz1*2*themed_scale,
                                       dpad_sz1*2*themed_scale,
                                       line_color)){
+          if(gui_state.design_active){
+            se_design_draw_touch_dpad(dl,dpad_pos[0],dpad_pos[1],dpad_sz0,dpad_sz1,draw_dpad_code,opacity);
+          }else{
           ImVec2 dpad_points[12]={
             //Up
             {dpad_pos[0]-dpad_sz0,dpad_pos[1]+dpad_sz0},
@@ -4636,14 +5040,17 @@ void se_draw_onscreen_controller(sb_emu_state_t*state, int mode, float win_x, fl
           };
           ImDrawList_AddPolyline(dl,dpad_points,12,line_color2,true,line_w1);
           ImDrawList_AddPolyline(dl,dpad_points,12,line_color,true,line_w0);
+          }
         }
         
         
+        if(!gui_state.design_active){
         if(draw_dpad_code>=6) ImDrawList_AddRectFilled(dl,(ImVec2){dpad_pos[0]-dpad_sz0,dpad_pos[1]+dpad_sz0},(ImVec2){dpad_pos[0]+dpad_sz0,dpad_pos[1]+dpad_sz1},sel_color,0,ImDrawCornerFlags_None);
         if(draw_dpad_code<3)   ImDrawList_AddRectFilled(dl,(ImVec2){dpad_pos[0]-dpad_sz0,dpad_pos[1]-dpad_sz1},(ImVec2){dpad_pos[0]+dpad_sz0,dpad_pos[1]-dpad_sz0},sel_color,0,ImDrawCornerFlags_None);
         
         if((draw_dpad_code%3)==0) ImDrawList_AddRectFilled(dl,(ImVec2){dpad_pos[0]-dpad_sz1,dpad_pos[1]-dpad_sz0},(ImVec2){dpad_pos[0]-dpad_sz0,dpad_pos[1]+dpad_sz0},sel_color,0,ImDrawCornerFlags_None);
         if((draw_dpad_code%3)==2)ImDrawList_AddRectFilled(dl,(ImVec2){dpad_pos[0]+dpad_sz0,dpad_pos[1]-dpad_sz0},(ImVec2){dpad_pos[0]+dpad_sz1,dpad_pos[1]+dpad_sz0},sel_color,0,ImDrawCornerFlags_None);
+        }
       }
       if(dpad_code!=4){
         if((dpad_code%3)==0)state->joy.inputs[SE_KEY_LEFT]+=1.0;
@@ -4698,7 +5105,13 @@ void se_text_centered_in_box(ImVec2 p, ImVec2 size, const char* text){
   curr_cursor_screen.x+=p.x;
   curr_cursor_screen.y+=p.y;
   ImU32 color = igColorConvertFloat4ToU32(igGetStyle()->Colors[ImGuiCol_ButtonActive]);
-  if(se_draw_theme_region(SE_REGION_BLANK,curr_cursor_screen.x,curr_cursor_screen.y,size.x,size.y)==0){
+  if(gui_state.design_active){
+    // Leading icon container of a list item
+    const se_design_tokens_t* t = &gui_state.design;
+    ImDrawList_AddRectFilled(igGetWindowDrawList(),curr_cursor_screen,(ImVec2){curr_cursor_screen.x+size.x,curr_cursor_screen.y+size.y},
+                             se_design_u32(t->primary_container),fminf(t->card_rounding,size.y*0.3f),ImDrawCornerFlags_All);
+    se_design_push_color(ImGuiCol_Text,t->on_primary_container);
+  }else if(se_draw_theme_region(SE_REGION_BLANK,curr_cursor_screen.x,curr_cursor_screen.y,size.x,size.y)==0){
     ImDrawList_AddRectFilled(igGetWindowDrawList(),curr_cursor_screen,(ImVec2){curr_cursor_screen.x+size.x,curr_cursor_screen.y+size.y},color,0,ImDrawCornerFlags_None);
   }
 
@@ -4709,6 +5122,7 @@ void se_text_centered_in_box(ImVec2 p, ImVec2 size, const char* text){
   curr_cursor.y+=(size.y-text_sz.y)*0.5;
   igSetCursorPos(curr_cursor);
   se_text(text);
+  if(gui_state.design_active)igPopStyleColor(1);
   igSetCursorPos(backup_cursor);
 }
 bool se_selectable_with_box(const char * first_label, const char* second_label, const char* box, bool force_hover, int reduce_width){
@@ -4835,8 +5249,8 @@ void se_boxed_image_triple_label(const char * first_label, const char* second_la
   igPushStyleVarVec2(ImGuiStyleVar_ItemSpacing, (ImVec2){spacing,spacing});
   igPushStyleColorU32(ImGuiCol_Text,third_label_color);
 
-  int vert_start = ig->VtxBuffer.Size+4;
   se_section("%s", first_label);
+  int vert_start = gui_state.section_text_vtx_start;
   if (third_label_color == 0xff000000) { // black means rainbow
     int vert_end = ig->VtxBuffer.Size;
     int h = (uint64_t)(stm_now() / 10000000.0) % 360;
@@ -4964,6 +5378,55 @@ void se_android_get_visible_rect(float * top, float * bottom){
     // Finished with the JVM.
     (*pJavaVM)->DetachCurrentThread(pJavaVM);
   }
+}
+// Light/dark mode and the Material You palette (Android 12+) from EnhancedNativeActivity.getSystemAppearance().
+// Layout: [dark (1 dark, 0 light, -1 unknown), accent ARGB (0 unknown), palette count (0 or 5),
+//          accent1, accent2, accent3, neutral1, neutral2 at tones 100,99,95,90,80,70,60,50,40,30,20,10,0]
+static void se_android_get_system_appearance(se_system_appearance_t* out){
+  memset(out,0,sizeof(*out));
+  out->dark = -1;
+  out->accent = SE_ACCENT_NONE;
+  ANativeActivity* activity =(ANativeActivity*)sapp_android_get_native_activity();
+  if(!activity)return;
+  JavaVM *pJavaVM = activity->vm;
+  JNIEnv *pJNIEnv = activity->env;
+  jint nResult = (*pJavaVM)->AttachCurrentThread(pJavaVM, &pJNIEnv, NULL );
+  if(nResult==JNI_ERR)return;
+  jobject nativeActivity = activity->clazz;
+  jclass ClassNativeActivity = (*pJNIEnv)->GetObjectClass(pJNIEnv, nativeActivity );
+  jmethodID method = (*pJNIEnv)->GetMethodID(pJNIEnv, ClassNativeActivity, "getSystemAppearance", "()[I" );
+  if(!method){
+    // Host activities that embed SkyEmu may not implement it
+    (*pJNIEnv)->ExceptionClear(pJNIEnv);
+  }else{
+    jintArray array = (jintArray)(*pJNIEnv)->CallObjectMethod(pJNIEnv, nativeActivity, method);
+    if((*pJNIEnv)->ExceptionCheck(pJNIEnv))(*pJNIEnv)->ExceptionClear(pJNIEnv);
+    else if(array){
+      enum{num_values = 3+5*SE_NUM_STANDARD_TONES};
+      jint values[num_values]={0};
+      jsize len = (*pJNIEnv)->GetArrayLength(pJNIEnv,array);
+      if(len>num_values)len = num_values;
+      (*pJNIEnv)->GetIntArrayRegion(pJNIEnv,array,0,len,values);
+      if(len>=2){
+        out->dark = values[0];
+        if(values[1])out->accent = ((uint32_t)values[1])&0xffffff;
+      }
+      if(len==num_values&&values[2]==5){
+        se_tonal_palette_t* palettes[5]={&out->core_palette.primary,&out->core_palette.secondary,&out->core_palette.tertiary,
+                                         &out->core_palette.neutral,&out->core_palette.neutral_variant};
+        for(int p=0;p<5;++p){
+          uint32_t tones[SE_NUM_STANDARD_TONES];
+          for(int t=0;t<SE_NUM_STANDARD_TONES;++t)tones[t]=((uint32_t)values[3+p*SE_NUM_STANDARD_TONES+t])&0xffffff;
+          se_tonal_palette_from_tones(tones,palettes[p]);
+        }
+        out->has_core_palette = true;
+      }
+      (*pJNIEnv)->DeleteLocalRef(pJNIEnv,array);
+    }
+  }
+  (*pJNIEnv)->DeleteLocalRef(pJNIEnv,ClassNativeActivity);
+  // Finished with the JVM.
+  (*pJavaVM)->DetachCurrentThread(pJavaVM);
 }
 void se_android_get_language(char* language_buffer, size_t buffer_size){
 
@@ -5618,8 +6081,17 @@ void se_load_rom_overlay(bool visible){
   w_size.y/=se_dpi_scale();
   igSetNextWindowSize((ImVec2){w_size.x,w_size.y},ImGuiCond_Always);
   igSetNextWindowPos((ImVec2){w_pos.x,w_pos.y},ImGuiCond_Always,(ImVec2){0,0});
-  igSetNextWindowBgAlpha(gui_state.settings.hardcore_mode? 1.0: SE_TRANSPARENT_BG_ALPHA);
+  float bg_alpha = gui_state.settings.hardcore_mode? 1.0: SE_TRANSPARENT_BG_ALPHA;
+  // The sheet is translucent to show the paused game, without one the design systems keep it opaque
+  if(gui_state.design_active&&!emu_state.rom_loaded)bg_alpha = 1.0;
+  igSetNextWindowBgAlpha(bg_alpha);
+  if(gui_state.design_active){
+    se_design_push_color(ImGuiCol_WindowBg,gui_state.design.surface_content);
+    se_design_push_color(ImGuiCol_TitleBgActive,gui_state.design.surface_content);
+    se_design_push_color(ImGuiCol_TitleBg,gui_state.design.surface_content);
+  }
   igBegin(se_localize_and_cache(ICON_FK_FILE_O " Load Game"),(gui_state.settings.hardcore_mode&&gui_state.ra_logged_in)?NULL:&gui_state.overlay_open,ImGuiWindowFlags_NoCollapse|ImGuiWindowFlags_NoResize);
+  if(gui_state.design_active)igPopStyleColor(3);
   
   float list_y_off = igGetWindowHeight(); 
   int x, y, w,  h;
@@ -5951,8 +6423,193 @@ void se_update_frame() {
     hcs_resume_callbacks();
   #endif
 }
+#if defined(EMSCRIPTEN)
+EM_JS(int, se_em_prefers_dark, (), {
+  if(!window.matchMedia)return -1;
+  return window.matchMedia('(prefers-color-scheme: dark)').matches? 1 : 0;
+});
+#endif
+#ifdef SE_PLATFORM_ANDROID
+static void se_android_get_system_appearance(se_system_appearance_t* out);
+#endif
+static void se_query_system_appearance(se_system_appearance_t* sys){
+#if defined(SE_PLATFORM_ANDROID)
+  se_android_get_system_appearance(sys);
+#else
+  se_design_query_system_appearance(sys);
+#endif
+#if defined(EMSCRIPTEN)
+  sys->dark = se_em_prefers_dark();
+#endif
+  if(gui_state.host_appearance_set){
+    if(gui_state.host_dark>=0)sys->dark = gui_state.host_dark;
+    if(gui_state.host_accent!=SE_ACCENT_NONE)sys->accent = gui_state.host_accent;
+  }
+}
+// Matches the native window frame (title bar / decorations) to the GUI
+static void se_design_style_window(){
+  bool dark = gui_state.settings.theme!=SE_THEME_LIGHT;
+  uint32_t caption = SE_ACCENT_NONE, caption_text = SE_ACCENT_NONE;
+  if(gui_state.design_active){
+    const se_design_tokens_t* t = &gui_state.design;
+    se_color_t bar = se_color_blend(t->background,t->surface_bar);
+    caption = se_color_to_rgb(bar);
+    caption_text = se_color_to_rgb(se_color_blend(bar,t->on_surface));
+    dark = t->dark;
+  }
+#if defined(SE_PLATFORM_WINDOWS)
+  se_design_style_native_window(sapp_win32_get_hwnd(),NULL,0,dark,caption,caption_text);
+#elif defined(SE_PLATFORM_LINUX) || defined(SE_PLATFORM_FREEBSD)
+  se_design_style_native_window(NULL,sapp_x11_get_display(),sapp_x11_get_window(),dark,caption,caption_text);
+#endif
+}
+// Keeps the design tokens in sync with the settings and the appearance of the OS
+static void se_update_design(){
+  int design = se_design_resolve(gui_state.settings.design_system);
+  bool active = design!=SE_DESIGN_CLASSIC;
+  uint32_t accent = gui_state.settings.use_custom_accent? (gui_state.settings.custom_accent&0xffffff) : SE_ACCENT_NONE;
+  bool follows_system = gui_state.settings.color_scheme==SE_COLOR_SCHEME_SYSTEM||accent==SE_ACCENT_NONE;
+  // The query is cheap everywhere except on Linux, where it runs gdbus/gsettings. There it
+  // is not repeated while a game runs, changes are picked up when the emulator is paused.
+  double interval = 2.0;
+#if defined(SE_PLATFORM_LINUX) || defined(SE_PLATFORM_FREEBSD)
+  interval = emu_state.run_mode==SB_MODE_RUN? -1.0 : 5.0;
+#endif
+  double now = se_time();
+  bool never_queried = gui_state.last_appearance_query==0;
+  if(active&&follows_system&&(never_queried||(interval>0&&now-gui_state.last_appearance_query>interval))){
+    se_query_system_appearance(&gui_state.system_appearance);
+    gui_state.last_appearance_query = now>0? now : 1e-6;
+  }
+
+  typedef struct{bool active; int design; uint32_t theme, scheme, accent; se_system_appearance_t sys;}se_design_key_t;
+  static se_design_key_t last_key;
+  static bool has_key = false;
+  se_design_key_t key;
+  memset(&key,0,sizeof(key));
+  key.active = active;
+  key.design = design;
+  key.theme = active? 0 : gui_state.settings.theme;
+  key.scheme = gui_state.settings.color_scheme;
+  key.accent = accent;
+  key.sys = gui_state.system_appearance;
+  if(!has_key||memcmp(&key,&last_key,sizeof(key))!=0){
+    if(active)se_design_build_tokens(design,key.scheme,key.accent,&key.sys,&gui_state.design);
+    gui_state.design_active = active;
+    se_design_style_window();
+    last_key = key;
+    has_key = true;
+  }
+  // The design systems only use the layout (bezel) regions of the default skin
+  int skin_key = active? -1 : (int)gui_state.settings.theme;
+  if(skin_key!=gui_state.loaded_skin_key)se_reload_theme();
+  int font_key = active? design*2+(gui_state.settings.use_bundled_font? 1:0) : -1;
+  if(font_key!=gui_state.font_design_key){
+    gui_state.font_design_key = font_key;
+    gui_state.update_font_atlas = true;
+  }
+}
+static void se_apply_design_style(){
+  const se_design_tokens_t* t = &gui_state.design;
+  ImGuiStyle* style = igGetStyle();
+  ImVec4* colors = style->Colors;
+  se_color_t clear = {0,0,0,0};
+  se_color_t input_hover = se_color_blend(t->surface_input,t->state_hover);
+  se_color_t input_press = se_color_blend(t->surface_input,t->state_press);
+  colors[ImGuiCol_Text]                  = se_design_vec4(t->on_surface);
+  colors[ImGuiCol_TextDisabled]          = se_design_vec4(t->on_surface_variant);
+  colors[ImGuiCol_WindowBg]              = se_design_vec4(t->surface_panel);
+  colors[ImGuiCol_ChildBg]               = se_design_vec4(t->surface_card);
+  colors[ImGuiCol_PopupBg]               = se_design_vec4(t->surface_popup);
+  colors[ImGuiCol_Border]                = se_design_vec4(t->outline_variant);
+  colors[ImGuiCol_BorderShadow]          = se_design_vec4(clear);
+  colors[ImGuiCol_FrameBg]               = se_design_vec4(t->surface_input);
+  colors[ImGuiCol_FrameBgHovered]        = se_design_vec4(input_hover);
+  colors[ImGuiCol_FrameBgActive]         = se_design_vec4(input_press);
+  colors[ImGuiCol_TitleBg]               = se_design_vec4(t->surface_panel);
+  colors[ImGuiCol_TitleBgActive]         = se_design_vec4(t->surface_panel);
+  colors[ImGuiCol_TitleBgCollapsed]      = se_design_vec4(t->surface_panel);
+  colors[ImGuiCol_MenuBarBg]             = se_design_vec4(t->surface_bar);
+  colors[ImGuiCol_ScrollbarBg]           = se_design_vec4(clear);
+  colors[ImGuiCol_ScrollbarGrab]         = se_design_vec4(se_design_over(clear,t->on_surface_variant,0.45f));
+  colors[ImGuiCol_ScrollbarGrabHovered]  = se_design_vec4(se_design_over(clear,t->on_surface_variant,0.7f));
+  colors[ImGuiCol_ScrollbarGrabActive]   = se_design_vec4(t->on_surface_variant);
+  colors[ImGuiCol_CheckMark]             = se_design_vec4(t->on_primary);
+  colors[ImGuiCol_SliderGrab]            = se_design_vec4(t->primary);
+  colors[ImGuiCol_SliderGrabActive]      = se_design_vec4(se_design_over(t->primary,t->on_primary,0.12f));
+  colors[ImGuiCol_Button]                = se_design_vec4(t->control);
+  colors[ImGuiCol_ButtonHovered]         = se_design_vec4(t->control_hover);
+  colors[ImGuiCol_ButtonActive]          = se_design_vec4(t->control_active);
+  colors[ImGuiCol_Header]                = se_design_vec4(t->secondary_container);
+  colors[ImGuiCol_HeaderHovered]         = se_design_vec4(t->state_hover);
+  colors[ImGuiCol_HeaderActive]          = se_design_vec4(t->state_press);
+  colors[ImGuiCol_Separator]             = se_design_vec4(t->outline_variant);
+  colors[ImGuiCol_SeparatorHovered]      = se_design_vec4(se_design_over(clear,t->primary,0.6f));
+  colors[ImGuiCol_SeparatorActive]       = se_design_vec4(t->primary);
+  colors[ImGuiCol_ResizeGrip]            = se_design_vec4(clear);
+  colors[ImGuiCol_ResizeGripHovered]     = se_design_vec4(se_design_over(clear,t->primary,0.5f));
+  colors[ImGuiCol_ResizeGripActive]      = se_design_vec4(t->primary);
+  colors[ImGuiCol_Tab]                   = se_design_vec4(t->control);
+  colors[ImGuiCol_TabHovered]            = se_design_vec4(t->control_hover);
+  colors[ImGuiCol_TabActive]             = se_design_vec4(t->secondary_container);
+  colors[ImGuiCol_TabUnfocused]          = se_design_vec4(t->control);
+  colors[ImGuiCol_TabUnfocusedActive]    = se_design_vec4(t->secondary_container);
+  colors[ImGuiCol_PlotLines]             = se_design_vec4(t->primary);
+  colors[ImGuiCol_PlotLinesHovered]      = se_design_vec4(t->on_surface);
+  colors[ImGuiCol_PlotHistogram]         = se_design_vec4(t->primary);
+  colors[ImGuiCol_PlotHistogramHovered]  = se_design_vec4(t->on_surface);
+  colors[ImGuiCol_TableHeaderBg]         = se_design_vec4(t->surface_card);
+  colors[ImGuiCol_TableBorderStrong]     = se_design_vec4(t->outline_variant);
+  colors[ImGuiCol_TableBorderLight]      = se_design_vec4(se_design_over(clear,t->outline_variant,0.5f));
+  colors[ImGuiCol_TableRowBg]            = se_design_vec4(clear);
+  colors[ImGuiCol_TableRowBgAlt]         = se_design_vec4(se_design_over(clear,t->on_surface,0.04f));
+  colors[ImGuiCol_TextSelectedBg]        = se_design_vec4(se_design_over(clear,t->primary,0.35f));
+  colors[ImGuiCol_DragDropTarget]        = se_design_vec4(t->primary);
+  colors[ImGuiCol_NavHighlight]          = se_design_vec4(t->primary);
+  colors[ImGuiCol_NavWindowingHighlight] = se_design_vec4(se_design_over(clear,t->primary,0.7f));
+  colors[ImGuiCol_NavWindowingDimBg]     = se_design_vec4(t->scrim);
+  colors[ImGuiCol_ModalWindowDimBg]      = se_design_vec4(t->scrim);
+
+  style->WindowPadding     = (ImVec2){t->window_padding,t->window_padding};
+  style->FramePadding      = (ImVec2){t->frame_padding_x,t->frame_padding_y};
+  style->ItemSpacing       = (ImVec2){t->item_spacing_x,t->item_spacing_y};
+  style->ItemInnerSpacing  = (ImVec2){6,4};
+  style->TouchExtraPadding = (ImVec2){2,4};
+  style->IndentSpacing     = 20;
+  style->ScrollbarSize     = t->scrollbar_size;
+  style->GrabMinSize       = t->grab_min_size;
+  style->WindowBorderSize  = 0;
+  style->ChildBorderSize   = t->control_border;
+  style->PopupBorderSize   = t->popup_border;
+  style->FrameBorderSize   = t->control_border;
+  style->TabBorderSize     = 0;
+  // Side panels are docked to the window edges, only floating surfaces get rounded
+  style->WindowRounding    = 0;
+  style->ChildRounding     = t->card_rounding;
+  style->FrameRounding     = t->input_rounding;
+  style->PopupRounding     = t->popup_rounding;
+  style->ScrollbarRounding = t->scrollbar_rounding;
+  style->GrabRounding      = 100;
+  style->TabRounding       = t->input_rounding;
+  style->LogSliderDeadzone = 4;
+  style->ButtonTextAlign   = (ImVec2){0.5,0.5};
+  // Hairline strokes are part of these designs. Textured AA lines are sampled from the font
+  // atlas with nearest filtering and break up at fractional DPI scales, use geometric AA.
+  style->AntiAliasedLinesUseTex = false;
+  // GNOME header bars center their title
+  style->WindowTitleAlign  = (ImVec2){t->design==SE_DESIGN_ADWAITA? 0.5f : 0.0f,0.5f};
+}
 void se_imgui_theme()
 {
+  se_update_design();
+  // Window background around the emulated screen, applied from the next frame
+  se_color_t clear = {0,0,0,1};
+  if(gui_state.design_active)clear = se_color_blend(clear,gui_state.design.background);
+  gui_state.pass_action.colors[0].value = (sg_color){clear.r,clear.g,clear.b,1.0f};
+  if(gui_state.design_active){
+    se_apply_design_style();
+    return;
+  }
   ImVec4* colors = igGetStyle()->Colors;
   colors[ImGuiCol_Text]                   = (ImVec4){1.00f, 1.00f, 1.00f, 1.00f};
   colors[ImGuiCol_TextDisabled]           = (ImVec4){0.6f, 0.6f, 0.6f, 0.5f};
@@ -6109,6 +6766,9 @@ void se_imgui_theme()
   style->LogSliderDeadzone                 = 4;
   style->TabRounding                       = 4;
   style->ButtonTextAlign = (ImVec2){0.5,0.5};
+  style->ItemInnerSpacing = (ImVec2){4,4};
+  style->WindowTitleAlign = (ImVec2){0,0.5};
+  style->AntiAliasedLinesUseTex = true;
 }
 #if defined(EMSCRIPTEN)
   //Setup the offline file system
@@ -6267,7 +6927,10 @@ void se_draw_controller_config(gui_state_t* gui){
     cont_name = SDL_JoystickName(cont->sdl_joystick);
   }
   igPushItemWidth(-1);
-  if(igBeginCombo("##Controller", se_localize_and_cache(cont_name), ImGuiComboFlags_None)){
+  se_design_push_combo_style();
+  bool controller_combo_open = igBeginCombo("##Controller", se_localize_and_cache(cont_name), ImGuiComboFlags_None);
+  se_design_pop_combo_style();
+  if(controller_combo_open){
     {
       bool is_selected=cont->sdl_joystick==NULL;
       if(igSelectableBool(se_localize_and_cache("No Controller"),is_selected,ImGuiSelectableFlags_None, (ImVec2){0,0})){
@@ -6335,11 +6998,14 @@ SKYEMU_API void se_restore_state_slot(int slot){
 }
 void se_push_disabled(){
   ImGuiStyle *style = igGetStyle();
-  igPushStyleColorVec4(ImGuiCol_Text, style->Colors[ImGuiCol_TextDisabled]);
+  // The design systems fade the whole control (TextDisabled is their secondary text color)
+  if(gui_state.design_active)igPushStyleVarFloat(ImGuiStyleVar_Alpha, style->Alpha*0.45f);
+  else igPushStyleColorVec4(ImGuiCol_Text, style->Colors[ImGuiCol_TextDisabled]);
   igPushItemFlag(ImGuiItemFlags_Disabled, true);
 }
 void se_pop_disabled(){
-   igPopStyleColor(1);
+   if(gui_state.design_active)igPopStyleVar(1);
+   else igPopStyleColor(1);
    igPopItemFlag();
 }
 void se_draw_touch_controls_settings(){
@@ -6361,11 +7027,11 @@ void se_draw_touch_controls_settings(){
   igEndChildFrame();
   igDummy((ImVec2){0,(igGetWindowContentRegionWidth()*0.5-2-scale)*0.5});
 
-  se_text("Scale");igSameLine(SE_FIELD_INDENT,0);
+  se_field_label("Scale");igSameLine(SE_FIELD_INDENT,0);
   igPushItemWidth(-1);
   se_slider_float("##TouchControlsScale",&gui_state.settings.touch_controls_scale,0.3,1.2,"Scale: %.2f");
 
-  se_text("Opacity");igSameLine(SE_FIELD_INDENT,0);
+  se_field_label("Opacity");igSameLine(SE_FIELD_INDENT,0);
   se_slider_float("##TouchControlsOpacity",&gui_state.settings.touch_controls_opacity,0,1.0,"Opacity: %.2f");
   bool auto_hide = gui_state.settings.auto_hide_touch_controls;
   se_checkbox("Hide when inactive",&auto_hide);
@@ -6406,7 +7072,8 @@ void se_draw_save_states(bool cloud){
     int slot_x = 0;
     int slot_y = i;
     int slot_w = (win_w-style->FramePadding.x)*0.5;
-    int slot_h = 64; 
+    // Label and two buttons, the design systems use taller controls than the classic skin
+    int slot_h = fmax(64,style->FramePadding.y*2+igGetTextLineHeight()+igGetFrameHeight()*2+style->ItemSpacing.y*2); 
     if(i%2)igSameLine(0,style->FramePadding.x);
 
     igBeginChildFrame(i+100, (ImVec2){slot_w,slot_h},ImGuiWindowFlags_NoDecoration|ImGuiWindowFlags_NoScrollWithMouse);
@@ -6417,6 +7084,16 @@ void se_draw_save_states(bool cloud){
     int screen_w = 64;
     int screen_h = 64+style->FramePadding.y*2; 
     int button_w = 55; 
+    // The design systems use larger text, the slot title gets its own row and the
+    // preview is fitted next to the buttons below it
+    float title_h = 0;
+    float preview_rounding = 0;
+    if(gui_state.design_active){
+      title_h = igGetTextLineHeightWithSpacing();
+      screen_w = fminf(screen_w,slot_w-button_w-style->FramePadding.x*3);
+      screen_h = fminf(screen_h,slot_h-title_h-style->FramePadding.y*2);
+      preview_rounding = fminf(gui_state.design.input_rounding,6);
+    }
     igSetCursorPosY(igGetCursorPosY()+1.0);
     se_text(se_localize_and_cache("Save Slot %d"),i);
     igSetCursorPosY(igGetCursorPosY()-2.0);
@@ -6443,9 +7120,9 @@ void se_draw_save_states(bool cloud){
       float w_scale = 1.0;
       float h_scale = 1.0;
       float border_screen_x=screen_x+button_w+(slot_w-screen_w-button_w)*0.5;
-      float border_screen_y=screen_y+(slot_h-screen_h)*0.5-style->FramePadding.y;
+      float border_screen_y=screen_y+(slot_h-screen_h+title_h)*0.5-style->FramePadding.y;
       ImU32 color = igColorConvertFloat4ToU32(style->Colors[ImGuiCol_MenuBarBg]);
-      ImDrawList_AddRectFilled(igGetWindowDrawList(),(ImVec2){border_screen_x-2,border_screen_y},(ImVec2){border_screen_x+screen_w+2,border_screen_y+screen_h},color,0,ImDrawCornerFlags_None);
+      ImDrawList_AddRectFilled(igGetWindowDrawList(),(ImVec2){border_screen_x-2,border_screen_y},(ImVec2){border_screen_x+screen_w+2,border_screen_y+screen_h},color,preview_rounding,ImDrawCornerFlags_All);
       if(states[i].screenshot_width>states[i].screenshot_height){
         h_scale = (float)states[i].screenshot_height/(float)states[i].screenshot_width;
       }else{
@@ -6454,7 +7131,7 @@ void se_draw_save_states(bool cloud){
       screen_w*=w_scale;
       screen_h*=h_scale;
       screen_x+=button_w+(slot_w-screen_w-button_w)*0.5;
-      screen_y+=(slot_h-screen_h)*0.5-style->FramePadding.y;
+      screen_y+=(slot_h-screen_h+title_h)*0.5-style->FramePadding.y;
    
       se_draw_image(states[i].screenshot,states[i].screenshot_width,states[i].screenshot_height,
                     screen_x*se_dpi_scale(),screen_y*se_dpi_scale(),screen_w*se_dpi_scale(),screen_h*se_dpi_scale(), true);
@@ -6466,9 +7143,9 @@ void se_draw_save_states(bool cloud){
     }else{
       screen_h*=0.85;
       screen_x+=button_w+(slot_w-screen_w-button_w)*0.5;
-      screen_y+=(slot_h-screen_h)*0.5-style->FramePadding.y;
+      screen_y+=(slot_h-screen_h+title_h)*0.5-style->FramePadding.y;
       ImU32 color = igColorConvertFloat4ToU32(style->Colors[ImGuiCol_MenuBarBg]);
-      ImDrawList_AddRectFilled(igGetWindowDrawList(),(ImVec2){screen_x,screen_y},(ImVec2){screen_x+screen_w,screen_y+screen_h},color,0,ImDrawCornerFlags_None);
+      ImDrawList_AddRectFilled(igGetWindowDrawList(),(ImVec2){screen_x,screen_y},(ImVec2){screen_x+screen_w,screen_y+screen_h},color,preview_rounding,ImDrawCornerFlags_All);
       ImVec2 anchor;
       igSetCursorScreenPos((ImVec2){screen_x+screen_w*0.5-5,screen_y+screen_h*0.5-5});
       if(cloud_busy){
@@ -6485,6 +7162,90 @@ void se_draw_save_states(bool cloud){
   if(!has_save_states)se_pop_disabled();
   #endif 
   if(!emu_state.rom_loaded)se_pop_disabled();
+}
+// Color scheme, accent and font options of the platform design systems
+static void se_draw_design_settings(){
+  const se_design_tokens_t* t = &gui_state.design;
+  int scheme = gui_state.settings.color_scheme;
+  if(scheme<0||scheme>=SE_COLOR_SCHEME_COUNT)scheme = SE_COLOR_SCHEME_SYSTEM;
+  se_field_label("Color Scheme");igSameLine(SE_FIELD_INDENT,0);
+  igPushItemWidth(-1);
+  se_combo_str("##ColorScheme",&scheme,"Follow System\0Light\0Dark\0Black (AMOLED)\0",0);
+  igPopItemWidth();
+  gui_state.settings.color_scheme = scheme;
+
+  bool custom = gui_state.settings.use_custom_accent;
+  se_checkbox("Custom Accent Color",&custom);
+  // Start from the accent in use so enabling the option does not change the colors
+  if(custom&&!gui_state.settings.use_custom_accent)gui_state.settings.custom_accent = t->accent;
+  gui_state.settings.use_custom_accent = custom;
+  if(custom){
+    // Material baseline, Windows blue and the GNOME accent palette, followed by a free color picker
+    static const uint32_t presets[]={0x6750A4,0x0078D4,0x3584E4,0x2190A4,0x3A944A,0xC88800,0xED5B00,0xE62D42,0xD56199};
+    int num_presets = sizeof(presets)/sizeof(presets[0]);
+    ImVec2 avail;
+    igGetContentRegionAvail(&avail);
+    float spacing = 4;
+    float size = floorf((avail.x-spacing*num_presets)/(num_presets+1));
+    if(size>32)size = 32;
+    float rounding = t->design==SE_DESIGN_FLUENT? 4 : size*0.5f;
+    igPushStyleVarFloat(ImGuiStyleVar_FrameRounding,rounding);
+    igPushStyleVarFloat(ImGuiStyleVar_FrameBorderSize,0);
+    uint32_t current = gui_state.settings.custom_accent&0xffffff;
+    bool matched = false;
+    ImGuiColorEditFlags flags = ImGuiColorEditFlags_NoTooltip|ImGuiColorEditFlags_NoDragDrop|ImGuiColorEditFlags_NoBorder;
+    for(int i=0;i<=num_presets;++i){
+      bool picker = i==num_presets;
+      uint32_t rgb = picker? current : presets[i];
+      bool selected = picker? !matched : rgb==current;
+      matched|=selected;
+      igPushIDInt(i);
+      if(i)igSameLine(0,spacing);
+      ImVec2 p;
+      igGetCursorScreenPos(&p);
+      se_color_t c = se_color_from_rgb(rgb,1);
+      if(igColorButton("##accent",se_design_vec4(c),flags,(ImVec2){size,size})){
+        if(picker)igOpenPopup("##accent-picker",ImGuiPopupFlags_None);
+        else gui_state.settings.custom_accent = rgb;
+      }
+      if(selected){
+        ImDrawList_AddRect(igGetWindowDrawList(),(ImVec2){p.x-2,p.y-2},(ImVec2){p.x+size+2,p.y+size+2},se_design_u32(t->on_surface),rounding+2,ImDrawCornerFlags_All,2.0f);
+      }
+      if(picker){
+        // A '+' marks the free color picker
+        ImDrawList* dl = igGetWindowDrawList();
+        float cx = p.x+size*0.5f, cy = p.y+size*0.5f, arm = size*0.22f;
+        ImU32 fg = se_color_tone(rgb)>60? 0xff000000 : 0xffffffff;
+        ImDrawList_AddLine(dl,(ImVec2){cx-arm,cy},(ImVec2){cx+arm,cy},fg,2.0f);
+        ImDrawList_AddLine(dl,(ImVec2){cx,cy-arm},(ImVec2){cx,cy+arm},fg,2.0f);
+        if(igBeginPopup("##accent-picker",ImGuiWindowFlags_None)){
+          float col[3]={c.r,c.g,c.b};
+          if(igColorPicker3("##picker",col,ImGuiColorEditFlags_NoSidePreview|ImGuiColorEditFlags_NoSmallPreview)){
+            gui_state.settings.custom_accent = se_color_to_rgb((se_color_t){col[0],col[1],col[2],1});
+          }
+          igEndPopup();
+        }
+      }
+      igPopID();
+    }
+    igPopStyleVar(2);
+  }else{
+    const char* source = "Using the default accent color";
+    if(t->design==SE_DESIGN_MATERIAL3&&gui_state.system_appearance.has_core_palette)source = "Using your wallpaper colors (Material You)";
+    else if(gui_state.system_appearance.accent!=SE_ACCENT_NONE)source = "Using the system accent color";
+    se_text_disabled(source);
+  }
+
+  bool system_font = !gui_state.settings.use_bundled_font;
+  se_checkbox("Use System Font",&system_font);
+  gui_state.settings.use_bundled_font = !system_font;
+  if(system_font){
+    if(gui_state.system_font_path[0]){
+      const char *base, *file_name, *ext;
+      sb_breakup_path(gui_state.system_font_path,&base,&file_name,&ext);
+      se_text_disabled("%s.%s",file_name,ext);
+    }else se_text_disabled("Not found, using the bundled font");
+  }
 }
 void se_draw_menu_panel(){
     if (!show_ui)
@@ -6632,7 +7393,7 @@ void se_draw_menu_panel(){
       static char password[256] = {0};
       bool pending_login = retro_achievements_is_pending_login();
       igPushItemWidth(-1);
-      se_text("Username");
+      se_field_label("Username");
       igSameLine(win_w - 150, 0);
       if (pending_login)
           se_push_disabled();
@@ -6640,7 +7401,7 @@ void se_draw_menu_panel(){
                         ImGuiInputTextFlags_EnterReturnsTrue, NULL, NULL);
       if (pending_login)
           se_pop_disabled();
-      se_text("Password");
+      se_field_label("Password");
       igSameLine(win_w - 150, 0);
       if (pending_login)
           se_push_disabled();
@@ -6812,9 +7573,12 @@ void se_draw_menu_panel(){
     }
   }
   se_section(ICON_FK_TEXT_HEIGHT " GUI");
-  se_text("Language");igSameLine(SE_FIELD_INDENT,0);
+  se_field_label("Language");igSameLine(SE_FIELD_INDENT,0);
   igPushItemWidth(-1);
-  if(igBeginCombo("##Language", se_language_string(gui_state.settings.language), ImGuiComboFlags_HeightLargest)){
+  se_design_push_combo_style();
+  bool language_combo_open = igBeginCombo("##Language", se_language_string(gui_state.settings.language), ImGuiComboFlags_HeightLargest);
+  se_design_pop_combo_style();
+  if(language_combo_open){
     int lang_id = 0; 
     for(int lang_id=0;lang_id<SE_MAX_LANG_VALUE;++lang_id){
       const char* lang = se_language_string(lang_id);
@@ -6826,8 +7590,20 @@ void se_draw_menu_panel(){
     igEndCombo();
   }
   igPopItemWidth();
+  {
+    int design = gui_state.settings.design_system;
+    if(design<0||design>=SE_DESIGN_COUNT)design = SE_DESIGN_AUTO;
+    se_field_label("Design");igSameLine(SE_FIELD_INDENT,0);
+    igPushItemWidth(-1);
+    se_combo_str("##Design",&design,"Platform Native\0SkyEmu Classic\0Material 3\0Fluent (Windows 11)\0Adwaita (GNOME)\0",0);
+    igPopItemWidth();
+    se_tooltip("Platform Native uses Material 3 on Android, Fluent on Windows and Adwaita on Linux");
+    gui_state.settings.design_system = design;
+  }
+  if(gui_state.design_active)se_draw_design_settings();
+  else{
   int theme = gui_state.settings.theme; 
-  se_text("Theme");igSameLine(SE_FIELD_INDENT,0);
+  se_field_label("Theme");igSameLine(SE_FIELD_INDENT,0);
   igPushItemWidth(-1);
   bool load = se_combo_str("##Theme",&theme,"Dark\0Light\0Black\0Custom\0",0);
   igPopItemWidth();
@@ -6852,7 +7628,7 @@ void se_draw_menu_panel(){
     }
     igPushItemWidth(-1);
     float old_scale = gui_state.settings.custom_font_scale;
-    se_text("Font Scale");igSameLine(SE_FIELD_INDENT,0);
+    se_field_label("Font Scale");igSameLine(SE_FIELD_INDENT,0);
     se_slider_float("##FontScale",&gui_state.settings.custom_font_scale,0.5,1.5,"Scale: %0.2fx");
     if(old_scale!=gui_state.settings.custom_font_scale)gui_state.update_font_atlas=true;
     igPopItemWidth();
@@ -6908,10 +7684,11 @@ void se_draw_menu_panel(){
   }else{
     if(load)se_reload_theme();
   }
+  }
 
 
   {
-    se_text("GUI Scale");igSameLine(SE_FIELD_INDENT,0);
+    se_field_label("GUI Scale");igSameLine(SE_FIELD_INDENT,0);
     static double last_edit_time = 0; 
     static float curr_slider_scale = -1;
     if(curr_slider_scale<0)curr_slider_scale = gui_state.settings.gui_scale_factor;
@@ -6941,17 +7718,17 @@ void se_draw_menu_panel(){
   se_section(ICON_FK_DESKTOP " Display Settings");
   int v = gui_state.settings.screen_shader;
   igPushItemWidth(-1);
-  se_text("Screen Shader");igSameLine(SE_FIELD_INDENT,0);
+  se_field_label("Screen Shader");igSameLine(SE_FIELD_INDENT,0);
   se_combo_str("##Screen Shader",&v,"Pixelate\0Bilinear\0LCD\0LCD & Subpixels\0Smooth Upscale (xBRZ)\0",0);
   gui_state.settings.screen_shader=v;
   v = gui_state.settings.screen_rotation;
-  se_text("Screen Rotation");igSameLine(SE_FIELD_INDENT,0);
+  se_field_label("Screen Rotation");igSameLine(SE_FIELD_INDENT,0);
   se_combo_str("##Screen Rotation",&v,"0 degrees\00090 degrees\000180 degrees\000270 degrees\0",0);
   gui_state.settings.screen_rotation=v;
-  se_text("Color Correction");igSameLine(SE_FIELD_INDENT,0);
+  se_field_label("Color Correction");igSameLine(SE_FIELD_INDENT,0);
   se_slider_float("##Color Correction",&gui_state.settings.color_correction,0,1.0,"Strength: %.2f");
   int color_correct = gui_state.settings.gba_color_correction_mode;
-  se_text("GBA Color Correction Type");igSameLine(180,0);
+  se_field_label("GBA Color Correction Type");igSameLine(180,0);
   se_combo_str("##ColorAlgorithm",&color_correct,"SkyEmu\0Higan\0",0);
   gui_state.settings.gba_color_correction_mode=color_correct;
   {
@@ -6977,7 +7754,7 @@ void se_draw_menu_panel(){
     }
   }
   {
-    se_text("NDS Screen Layout");
+    se_field_label("NDS Screen Layout");
     int layout = gui_state.settings.nds_layout;
     igSameLine(SE_FIELD_INDENT,0);
     se_combo_str("##NDSLayout",&layout,"Auto\0Vertical\0Horizontal\0Hybrid Large Top\0Hybrid Large Bottom\0Vertical Large Top\0Vertical Large Bottom\0Horizontal Large Top\0Horizontal Large Bottom\0\0",0);
@@ -7045,7 +7822,7 @@ void se_draw_menu_panel(){
     }
   }
   se_section(ICON_FK_WRENCH " Advanced");
-  se_text("Solar Sensor");igSameLine(SE_FIELD_INDENT,0);
+  se_field_label("Solar Sensor");igSameLine(SE_FIELD_INDENT,0);
   igPushItemWidth(-1);
   se_slider_float("##Solar Sensor",&emu_state.joy.solar_sensor,0.,1.,"Brightness: %.2f");
   bool force_dmg_mode = gui_state.settings.force_dmg_mode;
@@ -7061,7 +7838,7 @@ void se_draw_menu_panel(){
   gui_state.settings.http_control_server_enable = true;
   if(enable_hcs){
     int port = gui_state.settings.http_control_server_port;
-    se_text("Server Port");igSameLine(SE_FIELD_INDENT,0);
+    se_field_label("Server Port");igSameLine(SE_FIELD_INDENT,0);
     igPushItemWidth(-1);
     se_input_int("##Server Port",&port,1,10,ImGuiInputTextFlags_None);
     if(igIsItemDeactivated())gui_state.settings.http_control_server_port=port; 
@@ -7137,7 +7914,9 @@ bool se_begin_menu_bar(){
   igPushStyleVarFloat(ImGuiStyleVar_WindowRounding, 0.0f);
   igPushStyleVarVec2(ImGuiStyleVar_WindowMinSize, (ImVec2){0, 0});
   ImGuiWindowFlags window_flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoSavedSettings;
+  if(gui_state.design_active)se_design_push_color(ImGuiCol_WindowBg,gui_state.design.surface_bar);
   bool is_open = igBegin("##MainMenuBar", NULL, window_flags);
+  if(gui_state.design_active)igPopStyleColor(1);
   igPopStyleVar(2);
   g->NextWindowData.MenuBarOffsetMinVal = (ImVec2){0.0f, 0.0f};
   if (!is_open){
@@ -7147,6 +7926,11 @@ bool se_begin_menu_bar(){
   igSetCursorPosY(0);
   igSetCursorPosX(style->DisplaySafeAreaPadding.x);
   se_draw_theme_region(SE_REGION_MENUBAR,0,y_off,menu_bar_size.x,menu_bar_size.y);
+  if(gui_state.design_active&&gui_state.design.bar_divider){
+    // Title bar / header bar bottom stroke
+    float y = y_off+menu_bar_size.y-0.5f;
+    ImDrawList_AddLine(igGetWindowDrawList(),(ImVec2){0,y},(ImVec2){menu_bar_size.x,y},se_design_u32(gui_state.design.outline_variant),1.0f);
+  }
   return true; //-V1020
 }
 
@@ -7299,6 +8083,11 @@ uint8_t* se_hcs_callback(const char* cmd, const char** params, uint64_t* result_
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"nds_layout\": %d,\n",gui_state.settings.nds_layout);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"touch_screen_show_button_labels\": %d,\n",gui_state.settings.touch_screen_show_button_labels);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"show_screen_bezel\": %d,\n",gui_state.settings.show_screen_bezel);
+    off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"design_system\": %d,\n",gui_state.settings.design_system);
+    off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"color_scheme\": %d,\n",gui_state.settings.color_scheme);
+    off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"use_custom_accent\": %d,\n",gui_state.settings.use_custom_accent);
+    off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"custom_accent\": \"%06x\",\n",gui_state.settings.custom_accent&0xffffff);
+    off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"use_bundled_font\": %d,\n",gui_state.settings.use_bundled_font);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"http_control_server_enable\": %d,\n",gui_state.settings.http_control_server_enable);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"http_control_server_port\": %d\n",gui_state.settings.http_control_server_port);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"}");
@@ -7325,6 +8114,14 @@ uint8_t* se_hcs_callback(const char* cmd, const char** params, uint64_t* result_
       else if(strcmp(params[0],"debug_tools")==0)gui_state.settings.draw_debug_menu = atoi(params[1]);
       else if(strcmp(params[0],"fake_paths")==0)gui_state.fake_paths = atoi(params[1]);
       else if(strcmp(params[0],"theme")==0)gui_state.settings.theme = atoi(params[1]);
+      else if(strcmp(params[0],"design")==0)gui_state.settings.design_system = atoi(params[1]);
+      else if(strcmp(params[0],"color_scheme")==0)gui_state.settings.color_scheme = atoi(params[1]);
+      else if(strcmp(params[0],"accent")==0){
+        // Hex RRGGBB, or "system" to follow the accent of the OS
+        gui_state.settings.use_custom_accent = strcmp(params[1],"system")!=0&&params[1][0];
+        if(gui_state.settings.use_custom_accent)gui_state.settings.custom_accent = strtoul(params[1],NULL,16)&0xffffff;
+      }
+      else if(strcmp(params[0],"system_font")==0)gui_state.settings.use_bundled_font = !atoi(params[1]);
       else if(strcmp(params[0],"menu_bar")==0){
         if(atoi(params[1])){
           gui_state.settings.always_show_menubar=true;
@@ -7896,7 +8693,9 @@ static void frame(void) {
       bool active_button = i==curr_toggle;
       if(active_button)igPushStyleColorVec4(ImGuiCol_Button, style->Colors[ImGuiCol_ButtonActive]);
       if (show_ui) {
-          if (se_button_themed(SE_REGION_BLANK + (active_button ? 2 : 0), toggle_labels[i], (ImVec2) { sel_width, show_ui ? SE_MENU_BAR_HEIGHT : 0 }, true))next_toggle_id = i;
+          if(gui_state.design_active){
+            if(se_design_segment(toggle_labels[i],(ImVec2){sel_width,SE_MENU_BAR_HEIGHT},active_button,i,num_toggles,1))next_toggle_id = i;
+          }else if (se_button_themed(SE_REGION_BLANK + (active_button ? 2 : 0), toggle_labels[i], (ImVec2) { sel_width, show_ui ? SE_MENU_BAR_HEIGHT : 0 }, true))next_toggle_id = i;
       }
       igSameLine(0,1);
       if(hardcore_disabled) se_tooltip("Disabled in Hardcore Mode");
@@ -8089,8 +8888,23 @@ static void frame(void) {
 
     ImFont *font = NULL;
     float font_scale=1.0;
+    float font_size = 13;
+    gui_state.system_font_path[0] = 0;
    
-    if(gui_state.settings.theme==SE_THEME_CUSTOM){
+    if(gui_state.design_active){
+      // Use the UI font of the platform: Roboto, Segoe UI Variable, Adwaita Sans/Cantarell
+      font_size = gui_state.design.font_size;
+      char path[SB_FILE_PATH_SIZE];
+      if(!gui_state.settings.use_bundled_font&&se_design_find_system_font(gui_state.design.design,path,sizeof(path))){
+        size_t size = 0;
+        uint8_t* data = sb_load_file_data(path,&size);
+        // A font Dear ImGui can not parse would fail the whole atlas, check it again after loading
+        if(data&&se_design_font_is_supported(data,size)){
+          font =ImFontAtlas_AddFontFromMemoryTTF(atlas,data,size,font_size*se_dpi_scale(),NULL,NULL);
+          strncpy(gui_state.system_font_path,path,sizeof(gui_state.system_font_path)-1);
+        }else free(data);
+      }
+    }else if(gui_state.settings.theme==SE_THEME_CUSTOM){
       size_t size =0; 
       font_scale = gui_state.settings.custom_font_scale;
       uint8_t* data = sb_load_file_data(gui_state.paths.custom_font,&size);
@@ -8104,7 +8918,7 @@ static void frame(void) {
       uint64_t karla_compressed_size; 
       const uint8_t* karla_compressed_data = se_get_resource(SE_KARLA,&karla_compressed_size);
       font =ImFontAtlas_AddFontFromMemoryCompressedTTF(
-        atlas,karla_compressed_data,karla_compressed_size,13*se_dpi_scale()*font_scale,NULL,NULL);
+        atlas,karla_compressed_data,karla_compressed_size,font_size*se_dpi_scale()*font_scale,NULL,NULL);
     }
     
     uint64_t forkawesome_compressed_size; 
@@ -8113,9 +8927,9 @@ static void frame(void) {
     static const ImWchar icons_ranges[] = { ICON_MIN_FK, ICON_MAX_FK, 0 }; // Will not be copied by AddFont* so keep in scope.
     ImFontConfig* config=ImFontConfig_ImFontConfig();
     config->MergeMode = true;
-    config->GlyphMinAdvanceX = 13.0f;
+    config->GlyphMinAdvanceX = font_size;
     ImFont* font2 =ImFontAtlas_AddFontFromMemoryCompressedTTF(atlas,
-      forkawesome_compressed_data,forkawesome_compressed_size,13*se_dpi_scale()*font_scale,config,icons_ranges);
+      forkawesome_compressed_data,forkawesome_compressed_size,font_size*se_dpi_scale()*font_scale,config,icons_ranges);
     ImFontConfig_destroy(config);
     igGetIO()->FontDefault=font2;
   
@@ -8136,13 +8950,13 @@ static void frame(void) {
           index++;
         }
       }
-      ImFont* font3 =ImFontAtlas_AddFontFromMemoryCompressedTTF(atlas,notosans_cjksc_compressed_data,notosans_cjksc_compressed_size,14*se_dpi_scale()*font_scale,config3,ranges);
+      ImFont* font3 =ImFontAtlas_AddFontFromMemoryCompressedTTF(atlas,notosans_cjksc_compressed_data,notosans_cjksc_compressed_size,(font_size+1)*se_dpi_scale()*font_scale,config3,ranges);
       uint64_t noto_armenian_size;
       const uint8_t *noto_armenian = se_get_resource(SE_NOTO_ARMENIAN,&noto_armenian_size);
-      ImFont* font4 =ImFontAtlas_AddFontFromMemoryCompressedTTF(atlas,noto_armenian,noto_armenian_size,14*se_dpi_scale()*font_scale,config3,ranges);
+      ImFont* font4 =ImFontAtlas_AddFontFromMemoryCompressedTTF(atlas,noto_armenian,noto_armenian_size,(font_size+1)*se_dpi_scale()*font_scale,config3,ranges);
       uint64_t noto_sans_size=0;
       const uint8_t *noto_sans = se_get_resource(SE_NOTO_SANS,&noto_sans_size);
-      ImFont* font5 =ImFontAtlas_AddFontFromMemoryCompressedTTF(atlas,noto_sans,noto_sans_size,14*se_dpi_scale()*font_scale,config3,ranges);
+      ImFont* font5 =ImFontAtlas_AddFontFromMemoryCompressedTTF(atlas,noto_sans,noto_sans_size,(font_size+1)*se_dpi_scale()*font_scale,config3,ranges);
       ImFontConfig_destroy(config3);
       igGetIO()->FontDefault=font3;
     #endif
@@ -8151,7 +8965,7 @@ static void frame(void) {
       uint64_t karla_compressed_size; 
       const uint8_t* karla_compressed_data = se_get_resource(SE_SV_BASIC_MANUAL,&karla_compressed_size);
       gui_state.mono_font =ImFontAtlas_AddFontFromMemoryCompressedTTF(
-        atlas,karla_compressed_data,karla_compressed_size,13*se_dpi_scale()*font_scale,NULL,NULL);
+        atlas,karla_compressed_data,karla_compressed_size,font_size*se_dpi_scale()*font_scale,NULL,NULL);
     }
     
 
@@ -8246,7 +9060,7 @@ void se_load_settings(){
     char settings_path[SB_FILE_PATH_SIZE];
     snprintf(settings_path,SB_FILE_PATH_SIZE,"%suser_settings.bin",se_get_pref_path());
     if(!sb_load_file_data_into_buffer(settings_path,(void*)&gui_state.settings,sizeof(gui_state.settings))){gui_state.settings.settings_file_version=-1;}
-    int max_settings_version_supported =3;
+    int max_settings_version_supported =4;
     if(gui_state.settings.settings_file_version>max_settings_version_supported){
       gui_state.settings.volume=0.8;
       gui_state.settings.draw_debug_menu = false; 
@@ -8295,6 +9109,19 @@ void se_load_settings(){
       gui_state.settings.nds_layout = 0; 
       gui_state.settings.touch_screen_show_button_labels= true;
     }
+    if(gui_state.settings.settings_file_version<4){
+      gui_state.settings.settings_file_version = 4;
+      // Custom skins are image based and keep the classic design, the Light and Black
+      // themes carry over as the color scheme of the platform design.
+      gui_state.settings.design_system = gui_state.settings.theme==SE_THEME_CUSTOM? SE_DESIGN_CLASSIC : SE_DESIGN_AUTO;
+      gui_state.settings.color_scheme = gui_state.settings.theme==SE_THEME_LIGHT? SE_COLOR_SCHEME_LIGHT :
+                                        gui_state.settings.theme==SE_THEME_BLACK? SE_COLOR_SCHEME_BLACK : SE_COLOR_SCHEME_SYSTEM;
+      gui_state.settings.use_custom_accent = false;
+      gui_state.settings.custom_accent = 0;
+      gui_state.settings.use_bundled_font = false;
+    }
+    if(gui_state.settings.design_system>=SE_DESIGN_COUNT)gui_state.settings.design_system=SE_DESIGN_AUTO;
+    if(gui_state.settings.color_scheme>=SE_COLOR_SCHEME_COUNT)gui_state.settings.color_scheme=SE_COLOR_SCHEME_SYSTEM;
     if(gui_state.settings.gui_scale_factor<0.5)gui_state.settings.gui_scale_factor=1.0;
     if(gui_state.settings.gui_scale_factor>4.0)gui_state.settings.gui_scale_factor=1.0;
 
@@ -8549,7 +9376,9 @@ static float se_compute_touchscreen_controls_min_dim(float w, float h, bool * po
 }
 static int se_draw_theme_region_tint_partial(int region, float x, float y, float w, float h, float w_ratio, float h_ratio, uint32_t tint){
   se_theme_region_t* r = &gui_state.theme.regions[region];
-  if(!r->active)return 0; 
+  if(!se_theme_region_active(region))return 0;
+  // The design systems keep the layout of the skin's bezel but show their own background
+  if(gui_state.design_active&&(region==SE_REGION_BEZEL_PORTRAIT||region==SE_REGION_BEZEL_LANDSCAPE||region==SE_REGION_NO_BEZEL))tint&=0x00ffffff;
   if(w==0||h==0)return 0;
 
   int lod = log2(fmin(r->w/w,r->h/h))-0.5;
@@ -9251,6 +10080,11 @@ static bool se_load_theme_from_image(uint8_t* im, uint32_t im_w, uint32_t im_h, 
   
     theme->im_h=im_h;
     theme->im_w=im_w;
+    // Release the images of the previously loaded skin once the frame using them is rendered
+    for(int m = 0; m<SE_THEME_IMAGE_MIPS;++m){
+      if(gui_state.theme.image[m].id!=SG_INVALID_ID)se_free_image_deferred(gui_state.theme.image[m]);
+      gui_state.theme.image[m].id = SG_INVALID_ID;
+    }
   
     int num_mips = 0;
     uint8_t* data2 = im;
@@ -9329,12 +10163,16 @@ static bool se_load_theme_from_memory(const uint8_t* data, int64_t size, bool in
   return ret; 
 }
 static bool se_reload_theme(){
-  if(gui_state.settings.theme ==SE_THEME_CUSTOM){
+  // The design systems draw their own widgets and only need the layout regions of the default skin
+  bool design = se_design_resolve(gui_state.settings.design_system)!=SE_DESIGN_CLASSIC;
+  int theme = design? SE_THEME_DARK : gui_state.settings.theme;
+  gui_state.loaded_skin_key = design? -1 : (int)gui_state.settings.theme;
+  if(theme ==SE_THEME_CUSTOM){
     return se_load_theme_from_file(gui_state.paths.theme);
   }else{
     uint64_t size; 
     const uint8_t* theme_data = se_get_resource(SE_THEME_DEFAULT,&size);
-    return se_load_theme_from_memory(theme_data,size, gui_state.settings.theme==SE_THEME_LIGHT,gui_state.settings.theme==SE_THEME_BLACK);
+    return se_load_theme_from_memory(theme_data,size, theme==SE_THEME_LIGHT,theme==SE_THEME_BLACK);
   }
   return false;
 }
@@ -9824,6 +10662,49 @@ jint Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1get_1theme(JNIEnv *
 
 jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1theme(JNIEnv *env, jobject thiz) {
   return Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1get_1theme(env, thiz);
+}
+
+/* Design system: 0 native, 1 classic, 2 Material 3, 3 Fluent, 4 Adwaita. Color scheme: 0 system, 1 light,
+   2 dark, 3 black. Accent: 0xRRGGBB, or -1 (0xFFFFFFFF) to follow the system accent. */
+void Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1set_1design_1system(JNIEnv *env, jobject thiz, jint value) {
+  se_set_design_system((uint32_t) value);
+}
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1design_1system(JNIEnv *env, jobject thiz, jint value) {
+  Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1set_1design_1system(env, thiz, value);
+}
+jint Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1get_1design_1system(JNIEnv *env, jobject thiz) { return (jint) se_get_design_system(); }
+jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1design_1system(JNIEnv *env, jobject thiz) {
+  return Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1get_1design_1system(env, thiz);
+}
+
+void Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1set_1color_1scheme(JNIEnv *env, jobject thiz, jint value) {
+  se_set_color_scheme((uint32_t) value);
+}
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1color_1scheme(JNIEnv *env, jobject thiz, jint value) {
+  Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1set_1color_1scheme(env, thiz, value);
+}
+jint Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1get_1color_1scheme(JNIEnv *env, jobject thiz) { return (jint) se_get_color_scheme(); }
+jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1color_1scheme(JNIEnv *env, jobject thiz) {
+  return Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1get_1color_1scheme(env, thiz);
+}
+
+void Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1set_1accent_1color(JNIEnv *env, jobject thiz, jint value) {
+  se_set_accent_color((uint32_t) value);
+}
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1accent_1color(JNIEnv *env, jobject thiz, jint value) {
+  Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1set_1accent_1color(env, thiz, value);
+}
+jint Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1get_1accent_1color(JNIEnv *env, jobject thiz) { return (jint) se_get_accent_color(); }
+jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1accent_1color(JNIEnv *env, jobject thiz) {
+  return Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1get_1accent_1color(env, thiz);
+}
+
+/* Host apps that use their own activity report the system appearance (dark: 1/0/-1, accent: ARGB or -1) */
+void Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1set_1system_1appearance(JNIEnv *env, jobject thiz, jint dark, jint accent) {
+  se_set_system_appearance((int) dark, accent==-1? SE_ACCENT_NONE : ((uint32_t) accent)&0xffffff);
+}
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1system_1appearance(JNIEnv *env, jobject thiz, jint dark, jint accent) {
+  Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1set_1system_1appearance(env, thiz, dark, accent);
 }
 
 void Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1set_1integer_1scaling(JNIEnv *env,

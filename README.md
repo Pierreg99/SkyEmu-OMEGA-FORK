@@ -16,6 +16,7 @@ SkyEmu is a low level GameBoy, GameBoy Color, Game Boy Advance, and DS emulator.
 - [Highly accurate Game Boy Advance emulation](docs/Accuracy.md)
 - Game Boy and Game Boy Color Emulation
 - DS Emulation (Beta Quality)
+- Native look on every platform: [Material 3 / Material You on Android, Fluent on Windows 11 and Adwaita on GNOME](docs/DESIGN_SYSTEMS.md), with light/dark mode and accent colors taken from the system
 - High Quality Upscaling Shaders, Color Correction, and Screen Ghosting
 - Cross Platform: Windows, MacOS, Linux, FreeBSD, iOS, Android, and Web
 - Game Controller and Rumble Support with configureable keybinds

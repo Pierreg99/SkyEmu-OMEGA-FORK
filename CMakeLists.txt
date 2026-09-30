@@ -373,7 +373,7 @@ add_definitions(-DGIT_BRANCH=\"${GIT_BRANCH}\")
 add_definitions(-DGIT_TAG=\"${GIT_TAG}\")
 
 if(NOT RETRO_CORE_ONLY)
-  set(SKYEMU_SRC src/main.c src/shared.c src/cloud.cpp src/https.cpp src/stb.c src/miniz.c src/res.c src/localization.c src/mutex.cpp)
+  set(SKYEMU_SRC src/main.c src/shared.c src/se_design.c src/cloud.cpp src/https.cpp src/stb.c src/miniz.c src/res.c src/localization.c src/mutex.cpp)
   
   if(ENABLE_HTTP_CONTROL_SERVER)
     add_definitions(-DENABLE_HTTP_CONTROL_SERVER=1)
@@ -592,6 +592,10 @@ if(NOT RETRO_CORE_ONLY)
   endif()
 
   target_link_libraries(${PROJECT_NAME} ${LINK_LIBS})
+  if (SE_PLATFORM_LINUX OR SE_PLATFORM_FREEBSD)
+      # src/se_design.c sets the GTK theme variant of the X11 window
+      target_include_directories(${PROJECT_NAME} PRIVATE "${X11_INCLUDE_DIR}")
+  endif()
   if(MSVC)
       # For the Windows DLL build, use dynamic CRT (/MD) for .NET compatibility.
       # For other MSVC builds, use static CRT (/MT).

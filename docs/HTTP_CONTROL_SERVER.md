@@ -369,3 +369,17 @@ The following cheat will be added:
 ```0 - My cheat: 12345678 AABBCCDD (enabled)```
 
 If a cheat already existed at id 0, because id 0 was specified, the cheat will be overwritten with the new one
+
+# /setting command (GUI design)
+
+Changes the design of the GUI, see [DESIGN_SYSTEMS.md](DESIGN_SYSTEMS.md). All parameters are optional.
+
+- `design`: 0 = platform native, 1 = SkyEmu classic, 2 = Material 3, 3 = Fluent (Windows 11), 4 = Adwaita (GNOME)
+- `color_scheme`: 0 = follow system, 1 = light, 2 = dark, 3 = black
+- `accent`: accent color as hex `RRGGBB`, or `system` to use the accent of the OS
+- `system_font`: 1 = use the platform UI font when available, 0 = bundled font
+
+**Example**
+```http://localhost:8080/setting?design=2&color_scheme=1&accent=3584e4```
+
+The current values are reported by `/settings` as `design_system`, `color_scheme`, `use_custom_accent`, `custom_accent` and `use_bundled_font`.

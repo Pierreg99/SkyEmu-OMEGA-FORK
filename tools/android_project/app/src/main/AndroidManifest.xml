@@ -23,7 +23,7 @@
         android:name="com.sky.SkyEmu.EnhancedNativeActivity"
         android:exported="true"
         android:label="@string/app_name"
-        android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout"
+        android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|uiMode"
         android:windowSoftInputMode="stateHidden|adjustPan|adjustNothing"
         android:launchMode="singleTop">
       <intent-filter>

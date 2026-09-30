@@ -78,6 +78,34 @@ SKYEMU_API float se_get_volume(void);
 SKYEMU_API void se_set_theme(uint32_t theme);
 SKYEMU_API uint32_t se_get_theme(void);
 
+/*
+ * Design system of the GUI:
+ *   0 = Platform native (Material 3 on Android, Fluent on Windows, Adwaita on Linux,
+ *       the classic skin on Apple platforms)
+ *   1 = SkyEmu classic (image skin, uses the theme index above)
+ *   2 = Material 3 / Material You
+ *   3 = Fluent (Windows 11)
+ *   4 = Adwaita (GNOME)
+ */
+SKYEMU_API void se_set_design_system(uint32_t design);
+SKYEMU_API uint32_t se_get_design_system(void);
+
+/* Color scheme of the design systems: 0 = follow system, 1 = light, 2 = dark, 3 = black (AMOLED) */
+SKYEMU_API void se_set_color_scheme(uint32_t scheme);
+SKYEMU_API uint32_t se_get_color_scheme(void);
+
+/* Accent color 0xRRGGBB, or 0xFFFFFFFF to follow the system accent (Material You, Windows, GNOME) */
+SKYEMU_API void se_set_accent_color(uint32_t rgb);
+SKYEMU_API uint32_t se_get_accent_color(void);
+
+/*
+ * Lets a host app report the appearance of the OS when SkyEmu can not read it itself,
+ * e.g. a UWP/WinUI host passing UISettings values, or an Android host with its own activity.
+ *   dark:       1 = dark, 0 = light, -1 = unknown
+ *   accent_rgb: 0xRRGGBB, or 0xFFFFFFFF if unknown
+ */
+SKYEMU_API void se_set_system_appearance(int dark, uint32_t accent_rgb);
+
 /* GB palette colors (index 0-3) */
 SKYEMU_API void se_set_gb_palette(int index, uint32_t color);
 SKYEMU_API uint32_t se_get_gb_palette(int index);
