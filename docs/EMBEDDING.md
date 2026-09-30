@@ -176,6 +176,17 @@ and [`App/ios_support.h`](../App/ios_support.h) declares the platform hooks the 
 area insets, and the remote input, ping and external menu notifications), implemented in `App/ios_support.m`. Build steps are in
 [Building › iOS](BUILDING.md#ios).
 
+On iOS the library does not define `main()`. sokol's entry point is renamed `main_ios()`, which starts the UIKit
+app and does not return, so the host app's `main` hands over to it:
+
+```objc
+int main_ios(int argc, char* argv[]);
+
+int main(int argc, char* argv[]) {
+    return main_ios(argc, argv);
+}
+```
+
 ## HTTP control server
 
 Every native build can be scripted over HTTP, from any language. It is the easiest way to drive SkyEmu from

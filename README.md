@@ -123,7 +123,7 @@
 | **System integration** | | Dark mode, accent color, UI font and window frame follow the OS |
 | **Windows** | Stand-alone app | `SkyEmu.dll` with a C API ([`skyemu_dll.h`](src/skyemu_dll.h)) for host apps |
 | **Android** | Stand-alone app | Android library with a JNI settings and control API |
-| **iOS / macOS** | Stand-alone app | Static libraries for host apps, app bundles still available |
+| **iOS / macOS** | Stand-alone app | Static libraries for host apps (the macOS app bundle is still available) |
 | **Host APIs** | HTTP control server | Framebuffer access, key injection, UI and menu callbacks, save state slots, every setting |
 
 The design systems are described in [docs/DESIGN_SYSTEMS.md](docs/DESIGN_SYSTEMS.md) and the host APIs in [docs/EMBEDDING.md](docs/EMBEDDING.md).
@@ -137,7 +137,7 @@ The design systems are described in [docs/DESIGN_SYSTEMS.md](docs/DESIGN_SYSTEMS
 | **FreeBSD** | `SkyEmu` executable | Adwaita | |
 | **Android** 7.0+ | `libSkyEmu.so` in an Android library | Material 3 | Material You colors on Android 12+ |
 | **macOS** | `SkyEmu.app`, or a static library | SkyEmu Classic | |
-| **iOS** 15+ | Static library, or an app bundle | SkyEmu Classic | |
+| **iOS** 15+ | Static library | SkyEmu Classic | The host app provides `main()` and calls `main_ios()` |
 | **Web** | WebAssembly progressive web app | Material 3 | Follows the browser's color scheme |
 | **libretro** | `skyemu_libretro` core | Frontend UI | For RetroArch and other frontends |
 

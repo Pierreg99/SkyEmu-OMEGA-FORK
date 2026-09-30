@@ -10,7 +10,7 @@ Xcode projects and the Emscripten web build.
 | Linux, FreeBSD | `build/bin/SkyEmu` | [Linux](#linux) · [FreeBSD](#freebsd) |
 | Windows | `build/bin/<Config>/SkyEmu.dll` | [Windows](#windows) |
 | macOS | `build/bin/SkyEmu.app` or a static library | [macOS](#macos) |
-| iOS | Static library or app bundle | [iOS](#ios) |
+| iOS | Static library | [iOS](#ios) |
 | Android | `libSkyEmu.so` inside an Android library | [Android](#android) |
 | Web | `SkyEmu.html` + WebAssembly | [Web](#web) |
 | libretro | `skyemu_libretro` core | [libretro](#libretro-core) |
@@ -97,7 +97,12 @@ mkdir build-ios && cd build-ios
 ../build_static_ios.sh
 ```
 
-Set `-DBUILD_IOS_STATIC_LIB=OFF` to build a stand-alone app bundle instead.
+The library has no `main()`: in this fork sokol's iOS entry point is renamed `main_ios()`, and the host app calls
+it (see [Embedding › iOS and macOS](EMBEDDING.md#ios-and-macos)).
+
+> [!WARNING]
+> `-DBUILD_IOS_STATIC_LIB=OFF` generates an app bundle target, but it does not link on its own (undefined
+> `_main`) for the same reason. This is also why the *Build iOS* workflow fails.
 
 ## Android
 
