@@ -10054,7 +10054,7 @@ SKYEMU_API int win_main(int argc, char* argv[]) {
 }
 #endif /* SE_PLATFORM_WINDOWS_DLL */
 
-#if defined(SE_PLATFORM_IOS) || TARGET_OS_MACCATALYST || SE_PLATFORM_ANDROID
+#ifndef SE_PLATFORM_WINDOWS_DLL
 sapp_desc sokol_main(int argc, char* argv[]) {
     emu_state.cmd_line_arg_count = argc;
     emu_state.cmd_line_args = argv;
@@ -10108,4 +10108,4 @@ sapp_desc sokol_main(int argc, char* argv[]) {
             .ios_keyboard_resizes_canvas = true
     };
 }
-#endif /* SE_PLATFORM_IOS || TARGET_OS_MACCATALYST*/
+#endif /* !SE_PLATFORM_WINDOWS_DLL */
