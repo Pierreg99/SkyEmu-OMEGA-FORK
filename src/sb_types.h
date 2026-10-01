@@ -128,14 +128,17 @@ typedef struct{
   uint32_t read_ptr;
   uint32_t write_ptr;
 }sb_ring_buffer_t;
-static FORCE_INLINE uint32_t sb_ring_buffer_size(sb_ring_buffer_t* buff){
-  if(buff->read_ptr>SB_AUDIO_RING_BUFFER_SIZE){
-    buff->write_ptr-=SB_AUDIO_RING_BUFFER_SIZE;
-    buff->read_ptr-=SB_AUDIO_RING_BUFFER_SIZE;
-  }
-  uint32_t v = (buff->write_ptr-buff->read_ptr);
-  v= v%SB_AUDIO_RING_BUFFER_SIZE;
-  return v;
+// Counters may wrap at UINT32_MAX. Every data access masks to the ring capacity.
+// Querying availability must not modify producer/consumer state.
+static FORCE_INLINE uint32_t sb_ring_buffer_size(const sb_ring_buffer_t* buff){
+  return (buff->write_ptr-buff->read_ptr)%SB_AUDIO_RING_BUFFER_SIZE;
+}
+static FORCE_INLINE uint32_t sb_ring_buffer_read_span(const sb_ring_buffer_t* buff, const int16_t** data){
+  uint32_t start=buff->read_ptr%SB_AUDIO_RING_BUFFER_SIZE;
+  uint32_t available=sb_ring_buffer_size(buff);
+  uint32_t contiguous=SB_AUDIO_RING_BUFFER_SIZE-start;
+  *data=&buff->data[start];
+  return available<contiguous?available:contiguous;
 }
 typedef struct {
   int run_mode;          // [0: Reset, 1: Pause, 2: Run, 3: Step ]
@@ -195,7 +198,7 @@ static inline bool sb_path_has_file_ext(const char * path, const char * ext){
   int path_len = strlen(path);
   if(path_len<ext_len)return false;
   for(int i=0;i<ext_len;++i){
-    if(tolower(path[path_len-ext_len+i])!=tolower(ext[i]))return false;
+    if(tolower((unsigned char)path[path_len-ext_len+i])!=tolower((unsigned char)ext[i]))return false;
   }
   return true;
 }
@@ -204,61 +207,47 @@ static bool sb_file_exists(const char * path){
   if(f){fclose(f);return true;}
   return false; 
 }
-static bool sb_load_file_data_into_buffer(const char* path, void* buffer, size_t buffer_size){
-  FILE *f = fopen(path, "rb");
-  if(f){
-    size_t size = 0; 
-    fseek(f, 0,SEEK_END);
-    size = ftell(f);
-    fseek(f, 0,SEEK_SET);
-    if(size!=buffer_size){
-      printf("%s is the wrong size. Expected: %zu got: %zu\n",path,buffer_size,size);
-      return false; 
-    }
-    size =fread(buffer, 1, size, f);
-    printf("Loaded file %s file_size %zu\n",path,size);
-    fclose(f);
-    return true;
-  }else{
-    printf("Failed to open file %s\n",path);
-  }
-  return false;
+static bool sb_file_size(FILE* f, size_t* size){
+  if(fseek(f,0,SEEK_END)!=0)return false;
+  long end=ftell(f);
+  if(end<0 || fseek(f,0,SEEK_SET)!=0)return false;
+  *size=(size_t)end;
+  return true;
 }
-static uint8_t* sb_load_file_data(const char* path, size_t *file_size){
-  FILE *f = fopen(path, "rb");
-  if(file_size)*file_size = 0; 
-  if(f){
-    size_t size = 0; 
-    fseek(f, 0,SEEK_END);
-    size = ftell(f);
-    fseek(f, 0,SEEK_SET);
-    uint8_t *data = (uint8_t*)malloc(size);
-    if(!data)return NULL;
-    size =fread(data, 1, size, f);
-    if(size==EOF){size = 0; free(data);} 
-    if(file_size)*file_size = size;
-    printf("Loaded file %s file_size %zu\n",path,*file_size);
-    fclose(f);
-    return data;
-  }else{
-    printf("Failed to open file %s\n",path);
-  }
-  return NULL;
+static bool sb_load_file_data_into_buffer(const char* path, void* buffer, size_t buffer_size){
+  if(!path || (!buffer && buffer_size))return false;
+  FILE* f=fopen(path,"rb");
+  if(!f)return false;
+  size_t size=0;
+  bool ok=sb_file_size(f,&size) && size==buffer_size;
+  if(ok && size)ok=fread(buffer,1,size,f)==size && !ferror(f);
+  if(fclose(f)!=0)ok=false;
+  return ok;
+}
+static uint8_t* sb_load_file_data(const char* path, size_t* file_size){
+  if(file_size)*file_size=0;
+  if(!path)return NULL;
+  FILE* f=fopen(path,"rb");
+  if(!f)return NULL;
+  size_t size=0;
+  if(!sb_file_size(f,&size)){fclose(f);return NULL;}
+  // An empty file still has a freeable, non-NULL allocation.
+  uint8_t* data=(uint8_t*)malloc(size?size:1);
+  if(!data){fclose(f);return NULL;}
+  bool ok=!size || (fread(data,1,size,f)==size && !ferror(f));
+  if(fclose(f)!=0)ok=false;
+  if(!ok){free(data);return NULL;}
+  if(file_size)*file_size=size;
+  return data;
 }
 static bool sb_save_file_data(const char* path, const uint8_t* data, size_t file_size){
-  FILE *f = fopen(path, "wb");
-  size_t written = -1; 
-  if(f){
-    written = fwrite(data,1,file_size, f);
-    fclose(f);
-  }
-  if(written!=file_size){
-    printf("Error failed to save: %s (wrote: %zu out of %zu)\n",path,written,file_size);
-  }else{
-    printf("Saved: %s (size: %zu)\n",path,written);
-
-  }
-  return written ==file_size;
+  if(!path || (!data && file_size))return false;
+  FILE* f=fopen(path,"wb");
+  if(!f)return false;
+  bool ok=!file_size || fwrite(data,1,file_size,f)==file_size;
+  // Flush/close failures matter, even when fwrite accepted the entire buffer.
+  if(fclose(f)!=0)ok=false;
+  return ok;
 }
 static void sb_free_file_data(uint8_t* data){
   if(data)free(data);

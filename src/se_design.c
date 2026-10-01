@@ -514,6 +514,50 @@ void se_design_build_tokens(int design, int color_scheme, uint32_t custom_accent
   }
 }
 
+// Choose black or white against the actual, composited fill.
+static se_color_t se_readable_foreground(se_color_t fill){
+  uint32_t rgb=se_color_to_rgb(fill);
+  return se_color_from_rgb(se_contrast_ratio(rgb,0xffffff)>=se_contrast_ratio(rgb,0)?0xffffff:0,1);
+}
+void se_design_customize(se_design_tokens_t* t, bool high_contrast, uint32_t density, float radius_scale){
+  if(!isfinite(radius_scale))radius_scale=1;
+  radius_scale=fmaxf(0,fminf(radius_scale,2));
+  t->panel_rounding*=radius_scale; t->card_rounding*=radius_scale;
+  t->button_rounding*=radius_scale; t->input_rounding*=radius_scale;
+  t->check_rounding*=radius_scale; t->popup_rounding*=radius_scale;
+  t->scrollbar_rounding*=radius_scale;
+  if(density==1){
+    t->frame_padding_y=fmaxf(3,t->frame_padding_y*0.65f);
+    t->item_spacing_y*=0.7f; t->window_padding*=0.75f;
+  }else if(density==2){
+    // At least a 48 logical pixel hit target at the design's default font size.
+    t->frame_padding_y=fmaxf(t->frame_padding_y,(48-t->font_size)*0.5f);
+    t->item_spacing_y=fmaxf(8,t->item_spacing_y);
+    t->scrollbar_size=fmaxf(16,t->scrollbar_size);
+    t->slider_thumb_r=fmaxf(12,t->slider_thumb_r);
+  }
+  if(high_contrast){
+    se_color_t surface=se_color_from_rgb(t->dark?0x000000:0xffffff,1);
+    se_color_t foreground=se_color_from_rgb(t->dark?0xffffff:0x000000,1);
+    t->background=t->surface_bar=t->surface_panel=t->surface_content=surface;
+    t->surface_card=t->surface_popup=t->surface_input=surface;
+    t->on_surface=t->on_surface_variant=foreground;
+    t->on_surface_disabled=se_color_from_rgb(t->dark?0xbfbfbf:0x555555,1);
+    t->outline=t->outline_variant=foreground;
+    t->control=surface; t->control_hover=t->control_active=surface;
+    t->primary.a=t->selected.a=t->primary_container.a=t->secondary_container.a=t->tertiary_container.a=1;
+    t->on_primary=se_readable_foreground(t->primary);
+    t->on_selected=se_readable_foreground(t->selected);
+    t->on_primary_container=se_readable_foreground(t->primary_container);
+    t->on_secondary_container=se_readable_foreground(t->secondary_container);
+    t->on_tertiary_container=se_readable_foreground(t->tertiary_container);
+    t->on_error=se_readable_foreground(t->error);
+    t->accent_text=foreground;
+    t->control_border=t->popup_border=t->check_border=2;
+    t->bar_divider=true;
+  }
+}
+
 /*** Platform integration ***/
 
 #if defined(SE_DESIGN_FREEDESKTOP)

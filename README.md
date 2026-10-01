@@ -36,6 +36,13 @@
 > cores are SkyEmu's. This fork adds platform native design systems and turns SkyEmu into a component that other
 > apps can host on Windows, Android and iOS.
 
+## Sol6.1 upgrade branch
+
+The `Sol6.1VeryHighAccurateCodexversion` branch adds CRT scanlines, aperture grille
+and soft LCD shaders; display color controls; high contrast and layout options;
+settings, file I/O and audio fixes; and modern Android, Linux and Windows builds.
+See [the upgrade notes and validation steps](docs/SOL6_1_UPGRADE.md).
+
 ## Contents
 
 - [Highlights](#-highlights)

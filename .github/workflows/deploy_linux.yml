@@ -1,43 +1,40 @@
 name: Build Linux
-on: [push,pull_request]
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
 jobs:
-  build-and-deploy:
-    runs-on: ubuntu-latest
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
     steps:
-      - name: Checkout 🛎️
-        uses: actions/checkout@v2.3.1 
-      - name: Install dependencies
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libx11-dev libxi-dev libxrandr-dev libxinerama-dev libxcursor-dev
-          sudo apt-get install -y libgl1-mesa-dev libegl1-mesa-dev libasound2-dev
-      - name: Configure & Build 🔧 
+          sudo apt-get install -y ninja-build libx11-dev libxi-dev libxcursor-dev libgl1-mesa-dev libasound2-dev libsdl2-dev libssl-dev libcurl4-openssl-dev
+      - name: Configure and build
         run: |
-          mkdir build
-          cd build
-          cmake .. && cmake --build .
-
-      - name: Design token tests 🎨
-        run: |
-          cc -O2 -Wall -Wextra -DSE_PLATFORM_LINUX -Isrc tools/se_design_test.c src/se_design.c -lm -lX11 -o se_design_test
-          ./se_design_test
-          
-      - name: GH Release 🚀
-        # You may pin to the exact commit or the version.
-        uses: actions/upload-artifact@v4
+          cmake --preset linux-release
+          cmake --build --preset linux-release --parallel 2
+          cmake --build build/linux-release --target skyemu_libretro --parallel 2
+      - name: Run regression tests
+        run: ctest --preset linux-release
+      - uses: actions/upload-artifact@v4
         with:
-           name: LinuxRelease
-           path: build/bin/
-        #uses: softprops/action-gh-release@v0.1.5
-        #with:
-        #  # Note-worthy description of changes in release
-        #  # body: # optional
-        #  # Path to load note-worthy description of changes in release from
-        #  # body_path: # optional
-        #  # Gives the release a custom name. Defaults to tag name
-        #  name: LinuxRelease
-        #  # Identify the release as a prerelease. Defaults to false
-        #  prerelease: True
-        #  # Newline-delimited list of path globs for asset files to upload
-        #  files: build/bin/*
- 
+          name: LinuxRelease-${{ matrix.os }}
+          path: |
+            build/linux-release/bin/
+            build/linux-release/skyemu_libretro.so
+          if-no-files-found: error
+  sanitizers:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and test with memory and undefined behavior checks
+        run: |
+          cmake --preset runtime-tests -DSKYEMU_ENABLE_SANITIZERS=ON
+          cmake --build --preset runtime-tests --parallel 2
+          ctest --preset runtime-tests

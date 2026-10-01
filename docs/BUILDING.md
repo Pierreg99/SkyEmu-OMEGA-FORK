@@ -2,7 +2,7 @@
 
 # Building SkyEmu OMEGA
 
-Everything builds with CMake. The same `CMakeLists.txt` drives the desktop builds, the Android NDK build, the
+Use CMake 3.21 or newer (Android uses 3.22.1). Everything builds with CMake. The same `CMakeLists.txt` drives the desktop builds, the Android NDK build, the
 Xcode projects and the Emscripten web build.
 
 | Platform | Output | Jump to |
@@ -19,7 +19,7 @@ Xcode projects and the Emscripten web build.
 
 | Option | Default | Effect |
 |---|---|---|
-| `ENABLE_RETRO_ACHIEVEMENTS` | `ON` | RetroAchievements support. Keep it on: turning it off currently fails to compile (`atlas_tile_t` is only declared with it). |
+| `ENABLE_RETRO_ACHIEVEMENTS` | `ON` | RetroAchievements support; may be disabled for a smaller build. |
 | `USE_SYSTEM_CURL` | `OFF` | Link the system libcurl instead of building the bundled one |
 | `USE_SYSTEM_OPENSSL` | `OFF` | Link the system OpenSSL instead of building the bundled one |
 | `USE_SDL` | `ON` | SDL2 for game controllers and rumble on desktop |
@@ -40,7 +40,7 @@ Xcode projects and the Emscripten web build.
 sudo apt install build-essential cmake ninja-build \
   libx11-dev libxi-dev libxrandr-dev libxinerama-dev libxcursor-dev \
   libgl1-mesa-dev libegl1-mesa-dev libasound2-dev \
-  libssl-dev libcurl4-openssl-dev   # only needed with USE_SYSTEM_OPENSSL / USE_SYSTEM_CURL
+  libssl-dev libcurl4-openssl-dev libsdl2-dev   # only needed with USE_SYSTEM_OPENSSL / USE_SYSTEM_CURL
 
 cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DUSE_SYSTEM_CURL=ON -DUSE_SYSTEM_OPENSSL=ON
 cmake --build build
@@ -113,7 +113,7 @@ It is an **Android library module** (namespace `com.skyemu`) that host apps depe
 | | |
 |---|---|
 | NDK | 28.2.13676358 |
-| compileSdk / targetSdk | 35 |
+| compileSdk / targetSdk | 36 |
 | minSdk | 24 (Android 7.0) |
 | ABIs | arm64-v8a, armeabi-v7a, x86, x86_64 |
 
@@ -157,3 +157,6 @@ cc -O2 -Isrc tools/se_design_test.c src/se_design.c -lm -o se_design_test && ./s
 
 The emulation cores can be checked against test ROMs with the `run_gb_test` and `run_gba_test` command line
 modes of the executable.
+
+CMake presets, shader regeneration, regression tests and platform changes are
+described in [Sol6.1 upgrade notes](SOL6_1_UPGRADE.md).

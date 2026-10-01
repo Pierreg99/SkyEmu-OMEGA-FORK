@@ -20,6 +20,10 @@ public class MainSkyEmuObject {
         NativeBridge.initialize(activity);
     }
 
+    // Shader IDs 0-7; density 0 comfortable, 1 compact, 2 touch.
+    public native void se_android_set_display_effects(float scanlines, float mask, float curvature, float vignette);
+    public native void se_android_set_display_color(float brightness, float saturation, float contrast);
+    public native void se_android_set_design_options(int highContrast, int density, float roundness);
     public native void se_android_load_file(String filePath);
     public native void se_android_load_rom(String filePath);
     public native void se_android_load_html(String filePath);

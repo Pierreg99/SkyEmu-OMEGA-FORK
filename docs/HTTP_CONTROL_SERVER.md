@@ -258,7 +258,14 @@ settings are applied either way.
 | `theme` | Classic skin: `0` dark, `1` light, `2` black, `3` custom |
 | `language` | Language code such as `en`, `de` or `ja` (locales like `de_DE` work too) |
 | `volume` | `0.0` – `1.0` |
-| `shader` | `0` pixelate, `1` bilinear, `2` LCD, `3` LCD & subpixels, `4` xBRZ |
+| `shader` | `0` pixelate, `1` bilinear, `2` LCD, `3` LCD & subpixels, `4` xBRZ, `5` CRT, `6` CRT aperture grille, `7` soft LCD |
+| `scanline_strength`, `mask_strength`, `vignette` | `0`–`1` |
+| `curvature` | `0`–`0.25` (CRT modes) |
+| `display_brightness`, `display_contrast` | `0.5`–`1.5` |
+| `display_saturation` | `0`–`2` |
+| `high_contrast` | `0` off, `1` on |
+| `ui_density` | `0` comfortable, `1` compact, `2` touch |
+| `corner_radius_scale` | `0`–`2` |
 | `screen_rotation` | `0`–`3` for 0°, 90°, 180°, 270° |
 | `integer_scaling`, `ghosting`, `color_correction` | Screen options |
 | `gba_color_correction_mode` | `0` SkyEmu, `1` Higan |

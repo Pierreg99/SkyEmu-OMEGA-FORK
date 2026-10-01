@@ -1,0 +1,44 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {"major": 3, "minor": 21, "patch": 0},
+  "configurePresets": [
+    {
+      "name": "linux-release",
+      "displayName": "Linux release with system dependencies",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/linux-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "USE_SYSTEM_CURL": "ON",
+        "USE_SYSTEM_OPENSSL": "ON",
+        "USE_SYSTEM_SDL2": "ON",
+        "SKYEMU_BUILD_TESTS": "ON"
+      }
+    },
+    {
+      "name": "windows-release",
+      "displayName": "Windows x64 DLL",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/build/windows-release",
+      "cacheVariables": {"SKYEMU_BUILD_TESTS": "ON"}
+    },
+    {
+      "name": "runtime-tests",
+      "displayName": "Runtime and design tests without GUI dependencies",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/tests",
+      "cacheVariables": {"CMAKE_BUILD_TYPE": "Debug", "SKYEMU_TESTS_ONLY": "ON"}
+    }
+  ],
+  "buildPresets": [
+    {"name": "linux-release", "configurePreset": "linux-release"},
+    {"name": "windows-release", "configurePreset": "windows-release", "configuration": "Release"},
+    {"name": "runtime-tests", "configurePreset": "runtime-tests"}
+  ],
+  "testPresets": [
+    {"name": "linux-release", "configurePreset": "linux-release", "output": {"outputOnFailure": true}},
+    {"name": "windows-release", "configurePreset": "windows-release", "configuration": "Release", "output": {"outputOnFailure": true}},
+    {"name": "runtime-tests", "configurePreset": "runtime-tests", "output": {"outputOnFailure": true}}
+  ]
+}

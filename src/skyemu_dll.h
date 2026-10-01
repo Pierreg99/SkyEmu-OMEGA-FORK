@@ -63,6 +63,11 @@ SKYEMU_API void se_stretch_to_fit(int fit);
  */
 SKYEMU_API void se_set_screen_shader(uint32_t shader_mode);
 SKYEMU_API uint32_t se_get_screen_shader(void);
+// Shader IDs: 0 pixelate, 1 bilinear, 2 LCD, 3 subpixels, 4 xBRZ,
+// 5 CRT scanlines, 6 CRT aperture grille, 7 soft LCD. Ranges are clamped.
+SKYEMU_API void se_set_display_effects(float scanlines, float mask, float curvature, float vignette);
+SKYEMU_API void se_set_display_color(float brightness, float saturation, float contrast);
+SKYEMU_API void se_set_design_options(uint32_t high_contrast, uint32_t density, float roundness);
 
 /*
  * Persistent Settings API

@@ -53,3 +53,7 @@ cmake-build-*/
 tools/android_project/app/release
 /.vs
 /out/install/x64-Debug
+
+# Android SDK paths belong to each developer, never the repository.
+local.properties
+*.aar

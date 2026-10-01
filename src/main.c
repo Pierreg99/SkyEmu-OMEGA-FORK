@@ -19,7 +19,6 @@
 #ifdef ENABLE_RETRO_ACHIEVEMENTS
 #include "rc_client.h"
 #include "rc_consoles.h"
-#include "retro_achievements.h"
 #endif
 
 #include "gba.h"
@@ -38,6 +37,9 @@
 #include "mutex.h"
 #include "res.h"
 #include "se_design.h"
+#include "se_settings.h"
+#include "atlas.h"
+#include "retro_achievements.h"
 #include "sokol_app.h"
 #include "sokol_audio.h"
 #include "sokol_gfx.h"
@@ -207,52 +209,6 @@ typedef struct{
 typedef struct{
   char path[SB_FILE_PATH_SIZE];
 }se_game_info_t;
-typedef struct{
-  // This structure is directly saved out for the user settings. 
-  // Be very careful to keep alignment and ordering the same otherwise you will break the settings. 
-  uint32_t draw_debug_menu;
-  float volume; 
-  uint32_t theme; 
-  uint32_t settings_file_version; 
-  uint32_t gb_palette[4];
-  float ghosting;
-  float color_correction;
-  uint32_t integer_scaling; 
-  uint32_t screen_shader; //0: pixels, 1: lcd, 2: lcd+subpixels, 3: upscale
-  uint32_t screen_rotation; //0: No rotation, 1: Rotate Left, 2: Rotate Right, 3: Upside Down
-  uint32_t stretch_to_fit;
-  uint32_t auto_hide_touch_controls;
-  float touch_controls_opacity; 
-  uint32_t always_show_menubar;
-  uint32_t language;
-  float touch_controls_scale; 
-  uint32_t touch_controls_show_turbo; 
-  uint32_t save_to_path;
-  uint32_t force_dmg_mode; 
-  uint32_t gba_color_correction_mode; // 0 = SkyEmu, 1 = Higan
-  uint32_t http_control_server_port; 
-  uint32_t http_control_server_enable;
-  uint32_t avoid_overlaping_touchscreen; // 1=Avoid Overlap in Portrait, 2=Avoid Overlap in Landscape, 3=Avoid Overlap in Both
-  float custom_font_scale;
-  uint32_t hardcore_mode;
-  uint32_t draw_challenge_indicators;
-  uint32_t draw_progress_indicators;
-  uint32_t draw_leaderboard_trackers;
-  uint32_t draw_notifications;
-  float gui_scale_factor;
-  uint32_t only_one_notification;
-  uint32_t enable_download_cache;
-  uint32_t nds_layout; 
-  uint32_t touch_screen_show_button_labels;
-  uint32_t show_screen_bezel;
-  uint32_t design_system;     // SE_DESIGN_* (0 = native design of the platform)
-  uint32_t color_scheme;      // SE_COLOR_SCHEME_* (0 = follow the system)
-  uint32_t use_custom_accent; // 0 = system accent (Material You, Windows, GNOME), 1 = custom_accent
-  uint32_t custom_accent;     // 0xRRGGBB
-  uint32_t use_bundled_font;  // 0 = use the platform UI font when it is available, 1 = bundled font
-  uint32_t padding[213];
-}persistent_settings_t; 
-_Static_assert(sizeof(persistent_settings_t)==1024, "persistent_settings_t must be exactly 1024 bytes");
 #define SE_STATS_GRAPH_DATA 256
 typedef struct{
   double last_render_time;
@@ -572,9 +528,8 @@ typedef union{
       gba_t gba;  
       nds_t nds;
     };
-    #ifdef ENABLE_RETRO_ACHIEVEMENTS
-      uint8_t rc_buffer[SE_RC_BUFFER_SIZE]; // buffer for RetroAchievements state, should be more than enough
-    #endif
+    // Reserve the same save-state layout even when achievements are disabled.
+    uint8_t rc_buffer[SE_RC_BUFFER_SIZE];
   };
   // Raw data padded out to 64B to make rewind efficient
   uint64_t raw_data[(SE_MAX_CONST(SE_MAX_CONST(sizeof(gba_t), sizeof(nds_t)), sizeof(sb_gb_t))+SE_RC_BUFFER_SIZE)/SE_REWIND_SEGMENT_SIZE+1];
@@ -2931,13 +2886,29 @@ SKYEMU_API void se_stretch_to_fit(int fit) {
 }
 
 SKYEMU_API void se_set_screen_shader(uint32_t shader_mode) {
-    if (shader_mode <= 4) {
+    if (shader_mode < SE_SHADER_COUNT) {
         gui_state.settings.screen_shader = shader_mode;
     }
 }
 
 SKYEMU_API uint32_t se_get_screen_shader(void) {
     return gui_state.settings.screen_shader;
+}
+
+SKYEMU_API void se_set_display_effects(float scanlines, float mask, float curvature, float vignette){
+  gui_state.settings.scanline_strength=scanlines; gui_state.settings.mask_strength=mask;
+  gui_state.settings.curvature=curvature; gui_state.settings.vignette=vignette;
+  se_settings_validate(&gui_state.settings);
+}
+SKYEMU_API void se_set_display_color(float brightness, float saturation, float contrast){
+  gui_state.settings.display_brightness=brightness; gui_state.settings.display_saturation=saturation;
+  gui_state.settings.display_contrast=contrast;
+  se_settings_validate(&gui_state.settings);
+}
+SKYEMU_API void se_set_design_options(uint32_t high_contrast, uint32_t density, float roundness){
+  gui_state.settings.high_contrast=high_contrast; gui_state.settings.ui_density=density;
+  gui_state.settings.corner_radius_scale=roundness;
+  se_settings_validate(&gui_state.settings);
 }
 
 /* ---- Persistent Settings API ---- */
@@ -4056,6 +4027,7 @@ void se_draw_image_opacity(uint8_t *data, int im_width, int im_height,int x, int
 }
 
 void se_draw_lcd(uint8_t *data, int im_width, int im_height,int x, int y, int render_width, int render_height, float rotation,bool is_touch){
+  if(render_width<=0 || render_height<=0 || im_width<=0 || im_height<=0)return;
   sg_image *image = se_get_image();
   if(!image||!data){return; }
   if(im_width<=0)im_width=1;
@@ -4131,6 +4103,10 @@ void se_draw_lcd(uint8_t *data, int im_width, int im_height,int x, int y, int re
     .lcd_is_grayscale = lcd_info.is_grayscale,
     .integer_scaling = gui_state.settings.integer_scaling,
     .input_gamma = lcd_info.gamma,
+    .shader_effects={gui_state.settings.scanline_strength,gui_state.settings.mask_strength,gui_state.settings.curvature,gui_state.settings.vignette},
+    .color_adjustment={gui_state.test_runner_mode?1:gui_state.settings.display_brightness,
+                       gui_state.test_runner_mode?1:gui_state.settings.display_saturation,
+                       gui_state.test_runner_mode?1:gui_state.settings.display_contrast,0},
     .red_color = {lcd_info.red_color[0],lcd_info.red_color[1],lcd_info.red_color[2]},
     .green_color = {lcd_info.green_color[0],lcd_info.green_color[1],lcd_info.green_color[2]},
     .blue_color = {lcd_info.blue_color[0],lcd_info.blue_color[1],lcd_info.blue_color[2]},
@@ -6482,7 +6458,7 @@ static void se_update_design(){
     gui_state.last_appearance_query = now>0? now : 1e-6;
   }
 
-  typedef struct{bool active; int design; uint32_t theme, scheme, accent; se_system_appearance_t sys;}se_design_key_t;
+  typedef struct{bool active; int design; uint32_t theme, scheme, accent, high_contrast, density; float radius; se_system_appearance_t sys;}se_design_key_t;
   static se_design_key_t last_key;
   static bool has_key = false;
   se_design_key_t key;
@@ -6492,9 +6468,15 @@ static void se_update_design(){
   key.theme = active? 0 : gui_state.settings.theme;
   key.scheme = gui_state.settings.color_scheme;
   key.accent = accent;
+  key.high_contrast=gui_state.settings.high_contrast;
+  key.density=gui_state.settings.ui_density;
+  key.radius=gui_state.settings.corner_radius_scale;
   key.sys = gui_state.system_appearance;
   if(!has_key||memcmp(&key,&last_key,sizeof(key))!=0){
-    if(active)se_design_build_tokens(design,key.scheme,key.accent,&key.sys,&gui_state.design);
+    if(active){
+      se_design_build_tokens(design,key.scheme,key.accent,&key.sys,&gui_state.design);
+      se_design_customize(&gui_state.design,key.high_contrast,key.density,key.radius);
+    }
     gui_state.design_active = active;
     se_design_style_window();
     last_key = key;
@@ -6601,6 +6583,7 @@ static void se_apply_design_style(){
 }
 void se_imgui_theme()
 {
+  se_settings_validate(&gui_state.settings);
   se_update_design();
   // Window background around the emulated screen, applied from the next frame
   se_color_t clear = {0,0,0,1};
@@ -6918,6 +6901,10 @@ void se_set_new_controller(se_controller_state_t* cont, int index){
 #endif
 
 void se_draw_controller_config(gui_state_t* gui){
+#if !defined(USE_SDL) && !defined(SE_PLATFORM_ANDROID)
+  (void)gui;
+  se_text_disabled("Gamepad support is disabled in this build");
+#else
   se_section(ICON_FK_GAMEPAD " Controllers");
   ImGuiStyle* style = igGetStyle();
   se_controller_state_t *cont = &gui->controller;
@@ -6979,6 +6966,7 @@ void se_draw_controller_config(gui_state_t* gui){
   if(SDL_JoystickHasRumble(cont->sdl_joystick)){se_text("Rumble Supported");
   }else se_text("Rumble Not Supported");
 #endif
+#endif
 }
 
 void se_reset_default_gb_palette(){
@@ -6988,12 +6976,14 @@ void se_reset_default_gb_palette(){
   }
 }
 SKYEMU_API void se_capture_state_slot(int slot){
+  if(slot<0 || slot>=SE_NUM_SAVE_STATES || !emu_state.rom_loaded)return;
   se_capture_state(&core, save_states+slot);
   char save_state_path[SB_FILE_PATH_SIZE];
   snprintf(save_state_path,SB_FILE_PATH_SIZE,"%s.slot%d.state.png",emu_state.save_data_base_path,slot);
   se_save_state_to_disk(save_states+slot,save_state_path);
 }
 SKYEMU_API void se_restore_state_slot(int slot){
+  if(slot<0 || slot>=SE_NUM_SAVE_STATES || !emu_state.rom_loaded)return;
   if(save_states[slot].valid)se_restore_state(&core, save_states+slot);
 }
 void se_push_disabled(){
@@ -7235,6 +7225,18 @@ static void se_draw_design_settings(){
     else if(gui_state.system_appearance.accent!=SE_ACCENT_NONE)source = "Using the system accent color";
     se_text_disabled(source);
   }
+
+  bool high_contrast=gui_state.settings.high_contrast;
+  se_checkbox("High Contrast",&high_contrast);
+  gui_state.settings.high_contrast=high_contrast;
+  int density=gui_state.settings.ui_density;
+  se_field_label("Control Density");igSameLine(SE_FIELD_INDENT,0);
+  igPushItemWidth(-1);
+  se_combo_str("##ControlDensity",&density,"Comfortable\0Compact\0Touch\0",0);
+  gui_state.settings.ui_density=density;
+  se_field_label("Corner Roundness");igSameLine(SE_FIELD_INDENT,0);
+  se_slider_float("##CornerRoundness",&gui_state.settings.corner_radius_scale,0,2,"%.2f");
+  igPopItemWidth();
 
   bool system_font = !gui_state.settings.use_bundled_font;
   se_checkbox("Use System Font",&system_font);
@@ -7719,8 +7721,31 @@ void se_draw_menu_panel(){
   int v = gui_state.settings.screen_shader;
   igPushItemWidth(-1);
   se_field_label("Screen Shader");igSameLine(SE_FIELD_INDENT,0);
-  se_combo_str("##Screen Shader",&v,"Pixelate\0Bilinear\0LCD\0LCD & Subpixels\0Smooth Upscale (xBRZ)\0",0);
+  se_combo_str("##Screen Shader",&v,"Pixelate\0Bilinear\0LCD\0LCD & Subpixels\0Smooth Upscale (xBRZ)\0CRT Scanlines\0CRT Aperture Grille\0Soft LCD\0",0);
   gui_state.settings.screen_shader=v;
+  if(v>=SE_SHADER_CRT){
+    se_field_label("Scanlines");igSameLine(SE_FIELD_INDENT,0);
+    se_slider_float("##Scanlines",&gui_state.settings.scanline_strength,0,1,"%.2f");
+    se_field_label("Pixel Mask");igSameLine(SE_FIELD_INDENT,0);
+    se_slider_float("##PixelMask",&gui_state.settings.mask_strength,0,1,"%.2f");
+    if(v!=SE_SHADER_SOFT_LCD){
+      se_field_label("Curvature");igSameLine(SE_FIELD_INDENT,0);
+      se_slider_float("##Curvature",&gui_state.settings.curvature,0,0.25f,"%.2f");
+      se_field_label("Vignette");igSameLine(SE_FIELD_INDENT,0);
+      se_slider_float("##Vignette",&gui_state.settings.vignette,0,1,"%.2f");
+    }
+  }
+  se_field_label("Brightness");igSameLine(SE_FIELD_INDENT,0);
+  se_slider_float("##Brightness",&gui_state.settings.display_brightness,0.5f,1.5f,"%.2f");
+  se_field_label("Saturation");igSameLine(SE_FIELD_INDENT,0);
+  se_slider_float("##Saturation",&gui_state.settings.display_saturation,0,2,"%.2f");
+  se_field_label("Contrast");igSameLine(SE_FIELD_INDENT,0);
+  se_slider_float("##DisplayContrast",&gui_state.settings.display_contrast,0.5f,1.5f,"%.2f");
+  if(se_button("Reset Display Effects",(ImVec2){0,0})){
+    gui_state.settings.scanline_strength=0.35f; gui_state.settings.mask_strength=0.25f;
+    gui_state.settings.curvature=0.08f; gui_state.settings.vignette=0.15f;
+    gui_state.settings.display_brightness=gui_state.settings.display_saturation=gui_state.settings.display_contrast=1;
+  }
   v = gui_state.settings.screen_rotation;
   se_field_label("Screen Rotation");igSameLine(SE_FIELD_INDENT,0);
   se_combo_str("##Screen Rotation",&v,"0 degrees\00090 degrees\000180 degrees\000270 degrees\0",0);
@@ -7998,6 +8023,7 @@ uint8_t* se_hcs_callback(const char* cmd, const char** params, uint64_t* result_
       };
       params+=2;
     }
+    se_settings_validate(&gui_state.settings);
     str_result=emu_state.rom_loaded?"ok":"Failed to load ROM";
   }
   else if(strcmp(cmd, "/external_menu") == 0) {
@@ -8083,6 +8109,16 @@ uint8_t* se_hcs_callback(const char* cmd, const char** params, uint64_t* result_
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"nds_layout\": %d,\n",gui_state.settings.nds_layout);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"touch_screen_show_button_labels\": %d,\n",gui_state.settings.touch_screen_show_button_labels);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"show_screen_bezel\": %d,\n",gui_state.settings.show_screen_bezel);
+    off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"scanline_strength\": %f,\n",gui_state.settings.scanline_strength);
+    off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"mask_strength\": %f,\n",gui_state.settings.mask_strength);
+    off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"curvature\": %f,\n",gui_state.settings.curvature);
+    off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"vignette\": %f,\n",gui_state.settings.vignette);
+    off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"display_brightness\": %f,\n",gui_state.settings.display_brightness);
+    off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"display_saturation\": %f,\n",gui_state.settings.display_saturation);
+    off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"display_contrast\": %f,\n",gui_state.settings.display_contrast);
+    off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"corner_radius_scale\": %f,\n",gui_state.settings.corner_radius_scale);
+    off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"high_contrast\": %u,\n",gui_state.settings.high_contrast);
+    off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"ui_density\": %u,\n",gui_state.settings.ui_density);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"design_system\": %d,\n",gui_state.settings.design_system);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"color_scheme\": %d,\n",gui_state.settings.color_scheme);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"use_custom_accent\": %d,\n",gui_state.settings.use_custom_accent);
@@ -8107,7 +8143,18 @@ uint8_t* se_hcs_callback(const char* cmd, const char** params, uint64_t* result_
       else if(strcmp(params[0],"dpi")==0)gui_state.dpi_override=atof(params[1]);
       else if(strcmp(params[0],"touch_controls_scale")==0)gui_state.settings.touch_controls_scale=atof(params[1]);
       else if(strcmp(params[0],"language")==0)gui_state.settings.language=se_convert_locale_to_enum(params[1]);
-      else if(strcmp(params[0],"shader")==0)gui_state.settings.screen_shader=atof(params[1]);
+      else if(strcmp(params[0],"shader")==0)se_set_screen_shader((uint32_t)atoi(params[1]));
+      else if(strcmp(params[0],"scanline_strength")==0)gui_state.settings.scanline_strength=atof(params[1]);
+      else if(strcmp(params[0],"mask_strength")==0)gui_state.settings.mask_strength=atof(params[1]);
+      else if(strcmp(params[0],"curvature")==0)gui_state.settings.curvature=atof(params[1]);
+      else if(strcmp(params[0],"vignette")==0)gui_state.settings.vignette=atof(params[1]);
+      else if(strcmp(params[0],"display_brightness")==0)gui_state.settings.display_brightness=atof(params[1]);
+      else if(strcmp(params[0],"display_saturation")==0)gui_state.settings.display_saturation=atof(params[1]);
+      else if(strcmp(params[0],"display_contrast")==0)gui_state.settings.display_contrast=atof(params[1]);
+      else if(strcmp(params[0],"corner_radius_scale")==0)gui_state.settings.corner_radius_scale=atof(params[1]);
+      else if(strcmp(params[0],"high_contrast")==0)gui_state.settings.high_contrast=atoi(params[1]);
+      else if(strcmp(params[0],"ui_density")==0)gui_state.settings.ui_density=atoi(params[1]);
+
       else if(strcmp(params[0],"load_slot")==0)se_restore_state_slot(atoi(params[1]));
       else if(strcmp(params[0],"capture_slot")==0)se_capture_state_slot(atoi(params[1]));
       else if(strcmp(params[0],"edit_cheat_index")==0)gui_state.editing_cheat_index = atoi(params[1]);
@@ -8160,6 +8207,7 @@ uint8_t* se_hcs_callback(const char* cmd, const char** params, uint64_t* result_
       else if(strcmp(params[0],"show_screen_bezel")==0)gui_state.settings.show_screen_bezel=atoi(params[1]);
       params+=2;
     }
+    se_settings_validate(&gui_state.settings);
     str_result=emu_state.rom_loaded?"ok":"Failed to load ROM";
   }else if(strcmp(cmd,"/step")==0){
     int step_frames = 1; 
@@ -9005,7 +9053,7 @@ static void frame(void) {
   int sample_copy_index = sample_copies; 
   for(int s = 0; s<num_samples_to_push;s+=samples_to_push){
     float audio_buff[samples_to_push];
-    if(sb_ring_buffer_size(&emu_state.audio_ring_buff)<=samples_to_push){
+    if(sb_ring_buffer_size(&emu_state.audio_ring_buff)<(samples_to_push+sample_copies-1)/sample_copies){
       se_reset_audio_ring();
       break;
     }
@@ -9034,9 +9082,10 @@ static void frame(void) {
   if(memcmp(&gui_state.last_saved_settings, &gui_state.settings,sizeof(gui_state.settings))){
     char settings_path[SB_FILE_PATH_SIZE];
     snprintf(settings_path,SB_FILE_PATH_SIZE,"%suser_settings.bin",se_get_pref_path());
-    sb_save_file_data(settings_path,(uint8_t*)&gui_state.settings,sizeof(gui_state.settings));
-    se_emscripten_flush_fs();
-    gui_state.last_saved_settings=gui_state.settings;
+    if(sb_save_file_data(settings_path,(uint8_t*)&gui_state.settings,sizeof(gui_state.settings))){
+      se_emscripten_flush_fs();
+      gui_state.last_saved_settings=gui_state.settings;
+    }
   }
   atlas_upload_all();
 }
@@ -9060,76 +9109,8 @@ void se_load_settings(){
     char settings_path[SB_FILE_PATH_SIZE];
     snprintf(settings_path,SB_FILE_PATH_SIZE,"%suser_settings.bin",se_get_pref_path());
     if(!sb_load_file_data_into_buffer(settings_path,(void*)&gui_state.settings,sizeof(gui_state.settings))){gui_state.settings.settings_file_version=-1;}
-    int max_settings_version_supported =4;
-    if(gui_state.settings.settings_file_version>max_settings_version_supported){
-      gui_state.settings.volume=0.8;
-      gui_state.settings.draw_debug_menu = false; 
-      gui_state.settings.settings_file_version = 0;
-    }
-    if(gui_state.settings.settings_file_version<1){
-      gui_state.settings.settings_file_version=1; 
-      se_reset_default_gb_palette();
-      gui_state.settings.ghosting = 1.0;
-      gui_state.settings.color_correction=1.0;
-      gui_state.settings.integer_scaling=false;
-      gui_state.settings.screen_shader=3;
-      gui_state.settings.screen_rotation=0;
-      gui_state.settings.stretch_to_fit = 0; 
-    }
-    if(gui_state.settings.screen_shader>4)gui_state.settings.screen_shader=4;
-    if(gui_state.settings.settings_file_version<2){
-      gui_state.settings.settings_file_version = 2; 
-      gui_state.settings.auto_hide_touch_controls=true;
-      gui_state.settings.touch_controls_opacity = 0.5;
-      gui_state.settings.always_show_menubar=true;
-      gui_state.settings.language=SE_LANG_DEFAULT;
-      gui_state.settings.touch_controls_scale=1.0;
-      gui_state.settings.touch_controls_show_turbo = 1; 
-      gui_state.settings.save_to_path = false;
-      gui_state.settings.http_control_server_enable = true;
-      gui_state.settings.http_control_server_port=8080;
-      gui_state.settings.avoid_overlaping_touchscreen = false;
-    }
-    if(gui_state.settings.settings_file_version<3){
-      gui_state.settings.gui_scale_factor = 1.0; 
-      gui_state.settings.settings_file_version = 3;
-      gui_state.settings.hardcore_mode=0;
-      gui_state.settings.draw_challenge_indicators=1;
-      gui_state.settings.draw_progress_indicators=1;
-      gui_state.settings.draw_leaderboard_trackers=1;
-      gui_state.settings.draw_notifications=1;
-      gui_state.settings.show_screen_bezel=true;
-
-      bool is_mobile = gui_state.ui_type == SE_UI_ANDROID || gui_state.ui_type == SE_UI_IOS;
-      if(is_mobile){
-        gui_state.settings.only_one_notification=1;
-      }
-      gui_state.settings.enable_download_cache=1;
-      https_set_cache_enabled(gui_state.settings.enable_download_cache);
-      gui_state.settings.nds_layout = 0; 
-      gui_state.settings.touch_screen_show_button_labels= true;
-    }
-    if(gui_state.settings.settings_file_version<4){
-      gui_state.settings.settings_file_version = 4;
-      // Custom skins are image based and keep the classic design, the Light and Black
-      // themes carry over as the color scheme of the platform design.
-      gui_state.settings.design_system = gui_state.settings.theme==SE_THEME_CUSTOM? SE_DESIGN_CLASSIC : SE_DESIGN_AUTO;
-      gui_state.settings.color_scheme = gui_state.settings.theme==SE_THEME_LIGHT? SE_COLOR_SCHEME_LIGHT :
-                                        gui_state.settings.theme==SE_THEME_BLACK? SE_COLOR_SCHEME_BLACK : SE_COLOR_SCHEME_SYSTEM;
-      gui_state.settings.use_custom_accent = false;
-      gui_state.settings.custom_accent = 0;
-      gui_state.settings.use_bundled_font = false;
-    }
-    if(gui_state.settings.design_system>=SE_DESIGN_COUNT)gui_state.settings.design_system=SE_DESIGN_AUTO;
-    if(gui_state.settings.color_scheme>=SE_COLOR_SCHEME_COUNT)gui_state.settings.color_scheme=SE_COLOR_SCHEME_SYSTEM;
-    if(gui_state.settings.gui_scale_factor<0.5)gui_state.settings.gui_scale_factor=1.0;
-    if(gui_state.settings.gui_scale_factor>4.0)gui_state.settings.gui_scale_factor=1.0;
-
-    if(gui_state.settings.custom_font_scale<0.5)gui_state.settings.custom_font_scale=1.0;
-    if(gui_state.settings.custom_font_scale>2.0)gui_state.settings.custom_font_scale=1.0;
-    if(gui_state.settings.touch_controls_scale<0.1)gui_state.settings.touch_controls_scale=1.0;
-    if(gui_state.settings.touch_controls_opacity<0||gui_state.settings.touch_controls_opacity>1.0)gui_state.settings.touch_controls_opacity=0.5;
-    if(gui_state.settings.gba_color_correction_mode> GBA_HIGAN_CORRECTION)gui_state.settings.gba_color_correction_mode=GBA_SKYEMU_CORRECTION;
+    se_settings_migrate(&gui_state.settings, gui_state.ui_type==SE_UI_ANDROID || gui_state.ui_type==SE_UI_IOS);
+    https_set_cache_enabled(gui_state.settings.enable_download_cache);
     gui_state.last_saved_settings=gui_state.settings;
     se_reload_theme();
   }
@@ -10497,6 +10478,25 @@ void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1enable_1download_1ca
 jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1enable_1download_1cache(JNIEnv *env, jobject thiz) { return (jint)se_get_enable_download_cache(); }
 void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1draw_1debug_1menu(JNIEnv *env, jobject thiz, jint value) { se_set_draw_debug_menu((uint32_t)value); }
 jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1draw_1debug_1menu(JNIEnv *env, jobject thiz) { return (jint)se_get_draw_debug_menu(); }
+
+JNIEXPORT void JNICALL Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1set_1display_1effects(JNIEnv* env, jobject thiz, jfloat scanlines, jfloat mask, jfloat curve, jfloat vignette){
+  (void)env; (void)thiz; se_set_display_effects(scanlines,mask,curve,vignette);
+}
+JNIEXPORT void JNICALL Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1set_1display_1color(JNIEnv* env, jobject thiz, jfloat brightness, jfloat saturation, jfloat contrast){
+  (void)env; (void)thiz; se_set_display_color(brightness,saturation,contrast);
+}
+JNIEXPORT void JNICALL Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1set_1design_1options(JNIEnv* env, jobject thiz, jint high_contrast, jint density, jfloat roundness){
+  (void)env; (void)thiz; se_set_design_options(high_contrast,density,roundness);
+}
+JNIEXPORT void JNICALL Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1display_1effects(JNIEnv* env, jobject thiz, jfloat scanlines, jfloat mask, jfloat curve, jfloat vignette){
+  (void)env; (void)thiz; se_set_display_effects(scanlines,mask,curve,vignette);
+}
+JNIEXPORT void JNICALL Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1display_1color(JNIEnv* env, jobject thiz, jfloat brightness, jfloat saturation, jfloat contrast){
+  (void)env; (void)thiz; se_set_display_color(brightness,saturation,contrast);
+}
+JNIEXPORT void JNICALL Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1design_1options(JNIEnv* env, jobject thiz, jint high_contrast, jint density, jfloat roundness){
+  (void)env; (void)thiz; se_set_design_options(high_contrast,density,roundness);
+}
 
 /* ---- JNI bindings for all settings ---- */
 

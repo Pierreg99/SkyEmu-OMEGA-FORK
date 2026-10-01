@@ -47,7 +47,7 @@ public class EnhancedNativeActivity extends NativeActivity {
     final static int STORAGE_PERMISSION_CODE = 501; // Any value
     final static int FILE_PICKER_REQUEST_CODE = 123;
     final static String TAG="SkyEmu"; // Any value
-    public Rect visibleRect;
+    public Rect visibleRect = new Rect();
     public EditText invisibleEditText;
     public View mRootView;
     private Vector<Integer> keyboardEvents;
@@ -275,31 +275,31 @@ public class EnhancedNativeActivity extends NativeActivity {
             }
         });
     }
-    private File copyFileToExternalDirectory(Uri sourceFilePath, String destinationDirectoryPath, String filename) {
-        File sourceFile = new File(sourceFilePath.getPath());
-        if(sourceFile!=null)Log.i("FilePicker","Source File Exists\n");
-        File destinationDirectory = new File(destinationDirectoryPath);
-        if(destinationDirectory!=null)Log.i("FilePicker","Destination File Exists\n");
-
-        if (!destinationDirectory.exists()) {
-            destinationDirectory.mkdirs();
-        }
-
-        File copiedFile = new File(destinationDirectory, filename);
-        if(copiedFile!=null)Log.i("FilePicker","Copied File Exists\n");
-
-        try (InputStream in = getContentResolver().openInputStream(sourceFilePath);
-             OutputStream out = new FileOutputStream(copiedFile)) {
-            byte[] buffer = new byte[1024];
-            int length;
-            while ((length = in.read(buffer)) > 0) {
-                out.write(buffer, 0, length);
+    private File copyFileToExternalDirectory(Uri sourceUri, String directory, String filename) {
+        File destinationDirectory = new File(directory);
+        if (!destinationDirectory.isDirectory() && !destinationDirectory.mkdirs()) return null;
+        // Providers supply display names, not filesystem paths.
+        String safeName = filename.replace('\\', '/');
+        safeName = safeName.substring(safeName.lastIndexOf('/') + 1);
+        if (safeName.isEmpty() || safeName.equals(".") || safeName.equals("..")) safeName = "imported-game";
+        File temporary = null;
+        try {
+            temporary = File.createTempFile("skyemu-import-", ".tmp", destinationDirectory);
+            try (InputStream in = getContentResolver().openInputStream(sourceUri);
+                 OutputStream out = new FileOutputStream(temporary)) {
+                if (in == null) throw new IOException("Provider did not return a file stream");
+                byte[] buffer = new byte[64 * 1024];
+                int length;
+                while ((length = in.read(buffer)) != -1) out.write(buffer, 0, length);
             }
-            Log.i("FilePicker","Done copying\n");
+            File copiedFile = new File(destinationDirectory, safeName);
+            if (!temporary.renameTo(copiedFile)) throw new IOException("Could not finish file import");
             return copiedFile;
-        } catch (IOException e) {
-            e.printStackTrace();
+        } catch (IOException | SecurityException e) {
+            Log.e("SkyEmu", "File import failed", e);
             return null;
+        } finally {
+            if (temporary != null && temporary.exists()) temporary.delete();
         }
     }
     protected void onCreate(Bundle savedInstanceState) {
@@ -317,6 +317,17 @@ public class EnhancedNativeActivity extends NativeActivity {
                     Rect r = new Rect();
                     View view = mRootWindow.getDecorView();
                     view.getWindowVisibleDisplayFrame(r);
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        android.view.WindowInsets insets = view.getRootWindowInsets();
+                        if (insets != null) {
+                            android.graphics.Insets safe = insets.getInsets(
+                                    android.view.WindowInsets.Type.systemBars()
+                                    | android.view.WindowInsets.Type.displayCutout()
+                                    | android.view.WindowInsets.Type.ime());
+                            r.set(safe.left, safe.top, view.getWidth() - safe.right,
+                                    view.getHeight() - safe.bottom);
+                        }
+                    }
                     activity.visibleRect = r;
                 }
             });
@@ -346,7 +357,14 @@ public class EnhancedNativeActivity extends NativeActivity {
             }
         });
         // This work only for android 4.4+
-        if(currentApiVersion >= Build.VERSION_CODES.KITKAT){
+        if (currentApiVersion >= Build.VERSION_CODES.R) {
+            getWindow().setDecorFitsSystemWindows(false);
+            android.view.WindowInsetsController controller = getWindow().getInsetsController();
+            if (controller != null) {
+                controller.setSystemBarsBehavior(android.view.WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+                controller.hide(android.view.WindowInsets.Type.systemBars());
+            }
+        } else if(currentApiVersion >= Build.VERSION_CODES.KITKAT){
             getWindow().getDecorView().setSystemUiVisibility(flags);
 
             // Code below is to handle presses of Volume up or Volume down.
@@ -377,25 +395,20 @@ public class EnhancedNativeActivity extends NativeActivity {
         startActivityForResult(intent, FILE_PICKER_REQUEST_CODE);
     }
     public String getFileName(Uri uri) {
+        if (uri == null) return "imported-game";
         String result = null;
-        if (uri.getScheme().equals("content")) {
-            Cursor cursor = getContentResolver().query(uri, null, null, null, null);
-            try {
+        if ("content".equals(uri.getScheme())) {
+            try (Cursor cursor = getContentResolver().query(uri, null, null, null, null)) {
                 if (cursor != null && cursor.moveToFirst()) {
-                    result = cursor.getString(cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME));
+                    int column = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                    if (column >= 0) result = cursor.getString(column);
                 }
-            } finally {
-                cursor.close();
+            } catch (SecurityException | IllegalArgumentException e) {
+                Log.w("SkyEmu", "Could not read provider display name", e);
             }
         }
-        if (result == null) {
-            result = uri.getPath();
-            int cut = result.lastIndexOf('/');
-            if (cut != -1) {
-                result = result.substring(cut + 1);
-            }
-        }
-        return result;
+        if (result == null || result.isEmpty()) result = uri.getLastPathSegment();
+        return result == null || result.isEmpty() ? "imported-game" : result;
     }
     @Override
     public boolean onKeyDown(int keycode, KeyEvent event) {
@@ -429,23 +442,15 @@ public class EnhancedNativeActivity extends NativeActivity {
         // If the event is not the back button press, let it propagate as usual
         return false;
     }
-    public void loadURI(Uri selectedFileUri, boolean is_rom){
-        String filename = getFileName(selectedFileUri);
-        File file = new File(selectedFileUri.getPath());//create path from uri
-        Log.i("SkyEmu", "Selected file path: " + filename);
-
-        if (selectedFileUri != null) {
-            // Get the original file's path using its URI
-            // Copy the file to the external directory
-            String externalDirectoryPath = getExternalFilesDir(null).getAbsolutePath();
-            File copiedFile = copyFileToExternalDirectory(selectedFileUri, externalDirectoryPath,filename);
-
-            if (copiedFile != null) {
-                String copiedFilePath = copiedFile.getAbsolutePath();
-                if(is_rom)se_android_load_rom(copiedFilePath);
-                se_android_load_file(copiedFilePath);
-                Log.i("SkyEmu", "Copied file path: " + copiedFilePath);
-            }
+    public void loadURI(Uri selectedFileUri, boolean is_rom) {
+        if (selectedFileUri == null) return;
+        File directory = getExternalFilesDir(null);
+        if (directory == null) directory = getFilesDir();
+        File copiedFile = copyFileToExternalDirectory(selectedFileUri,
+                directory.getAbsolutePath(), getFileName(selectedFileUri));
+        if (copiedFile != null) {
+            if (is_rom) se_android_load_rom(copiedFile.getAbsolutePath());
+            else se_android_load_file(copiedFile.getAbsolutePath());
         }
     }
     public void openCustomTab(String url){
@@ -466,6 +471,10 @@ public class EnhancedNativeActivity extends NativeActivity {
             }
         }
     }
+    // Shader IDs 0-7; density 0 comfortable, 1 compact, 2 touch.
+    public native void se_android_set_display_effects(float scanlines, float mask, float curvature, float vignette);
+    public native void se_android_set_display_color(float brightness, float saturation, float contrast);
+    public native void se_android_set_design_options(int highContrast, int density, float roundness);
     public native void se_android_load_file(String filePath);
     public native void se_android_load_rom(String filePath);
     public native void se_android_load_html(String filePath);

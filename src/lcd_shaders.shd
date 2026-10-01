@@ -1,4 +1,4 @@
-// Shader compilation instructions: 
+// Shader compilation instructions (or run python3 tools/generate_shaders.py):
 // sokol-shdc -i lcd_shaders.shd -o lcd_shaders.h -l glsl330:glsl100:glsl300es:hlsl4:metal_macos:metal_ios:metal_sim:wgpu -b
 // (note that for Metal and D3D11 byte code, sokol-shdc must be run on macOS and Windows)
 // sokol-shdc is in tools/sokol-tools/bin
@@ -19,6 +19,8 @@ uniform lcd_params {
     vec3 green_color;
     vec3 blue_color;
     float input_gamma;
+    vec4 shader_effects; // scanlines, mask, curvature, vignette
+    vec4 color_adjustment; // brightness, saturation, contrast, reserved
 };
 in vec2 position;
 in vec2 texcoord0;
@@ -50,6 +52,8 @@ uniform lcd_params_fs {
     vec3 green_color;
     vec3 blue_color;
     float input_gamma;
+    vec4 shader_effects; // scanlines, mask, curvature, vignette
+    vec4 color_adjustment; // brightness, saturation, contrast, reserved
 };
 precision highp float;
 precision highp int;
@@ -69,9 +73,9 @@ bool cmp_colors2(vec4 c1, vec4 c2){
 
 vec4 sample_color_correct(vec2 uv){
     vec4 orig_color = texture(tex, uv);
-    vec3 color = pow(orig_color.rgb,vec3(input_gamma));
+    vec3 color = pow(max(orig_color.rgb,vec3(0.0)),vec3(max(input_gamma,0.01)));
     color.rgb = color.r*red_color+color.g*green_color+color.b*blue_color;
-    color.rgb= pow(color.rgb,vec3(1.0/2.2));
+    color.rgb= pow(max(color.rgb,vec3(0.0)),vec3(1.0/2.2));
     color = clamp(color,0.,1.);
     orig_color.rgb=mix(orig_color.rgb,color,color_correction_strength);
     return orig_color;
@@ -82,13 +86,13 @@ vec4 sample_color_correct(vec2 uv){
 
 /*
    Hyllian's xBR-vertex code and texel mapping
-   
+
    Copyright (C) 2011/2016 Hyllian - sergiogdb@gmail.com
    Permission is hereby granted, free of charge, to any person obtaining a copy
    of this software and associated documentation files (the "Software"), to deal
    in the Software without restriction, including without limitation the rights
    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-   copies of the Software, and to permit persons to whom the Software is 
+   copies of the Software, and to permit persons to whom the Software is
    furnished to do so, subject to the following conditions:
    The above copyright notice and this permission notice shall be included in
    all copies or substantial portions of the Software.
@@ -99,7 +103,7 @@ vec4 sample_color_correct(vec2 uv){
    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
    THE SOFTWARE.
-*/ 
+*/
 // compatibility #defines
 #define Source tex
 #define vTexCoord uv.xy
@@ -350,8 +354,8 @@ vec4 xbrz()
   }
 
   return vec4(res, 1.0);
-} 
-#endif 
+}
+#endif
 vec4 bilinear(vec4 v1, vec4 v2, vec4 v3, vec4 v4, vec2 scale){
     return mix(mix(v1,v2,scale.x),mix(v3,v4,scale.x),scale.y);
 }
@@ -360,7 +364,50 @@ bool nomatch(vec4 v[9]){
            !cmp_colors(v[4],v[3])&&!cmp_colors(v[4],v[5])&&
            !cmp_colors(v[4],v[6])&&!cmp_colors(v[4],v[7])&&!cmp_colors(v[4],v[8]);
 }
+vec3 adjust_display(vec3 color){
+  float luma = dot(color,vec3(0.2126,0.7152,0.0722));
+  color = mix(vec3(luma),color,color_adjustment.y);
+  color = (color-0.5)*color_adjustment.z+0.5;
+  return clamp(color*color_adjustment.x,0.0,1.0);
+}
+vec4 smooth_sample(vec2 coord){
+  vec2 px = coord*emu_lcd_size-0.5;
+  vec2 base = (floor(px)+0.5)/emu_lcd_size;
+  vec2 alpha = fract(px);
+  return bilinear(sample_color_correct(base),sample_color_correct(base+vec2(1,0)/emu_lcd_size),
+                  sample_color_correct(base+vec2(0,1)/emu_lcd_size),sample_color_correct(base+vec2(1,1)/emu_lcd_size),alpha);
+}
 void main() {
+  int new_mode = int(display_mode+0.5);
+  if(new_mode>=5){
+    vec2 p = uv*2.0-1.0;
+    vec2 sample_uv = uv;
+    if(new_mode==5 || new_mode==6){
+      sample_uv = p*(1.0+shader_effects.z*vec2(p.y*p.y,p.x*p.x));
+      sample_uv = sample_uv*0.5+0.5;
+      if(sample_uv.x<0.0 || sample_uv.y<0.0 || sample_uv.x>1.0 || sample_uv.y>1.0){
+        frag_color=vec4(0,0,0,1); return;
+      }
+    }
+    vec3 color = smooth_sample(sample_uv).rgb;
+    // Suppress unresolved patterns at small sizes to avoid flicker and moire.
+    float resolve_y = smoothstep(1.0,2.5,render_size.y/emu_lcd_size.y);
+    float scan = 0.5+0.5*cos(sample_uv.y*emu_lcd_size.y*6.2831853);
+    float strength = shader_effects.x*resolve_y;
+    color *= 1.0-strength*scan;
+    if(new_mode==6){
+      float phase = mod(floor(gl_FragCoord.x),3.0);
+      vec3 mask = vec3(phase<0.5?1.0:0.5,abs(phase-1.0)<0.5?1.0:0.5,phase>1.5?1.0:0.5);
+      color *= mix(vec3(1.0),mask,shader_effects.y*smoothstep(2.0,3.0,render_size.x/emu_lcd_size.x));
+    }else if(new_mode==7){
+      vec2 grid = fract(sample_uv*emu_lcd_size);
+      float edge = (1.0-smoothstep(0.0,0.12,grid.x))+(1.0-smoothstep(0.0,0.12,grid.y));
+      color *= 1.0-clamp(edge,0.0,1.0)*shader_effects.y*resolve_y;
+    }
+    color=adjust_display(color);
+    if(new_mode!=7)color*=1.0-shader_effects.w*clamp(dot(p,p)*0.5,0.0,1.0);
+    frag_color=vec4(color,1.0); return;
+  }
   vec4 val = sample_color_correct(uv);
   frag_color = val;
   float smooth_width = emu_lcd_size.x/render_size.x;
@@ -368,7 +415,7 @@ void main() {
   vec2 pix_sub = fract(uv*emu_lcd_size);
   int mode = int(display_mode+0.5);
 
-  if(lcd_is_grayscale>0.5&&mode ==3)mode = 2; 
+  if(lcd_is_grayscale>0.5&&mode ==3)mode = 2;
   if(integer_scaling>0.5){
      val = frag_color = sample_color_correct(uv);
   }else{
@@ -388,8 +435,8 @@ void main() {
 
     vec2 alpha = vec2(smoothstep(0.5-smooth_dim.x*0.5,0.5+smooth_dim.x*0.5,residual.x),
                       smoothstep(0.5-smooth_dim.y*0.5,0.5+smooth_dim.y*0.5,residual.y));
-      
-    
+
+
     val = frag_color = mix(mix(v[0],v[1],alpha.x),mix(v[2],v[3],alpha.x),alpha.y);
   }
   if(mode==1){
@@ -404,8 +451,8 @@ void main() {
     v[3] = sample_color_correct(ip+vec2(1.0,1.0)/emu_lcd_size);
     frag_color = mix(mix(v[0],v[1],pix_sub.x),mix(v[2],v[3],pix_sub.x),pix_sub.y);
   }else if(mode==2){
-    float rgb_factor = smoothstep(0.0,0.0+smooth_height,pix_sub.y)-smoothstep(1.0-smooth_height,1.0,pix_sub.y);    
-    rgb_factor *= (smoothstep(0.0,smooth_width,pix_sub.x)-smoothstep(1.0-smooth_width,1.0,pix_sub.x));    
+    float rgb_factor = smoothstep(0.0,0.0+smooth_height,pix_sub.y)-smoothstep(1.0-smooth_height,1.0,pix_sub.y);
+    rgb_factor *= (smoothstep(0.0,smooth_width,pix_sub.x)-smoothstep(1.0-smooth_width,1.0,pix_sub.x));
     rgb_factor = mix(0.66,1.,rgb_factor);
     if(lcd_is_grayscale>0.5){
         vec4 bilin = frag_color;
@@ -430,7 +477,7 @@ void main() {
     float g_factor = smoothstep(0.33-expansion*0.5,0.33+smooth_width_sub,pix_sub.x)-
                      smoothstep(0.66-smooth_width_sub,0.66+expansion*0.5,pix_sub.x);
     float b_factor = smoothstep(0.66-expansion,0.66+smooth_width_sub,pix_sub.x)-smoothstep(1.0-smooth_width_sub,1.0,pix_sub.x);
-    float rgb_factor = smoothstep(0.0,smooth_height,pix_sub.y)-smoothstep(1.0-smooth_height,1.0,pix_sub.y);    
+    float rgb_factor = smoothstep(0.0,smooth_height,pix_sub.y)-smoothstep(1.0-smooth_height,1.0,pix_sub.y);
     rgb_factor = rgb_factor*0.2+0.8;
 
     frag_color.r*=clamp(mix(0.6, 1.0, r_factor)*1.33,0.,1.0);
@@ -441,6 +488,7 @@ void main() {
     frag_color *= rgb_factor;
     frag_color = mix(frag_color, val,clamp(smooth_width,0.,1.));
   }else if(mode==4)frag_color =xbrz();
+  frag_color.rgb=adjust_display(frag_color.rgb);
 
 }
 @end

@@ -1,4 +1,9 @@
-cmake_minimum_required(VERSION 3.15) # Needed to set MSVC Runtime type
+cmake_minimum_required(VERSION 3.21...4.1)
+# Keep bundled projects with older policy baselines usable with CMake 4.
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+# One CRT across the Windows DLL and its static dependencies, including Debug.
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+set(MSVC_DYNAMIC_RUNTIME ON)
 if(NOT DEFINED CMAKE_OSX_ARCHITECTURES)
   set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "")
 endif()
@@ -18,7 +23,9 @@ endif()
 
 
 set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(LINK_LIBS "")
 
 # Set compile_commands.json generation for clangd on by default
@@ -31,6 +38,35 @@ option(USE_SYSTEM_OPENSSL "Use the system's OpenSSL package" OFF)
 option(USE_SYSTEM_SDL2 "Use the system's SDL2 package" OFF)
 option(USE_SDL "Use SDL2 for input/audio" ON)
 option(RETRO_CORE_ONLY "Only build libretro core" OFF)
+option(SKYEMU_BUILD_TESTS "Build focused runtime and design regression tests" OFF)
+option(SKYEMU_TESTS_ONLY "Configure regression tests without GUI dependencies" OFF)
+option(SKYEMU_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
+if(SKYEMU_ENABLE_SANITIZERS AND NOT MSVC)
+  add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
+  add_link_options(-fsanitize=address,undefined)
+endif()
+if(SKYEMU_BUILD_TESTS OR SKYEMU_TESTS_ONLY)
+  enable_testing()
+  add_executable(se_runtime_test tools/se_runtime_test.c src/se_settings.c)
+  add_executable(se_design_test tools/se_design_test.c src/se_design.c)
+  target_include_directories(se_runtime_test PRIVATE src)
+  target_include_directories(se_design_test PRIVATE src)
+  if(WIN32)
+    target_link_libraries(se_design_test PRIVATE advapi32)
+  else()
+    target_link_libraries(se_runtime_test PRIVATE m)
+    target_link_libraries(se_design_test PRIVATE m)
+  endif()
+  add_test(NAME runtime_regressions COMMAND se_runtime_test)
+  add_test(NAME design_tokens COMMAND se_design_test)
+  find_package(Python3 COMPONENTS Interpreter)
+  if(Python3_Interpreter_FOUND AND CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+    add_test(NAME shader_generation COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/generate_shaders.py --check)
+  endif()
+endif()
+if(SKYEMU_TESTS_ONLY)
+  return()
+endif()
 
 # Option to build a static iOS library (.a) instead of an iOS application
 option(BUILD_IOS_STATIC_LIB "Build iOS static library" ON)
@@ -40,42 +76,19 @@ if (EMSCRIPTEN)
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -s ERROR_ON_UNDEFINED_SYMBOLS=0 -s ELIMINATE\_DUPLICATE\_FUNCTIONS=1 -s ENVIRONMENT=web -s ASSERTIONS=0 -s WASM=1 -DSE_PLATFORM_WEB --shell-file ${PROJECT_SOURCE_DIR}/src/shell.html -s USE_CLOSURE_COMPILER=0 ")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -s ERROR_ON_UNDEFINED_SYMBOLS=0 -s ELIMINATE\_DUPLICATE\_FUNCTIONS=1 -s ENVIRONMENT=web -s ASSERTIONS=0 -s WASM=1 -DSE_PLATFORM_WEB --shell-file ${PROJECT_SOURCE_DIR}/src/shell.html  -s USE_CLOSURE_COMPILER=0 ")
 endif ()
-if (MSVC)
-    # Perform extremely aggressive optimization on Release builds:
-    # Flags on Visual Studio 2010 and newer:
-    # Runtime library: Multi-threaded (/MT) as opposed to default 'Multi-threaded DLL' - static runtime library allows better LTCG inlining opportunities.
-    # Optimization: Full Optimization (/Ox)
-    # Inline Function Expansion: Any Suitable (/Ob2)
-    # Enable Intrinsic Functions: Yes (/Oi)
-    # Favor Size Or Speed: Favor fast code (/Ot)
-    # Enable Fiber-Safe Optimizations: Yes (/GT)
-    # Enable String Pooling: Yes (/GF)
-    # Buffer Security Check: No (/GS-)
-    # Floating Point Model: Fast (/fp:fast)
-    # Enable Floating Point Exceptions: No (/fp:except-)
-    # Build with Multiple Processes (/MP)
-    # No secure development lifecycle features
-    # Exception handling model: Catch C++ exceptions only, assume that "extern C" functions will never throw a C++ exception.
-    # Disable all forms of MSVC debug iterator checking in new and old Visual Studios.
-    # Causes the application to use the multithread, static version of the run-time library. 
-    # Enable C11 conformance (/std:c11)
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} /MT /Ox /Ob2 /Oi /Ot /GT /GF /GS- /fp:fast /fp:except- /MP /sdl- /EHsc /D_SECURE_SCL=0 /D_SCL_SECURE_NO_WARNINGS /D_ITERATOR_DEBUG_LEVEL=0 /D_HAS_ITERATOR_DEBUGGING=0 /std:c11 ")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /MT /Ox /Ob2 /Oi /Ot /GT /GF /GS- /fp:fast /fp:except- /MP /sdl- /EHsc /D_SECURE_SCL=0 /D_SCL_SECURE_NO_WARNINGS /D_ITERATOR_DEBUG_LEVEL=0 /D_HAS_ITERATOR_DEBUGGING=0 /std:c11 ")
-
+if(MSVC)
+  add_compile_options(/MP /utf-8 "$<$<COMPILE_LANGUAGE:CXX>:/EHsc>")
+  add_compile_definitions(_CRT_SECURE_NO_WARNINGS _SCL_SECURE_NO_WARNINGS)
 endif()
 
 if(NOT ANDROID AND USE_SDL)
     add_definitions(-DUSE_SDL=1)
 endif()
 
-if (NOT EMSCRIPTEN)
-  set(CMAKE_CXX_FLAGS  "${CMAKE_CXX_FLAGS} -g -O3 ")
-  set(CMAKE_C_FLAGS  "${CMAKE_C_FLAGS} -g -O3 ")
+# Let the chosen CMake configuration control optimization and debug information.
+if(NOT EMSCRIPTEN)
   set(UNICODE_GUI 1)
-else () 
-  set(CMAKE_CXX_FLAGS  "${CMAKE_CXX_FLAGS} -O3 -DNDEBUG")
-  set(CMAKE_C_FLAGS  "${CMAKE_C_FLAGS} -O3 -DNDEBUG") 
-endif ()
+endif()
 if(IOS)
     set(CMAKE_XCODE_ATTRIBUTE_IPHONEOS_DEPLOYMENT_TARGET "15.0" CACHE STRING "Minimum iOS deployment version" FORCE)
     set(CMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED "NO" FORCE)
@@ -93,8 +106,8 @@ if(ANDROID)
   set(CMAKE_C_FLAGS  "${CMAKE_C_FLAGS}") 
   set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 endif()
-if(NOT IOS)
-  find_package(OpenGL)
+if(NOT IOS AND NOT ANDROID AND NOT WIN32 AND NOT EMSCRIPTEN AND NOT RETRO_CORE_ONLY)
+  find_package(OpenGL REQUIRED)
 endif()
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 if(NOT RETRO_CORE_ONLY)
@@ -115,9 +128,13 @@ if(NOT RETRO_CORE_ONLY)
   
   if (SE_PLATFORM_LINUX OR SE_PLATFORM_FREEBSD)
       find_package(X11 REQUIRED)
+      if(TARGET se_design_test)
+        target_include_directories(se_design_test PRIVATE "${X11_INCLUDE_DIR}")
+        target_link_libraries(se_design_test PRIVATE ${X11_X11_LIB})
+      endif()
   endif()
   
-  if (USE_SYSTEM_CURL OR USE_SYSTEM_OPENSSL)
+  if (USE_SYSTEM_CURL OR USE_SYSTEM_OPENSSL OR USE_SYSTEM_SDL2)
     find_package(PkgConfig REQUIRED)
   endif()
   
@@ -145,9 +162,9 @@ if(NOT RETRO_CORE_ONLY)
       add_subdirectory(src/curl)
       # Use dynamic CRT (/MD) for DLL compatibility with .NET host
       if(WIN32)
-        set_property(TARGET libcurl_static PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
+        set_property(TARGET libcurl_static PROPERTY MSVC_RUNTIME_LIBRARY "${CMAKE_MSVC_RUNTIME_LIBRARY}")
       else()
-        set_property(TARGET libcurl_static PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")
+        set_property(TARGET libcurl_static PROPERTY MSVC_RUNTIME_LIBRARY "${CMAKE_MSVC_RUNTIME_LIBRARY}")
       endif()
       # Mac Catalyst support for libcurl_static
       set_target_properties(libcurl_static PROPERTIES
@@ -163,11 +180,11 @@ if(NOT RETRO_CORE_ONLY)
       set(BUILD_STATIC_LIBS ON)
       add_subdirectory(src/openssl)
       if(WIN32)
-        set_property(TARGET ssl PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
-        set_property(TARGET crypto PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
+        set_property(TARGET ssl PROPERTY MSVC_RUNTIME_LIBRARY "${CMAKE_MSVC_RUNTIME_LIBRARY}")
+        set_property(TARGET crypto PROPERTY MSVC_RUNTIME_LIBRARY "${CMAKE_MSVC_RUNTIME_LIBRARY}")
       else()
-        set_property(TARGET ssl PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")
-        set_property(TARGET crypto PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")
+        set_property(TARGET ssl PROPERTY MSVC_RUNTIME_LIBRARY "${CMAKE_MSVC_RUNTIME_LIBRARY}")
+        set_property(TARGET crypto PROPERTY MSVC_RUNTIME_LIBRARY "${CMAKE_MSVC_RUNTIME_LIBRARY}")
       endif()
       # Mac Catalyst support for SSL and crypto
       set_target_properties(ssl PROPERTIES
@@ -191,7 +208,7 @@ if(NOT RETRO_CORE_ONLY)
       )
       target_include_directories(tinyfd INTERFACE src/tinyfiledialogs)
       set(LINK_LIBS ${LINK_LIBS} tinyfd)
-      set_property(TARGET tinyfd PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")
+      set_property(TARGET tinyfd PROPERTY MSVC_RUNTIME_LIBRARY "${CMAKE_MSVC_RUNTIME_LIBRARY}")
       # Mac Catalyst support for tinyfd
       set_target_properties(tinyfd PROPERTIES
           XCODE_ATTRIBUTE_SUPPORTED_PLATFORMS "macosx iphonesimulator maccatalyst"
@@ -214,7 +231,7 @@ if(NOT RETRO_CORE_ONLY)
       src/cimgui/imgui/imgui_tables.cpp
       src/cimgui/imgui/imgui_demo.cpp
       )
-  set_property(TARGET cimgui PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")
+  set_property(TARGET cimgui PROPERTY MSVC_RUNTIME_LIBRARY "${CMAKE_MSVC_RUNTIME_LIBRARY}")
   target_include_directories(cimgui INTERFACE src/cimgui)
   # Mac Catalyst support for cimgui
   set_target_properties(cimgui PROPERTIES
@@ -231,7 +248,7 @@ if(NOT RETRO_CORE_ONLY)
       #=== LIBRARY: SDL2
       set(SDL_SHARED OFF CACHE BOOL "Build Shared" FORCE)
       set(SDL_STATIC ON CACHE BOOL "Build Static" FORCE)
-      set(SDL_FORCE_STATIC_VCRT ON CACHE BOOL "USE LIBC" FORCE)
+      set(SDL_FORCE_STATIC_VCRT OFF CACHE BOOL "USE LIBC" FORCE)
       set(SDL_LIBC ON CACHE BOOL "USE LIBC" FORCE)    
       set(SDL_STATIC_PIC ON CACHE BOOL "Build Static PIC" FORCE)
       # Allow some projects to be built conditionally.
@@ -249,7 +266,7 @@ if(NOT RETRO_CORE_ONLY)
   
       add_definitions(-DSDL_LEAN_AND_MEAN=1)
       add_subdirectory(src/SDL2)
-      set_property(TARGET SDL2-static PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")
+      set_property(TARGET SDL2-static PROPERTY MSVC_RUNTIME_LIBRARY "${CMAKE_MSVC_RUNTIME_LIBRARY}")
       # Mac Catalyst support for SDL2
       set_target_properties(SDL2-static PROPERTIES
           XCODE_ATTRIBUTE_SUPPORTED_PLATFORMS "macosx iphonesimulator maccatalyst"
@@ -305,16 +322,16 @@ if(NOT RETRO_CORE_ONLY)
       endif()
   else()
       add_library(sokol STATIC src/sokol/sokol.c ${SOKOL_HEADERS})
-      set_property(TARGET sokol PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")
+      set_property(TARGET sokol PROPERTY MSVC_RUNTIME_LIBRARY "${CMAKE_MSVC_RUNTIME_LIBRARY}")
       if(WIN32)
           # When building SkyEmu as a DLL on Windows, sokol must not provide WinMain.
           target_compile_definitions(sokol PRIVATE SOKOL_NO_ENTRY)
       endif()
       if (SE_PLATFORM_LINUX OR SE_PLATFORM_FREEBSD)
           target_include_directories(sokol PRIVATE "${X11_INCLUDE_DIR}")
-          target_link_libraries(sokol INTERFACE ${X11_X11_LIB} ${X11_Xi_LIB} ${X11_Xcursor_LIB} OpenGL::OpenGL dl)
+          target_link_libraries(sokol INTERFACE ${X11_X11_LIB} ${X11_Xi_LIB} ${X11_Xcursor_LIB} OpenGL::GL dl)
       endif()
-      if (CMAKE_SYSTEM_NAME STREQUAL Linux)
+      if (CMAKE_SYSTEM_NAME STREQUAL Linux AND NOT ANDROID)
           target_link_libraries(sokol INTERFACE m)
           target_link_libraries(sokol PUBLIC Threads::Threads)
       endif()
@@ -357,6 +374,7 @@ if(GIT_EXECUTABLE)
     OUTPUT_VARIABLE GIT_DESCRIBE
     RESULT_VARIABLE GIT_DESCRIBE_ERROR_CODE
     OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
     )
   if(NOT GIT_DESCRIBE_ERROR_CODE)
     set(GIT_TAG ${GIT_DESCRIBE})
@@ -373,7 +391,7 @@ add_definitions(-DGIT_BRANCH=\"${GIT_BRANCH}\")
 add_definitions(-DGIT_TAG=\"${GIT_TAG}\")
 
 if(NOT RETRO_CORE_ONLY)
-  set(SKYEMU_SRC src/main.c src/shared.c src/se_design.c src/cloud.cpp src/https.cpp src/stb.c src/miniz.c src/res.c src/localization.c src/mutex.cpp)
+  set(SKYEMU_SRC src/main.c src/shared.c src/se_design.c src/se_settings.c src/cloud.cpp src/https.cpp src/stb.c src/miniz.c src/res.c src/localization.c src/mutex.cpp)
   
   if(ENABLE_HTTP_CONTROL_SERVER)
     add_definitions(-DENABLE_HTTP_CONTROL_SERVER=1)
@@ -407,7 +425,7 @@ if(NOT RETRO_CORE_ONLY)
     if(IOS)
       target_compile_definitions(Lua PRIVATE LUA_USE_IOS) # makes it so system is not used
     endif()
-    set_property(TARGET Lua PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")
+    set_property(TARGET Lua PROPERTY MSVC_RUNTIME_LIBRARY "${CMAKE_MSVC_RUNTIME_LIBRARY}")
     # Mac Catalyst support for Lua
     set_target_properties(Lua PROPERTIES
         XCODE_ATTRIBUTE_SUPPORTED_PLATFORMS "macosx iphonesimulator maccatalyst"
@@ -523,10 +541,9 @@ if(NOT RETRO_CORE_ONLY)
       endif()
     elseif(ANDROID)
       add_library(${PROJECT_NAME} SHARED ${SKYEMU_SRC})
-	  target_link_options(${CMAKE_PROJECT_NAME} PRIVATE "-Wl,-z,max-page-size=16384")
+	  target_link_options(${CMAKE_PROJECT_NAME} PRIVATE "-Wl,-z,max-page-size=16384" "-Wl,-z,common-page-size=16384")
   else()
       add_executable(${PROJECT_NAME} ${SKYEMU_SRC})
-	  target_link_options(${CMAKE_PROJECT_NAME} PRIVATE "-Wl,-z,max-page-size=16384")
   endif()
 endif()
 
@@ -575,7 +592,7 @@ if(NOT RETRO_CORE_ONLY)
   set(CAPSTONE_ARM_SUPPORT ON CACHE BOOL "ARM disasm support")
   set(CAPSTONE_BUILD_STATIC_RUNTIME OFF CACHE BOOL "Capstone static runtime" FORCE)
   add_subdirectory(src/capstone EXCLUDE_FROM_ALL)
-  set_property(TARGET capstone-static PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")
+  set_property(TARGET capstone-static PROPERTY MSVC_RUNTIME_LIBRARY "${CMAKE_MSVC_RUNTIME_LIBRARY}")
   # Mac Catalyst support for capstone-static
   set_target_properties(capstone-static PROPERTIES
       XCODE_ATTRIBUTE_SUPPORTED_PLATFORMS "macosx iphonesimulator maccatalyst"
@@ -592,51 +609,15 @@ if(NOT RETRO_CORE_ONLY)
   endif()
 
   target_link_libraries(${PROJECT_NAME} ${LINK_LIBS})
+  if(WIN32)
+    target_link_libraries(${PROJECT_NAME} advapi32)
+  endif()
   if (SE_PLATFORM_LINUX OR SE_PLATFORM_FREEBSD)
       # src/se_design.c sets the GTK theme variant of the X11 window
       target_include_directories(${PROJECT_NAME} PRIVATE "${X11_INCLUDE_DIR}")
   endif()
   if(MSVC)
-      # For the Windows DLL build, use dynamic CRT (/MD) for .NET compatibility.
-      # For other MSVC builds, use static CRT (/MT).
-      get_target_property(_skyemu_type ${PROJECT_NAME} TYPE)
-      if(_skyemu_type STREQUAL "SHARED_LIBRARY")
-          set_property(TARGET ${PROJECT_NAME} PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
-          # Also switch dependency static libs to /MD so all objects use the same CRT
-          target_compile_options(${PROJECT_NAME} PRIVATE /MD)
-          set_property(TARGET sokol PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
-          target_compile_options(sokol PRIVATE /MD)
-          set_property(TARGET cimgui PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
-          target_compile_options(cimgui PRIVATE /MD)
-          set_property(TARGET capstone-static PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
-          target_compile_options(capstone-static PRIVATE /MD)
-          if(TARGET tinyfd)
-              set_property(TARGET tinyfd PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
-              target_compile_options(tinyfd PRIVATE /MD)
-          endif()
-          if(TARGET Lua)
-              set_property(TARGET Lua PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
-              target_compile_options(Lua PRIVATE /MD)
-          endif()
-          if(TARGET libcurl_static)
-              set_property(TARGET libcurl_static PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
-              target_compile_options(libcurl_static PRIVATE /MD)
-          endif()
-          if(TARGET ssl)
-              set_property(TARGET ssl PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
-              target_compile_options(ssl PRIVATE /MD)
-          endif()
-          if(TARGET crypto)
-              set_property(TARGET crypto PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
-              target_compile_options(crypto PRIVATE /MD)
-          endif()
-          if(TARGET SDL2-static)
-              set_property(TARGET SDL2-static PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
-              target_compile_options(SDL2-static PRIVATE /MD)
-          endif()
-      else()
-          set_property(TARGET ${PROJECT_NAME} PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")
-      endif()
+      set_property(TARGET ${PROJECT_NAME} PROPERTY MSVC_RUNTIME_LIBRARY "${CMAKE_MSVC_RUNTIME_LIBRARY}")
   elseif(MACOS OR IOS)
       set_target_properties(${PROJECT_NAME} PROPERTIES
           MACOSX_BUNDLE ON
@@ -711,6 +692,8 @@ if(NOT RETRO_CORE_ONLY)
   endif()
   
   install(TARGETS ${PROJECT_NAME}
-    RUNTIME DESTINATION "${CMAKE_INSTALL_PREFIX}/bin"
-    BUNDLE DESTINATION "${CMAKE_INSTALL_PREFIX}/Applications")
+    RUNTIME DESTINATION "bin"
+    LIBRARY DESTINATION "lib"
+    ARCHIVE DESTINATION "lib"
+    BUNDLE DESTINATION "Applications")
 endif()

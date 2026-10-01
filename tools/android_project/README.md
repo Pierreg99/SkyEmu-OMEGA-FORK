@@ -11,11 +11,11 @@ colors on Android 12 and later.
 
 | | |
 |---|---|
-| Android Gradle Plugin | 8.7.0 (Gradle 8.9 through the wrapper) |
+| Android Gradle Plugin | 8.10.1 (Gradle 8.11.1 through the wrapper) |
 | JDK | 17 |
 | NDK | 28.2.13676358 |
-| CMake | 3.18.1 |
-| compileSdk / targetSdk | 35 |
+| CMake | 3.22.1 |
+| compileSdk / targetSdk | 36 |
 | minSdk | 24 (Android 7.0) |
 | ABIs | arm64-v8a, armeabi-v7a, x86, x86_64 |
 
@@ -26,8 +26,11 @@ cd tools/android_project
 ./gradlew assembleRelease
 ```
 
-Or open this folder in Android Studio and let it sync. The release build is signed with the open signing key in
-this folder, replace it with your own for distribution.
+Or open this folder in Android Studio and let it sync. The output is
+`app/build/outputs/aar/app-release.aar`; the host application signs its own APK.
+Configure `ANDROID_HOME` or an untracked `local.properties` for your SDK path.
+Native libraries use 16 KB LOAD alignment. See [upgrade notes](../../docs/SOL6_1_UPGRADE.md)
+for validation and host packaging requirements.
 
 ## What is inside
 

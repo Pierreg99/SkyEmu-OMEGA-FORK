@@ -157,3 +157,6 @@ http://localhost:8080/setting?design=2&color_scheme=1&accent=3584e4
   during gameplay it is only refreshed while no game is running.
 - Fonts are checked before they reach Dear ImGui (TrueType or CFF outlines with a Unicode character map). CFF2
   variable fonts such as `Cantarell-VF.otf` are skipped in favor of the next candidate.
+
+High Contrast, Control Density and Corner Roundness are described in the
+[Sol6.1 upgrade notes](SOL6_1_UPGRADE.md).

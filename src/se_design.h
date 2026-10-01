@@ -129,6 +129,9 @@ uint32_t se_design_default_accent(int design);
 void se_design_build_tokens(int design, int color_scheme, uint32_t custom_accent,
                             const se_system_appearance_t* sys, se_design_tokens_t* out);
 
+// Apply user accessibility and layout preferences to a freshly built token set.
+void se_design_customize(se_design_tokens_t* tokens, bool high_contrast, uint32_t density, float radius_scale);
+
 // Color science helpers
 float se_color_tone(uint32_t rgb); // CIELAB L* of an sRGB color
 float se_contrast_ratio(uint32_t a, uint32_t b); // WCAG contrast ratio

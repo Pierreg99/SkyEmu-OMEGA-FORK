@@ -980,20 +980,19 @@ void retro_run(void) {
   int pitch = width * 4;
   video_refresh_cb(data, width, height, pitch);
 
-  uint32_t samples = sb_ring_buffer_size(&emu_state.audio_ring_buff);
-  uint32_t frames = samples >> 1;
-  uint32_t beg_ptr = emu_state.audio_ring_buff.read_ptr;
-  uint32_t end_ptr = (emu_state.audio_ring_buff.read_ptr + (frames << 1)) % SB_AUDIO_RING_BUFFER_SIZE;
-  if (audio_enabled) {
-    if (end_ptr < beg_ptr) {
-      int remaining = (SB_AUDIO_RING_BUFFER_SIZE - beg_ptr) >> 1;
-      audio_sample_batch_cb(&emu_state.audio_ring_buff.data[beg_ptr], remaining);
-      audio_sample_batch_cb(&emu_state.audio_ring_buff.data[0], frames - remaining);
-    } else {
-      audio_sample_batch_cb(&emu_state.audio_ring_buff.data[beg_ptr], frames);
+  if(!audio_enabled){
+    emu_state.audio_ring_buff.read_ptr=emu_state.audio_ring_buff.write_ptr;
+  }else{
+    const int16_t* data;
+    uint32_t span;
+    while((span=sb_ring_buffer_read_span(&emu_state.audio_ring_buff,&data))>=2){
+      size_t frames=span/2;
+      size_t consumed=audio_sample_batch_cb(data,frames);
+      if(consumed>frames)consumed=frames;
+      emu_state.audio_ring_buff.read_ptr+=(uint32_t)(consumed*2);
+      if(consumed<frames)break;
     }
   }
-  emu_state.audio_ring_buff.read_ptr = end_ptr;
 }
 
 size_t retro_serialize_size(void) {

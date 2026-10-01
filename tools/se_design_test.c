@@ -135,6 +135,28 @@ static void test_font_validation(void){
   CHECK(!se_design_font_is_supported(cff2,sizeof(cff2)),"rejects CFF2 only fonts");
 }
 
+static void test_customization(void){
+  int designs[]={SE_DESIGN_MATERIAL3,SE_DESIGN_FLUENT,SE_DESIGN_ADWAITA};
+  uint32_t accents[]={0,0xffffff,0xffff00,0x000080,0xE62D42};
+  for(size_t d=0;d<3;++d)for(int scheme=1;scheme<=3;++scheme)for(size_t a=0;a<5;++a){
+    se_design_tokens_t t;
+    se_design_build_tokens(designs[d],scheme,accents[a],NULL,&t);
+    float rounding=t.button_rounding;
+    se_design_customize(&t,true,2,0.5f);
+    CHECK(t.button_rounding==rounding*0.5f,"custom roundness");
+    CHECK(t.font_size+2*t.frame_padding_y>=48,"touch target >=48px");
+    CHECK(t.surface_panel.a==1 && t.control_border==2,"opaque high contrast surfaces");
+    CHECK(se_contrast_ratio(se_color_to_rgb(t.on_surface),se_color_to_rgb(t.surface_panel))>=20,"high contrast body text");
+    CHECK(se_contrast_ratio(se_color_to_rgb(t.on_primary),se_color_to_rgb(t.primary))>=4.5f,"high contrast accent text");
+    CHECK(se_contrast_ratio(se_color_to_rgb(t.on_selected),se_color_to_rgb(t.selected))>=4.5f,"high contrast selected text");
+  }
+  se_design_tokens_t t;
+  se_design_build_tokens(SE_DESIGN_MATERIAL3,SE_COLOR_SCHEME_DARK,SE_ACCENT_NONE,NULL,&t);
+  float padding=t.frame_padding_y;
+  se_design_customize(&t,false,1,NAN);
+  CHECK(isfinite(t.button_rounding) && t.frame_padding_y<padding,"compact density, finite rounding");
+}
+
 int main(void){
   test_tones();
   test_material_baseline();
@@ -142,6 +164,7 @@ int main(void){
   test_scheme_contrast();
   test_system_appearance();
   test_font_validation();
+  test_customization();
   if(failures){printf("%d check(s) failed\n",failures);return 1;}
   printf("All design token checks passed\n");
   return 0;

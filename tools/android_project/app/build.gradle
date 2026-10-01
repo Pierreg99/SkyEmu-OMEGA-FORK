@@ -1,59 +1,46 @@
 apply plugin: 'com.android.library'
 
 android {
-    namespace = "com.skyemu"
-    signingConfigs {
-        release {
-            storePassword 'skyemu-super-secure-password'
-            keyAlias 'skyemu-open-code-certificate'
-            keyPassword 'skyemu-super-secure-password'
-            storeFile file('../skyemu-open-signing-store')
-        }
-    }
-    compileSdkVersion 35
+    namespace 'com.skyemu'
+    compileSdk 36
     ndkVersion '28.2.13676358'
 
     defaultConfig {
-        signingConfig signingConfigs.release
-        minSdkVersion 24
-        targetSdkVersion 35
-        versionCode 32
-        versionName "v3.2"
-        setProperty("archivesBaseName", applicationId + "-v" + versionCode)
+        minSdk 24
+        targetSdk 36
+        consumerProguardFiles 'consumer-rules.pro'
         externalNativeBuild {
             cmake {
-                arguments '-DANDROID_STL=c++_static', '-DANDROID=1', '-DNDK_DEBUG=0', '-DHAVE_LIBZ=0', '-DCMAKE_BUILD_TYPE=RELWITHDEBINFO', "-DANDROID_ARM_NEON=TRUE"
-                targets "SkyEmu"
+                arguments '-DANDROID_STL=c++_static', '-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON',
+                        '-DHAVE_LIBZ=0', '-DUSE_SDL=OFF'
+                targets 'SkyEmu'
             }
         }
         ndk {
-            abiFilters "arm64-v8a", "x86", "armeabi-v7a", "x86_64"
+            abiFilters 'arm64-v8a', 'x86_64', 'armeabi-v7a', 'x86'
         }
     }
     buildTypes {
         release {
             minifyEnabled false
-            proguardFiles getDefaultProguardFile('proguard-android.txt'),
-                    'proguard-rules.pro'
         }
     }
     externalNativeBuild {
         cmake {
-            version '3.18.1'
+            version '3.22.1'
             path '../../../CMakeLists.txt'
         }
     }
-    packagingOptions {
+    packaging {
         jniLibs {
             useLegacyPackaging = false
-            excludes += ['**/libz.so']
         }
     }
 }
 
 dependencies {
     implementation fileTree(dir: 'libs', include: ['*.jar'])
-    implementation 'androidx.appcompat:appcompat:1.6.1'
-    implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
-    implementation 'androidx.browser:browser:1.5.0'
+    implementation 'androidx.appcompat:appcompat:1.7.1'
+    implementation 'androidx.constraintlayout:constraintlayout:2.2.1'
+    implementation 'androidx.browser:browser:1.8.0'
 }
