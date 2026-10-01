@@ -10,14 +10,17 @@ jobs:
         os: [windows-2022, windows-2025]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+      - uses: ilammy/msvc-dev-cmd@v1.13.0
+        with:
+          arch: amd64
       - name: Build x64 DLL using the installed Windows SDK
         run: |
           cmake --preset windows-release
           cmake --build --preset windows-release --parallel 2
       - name: Run runtime and design regression tests
         run: ctest --preset windows-release
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: WindowsRelease-${{ matrix.os }}
           path: build/windows-release/bin/Release/SkyEmu.*

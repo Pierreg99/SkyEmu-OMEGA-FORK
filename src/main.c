@@ -82,6 +82,7 @@
 #endif
 
 #include "lcd_shaders.h"
+_Static_assert(sizeof(lcd_params_t)==sizeof(lcd_params_fs_t), "shader uniform layouts must match");
 
 #define SE_ANDROID_CONTROLLER_NAME "Default Controller"
 
@@ -3696,7 +3697,7 @@ void se_logged_out_cloud_callback(){
 void se_write_png_cloud(void* context, void* data, int size){
   char file[SB_FILE_PATH_SIZE];
   size_t slot = (size_t)context;
-  snprintf(file,SB_FILE_PATH_SIZE,"%016llx.slot%zu.state.png",emu_state.game_checksum,slot);
+  snprintf(file,SB_FILE_PATH_SIZE,"%016llx.slot%zu.state.png",(unsigned long long)emu_state.game_checksum,slot);
   // data is freed after this function returns, so we need to copy it
   void* data_copy = malloc(size);
   memcpy(data_copy,data,size);
@@ -3739,7 +3740,7 @@ void se_login_cloud(){
 static void se_sync_cloud_save_states_callback(){
   for(size_t i=0;i<SE_NUM_SAVE_STATES;++i){
     char file[SB_FILE_PATH_SIZE];
-    snprintf(file,SB_FILE_PATH_SIZE,"%016llx.slot%d.state.png",emu_state.game_checksum,(int)i);
+    snprintf(file,SB_FILE_PATH_SIZE,"%016llx.slot%d.state.png",(unsigned long long)emu_state.game_checksum,(int)i);
     cloud_drive_download(cloud_state.drive, file, se_state_download_callback, (void*)i);
   }
 }
@@ -5405,29 +5406,37 @@ static void se_android_get_system_appearance(se_system_appearance_t* out){
   (*pJavaVM)->DetachCurrentThread(pJavaVM);
 }
 void se_android_get_language(char* language_buffer, size_t buffer_size){
-
-  ANativeActivity* activity =(ANativeActivity*)sapp_android_get_native_activity();
-  // Attaches the current thread to the JVM.
-  JavaVM *pJavaVM = activity->vm;
-  JNIEnv *pJNIEnv = activity->env;
-
-  jint nResult = (*pJavaVM)->AttachCurrentThread(pJavaVM, &pJNIEnv, NULL );
-  if ( nResult != JNI_ERR ){
-    // Retrieves NativeActivity.
-    jobject nativeActivity = activity->clazz;
-    jclass ClassNativeActivity = (*pJNIEnv)->GetObjectClass(pJNIEnv, nativeActivity );
-    jmethodID getLanguageMethod= (*pJNIEnv)->GetStaticMethodID(pJNIEnv, ClassNativeActivity, "getLanguage", "()Ljava/lang/String;" );
-    if(getLanguageMethod) {
-        jstring joStringPropVal = (jstring) (*pJNIEnv)->CallStaticObjectMethod(pJNIEnv,ClassNativeActivity,getLanguageMethod);
-        const jchar *jcVal = (const jchar *) (*pJNIEnv)->GetStringUTFChars(pJNIEnv, joStringPropVal,
-                                                                           JNI_FALSE);
-        LOGD("Android Language is %s", jcVal);
-        strncpy(language_buffer, (const char *) jcVal, buffer_size);
-        (*pJNIEnv)->ReleaseStringChars(pJNIEnv, joStringPropVal, jcVal);
-    }else LOGE("Failed to find getLanguage() method in JNIEnv");
-    // Finished with the JVM.
-    (*pJavaVM)->DetachCurrentThread(pJavaVM);
+  if(!language_buffer || !buffer_size)return;
+  language_buffer[0]=0;
+  ANativeActivity* activity=(ANativeActivity*)sapp_android_get_native_activity();
+  if(!activity || !activity->vm)return;
+  JavaVM* vm=activity->vm;
+  JNIEnv* env=NULL;
+  bool attached=false;
+  jint status=(*vm)->GetEnv(vm,(void**)&env,JNI_VERSION_1_6);
+  if(status==JNI_EDETACHED){
+    if((*vm)->AttachCurrentThread(vm,&env,NULL)!=JNI_OK)return;
+    attached=true;
+  }else if(status!=JNI_OK)return;
+  jclass cls=(*env)->GetObjectClass(env,activity->clazz);
+  if(cls){
+    jmethodID method=(*env)->GetStaticMethodID(env,cls,"getLanguage","()Ljava/lang/String;");
+    if(method){
+      jstring language=(jstring)(*env)->CallStaticObjectMethod(env,cls,method);
+      if(language){
+        const char* utf8=(*env)->GetStringUTFChars(env,language,NULL);
+        if(utf8){
+          snprintf(language_buffer,buffer_size,"%s",utf8);
+          (*env)->ReleaseStringUTFChars(env,language,utf8);
+        }
+        (*env)->DeleteLocalRef(env,language);
+      }
+    }
+    (*env)->DeleteLocalRef(env,cls);
   }
+  // Hosts without the optional getLanguage method fall back to the default locale.
+  if((*env)->ExceptionCheck(env))(*env)->ExceptionClear(env);
+  if(attached)(*vm)->DetachCurrentThread(vm);
 }
 
 void se_android_remote_keycode_callback(const char *data1, const char* data2) {
@@ -7925,7 +7934,7 @@ static void se_init_audio(){
 bool se_begin_menu_bar(){
   ImGuiContext* g = igGetCurrentContext();
   ImGuiStyle *style = igGetStyle();
-  ImVec2 menu_bar_size={g->IO.DisplaySize.x, g->NextWindowData.MenuBarOffsetMinVal.y + show_ui ? SE_MENU_BAR_HEIGHT : 0 };
+  ImVec2 menu_bar_size={g->IO.DisplaySize.x, g->NextWindowData.MenuBarOffsetMinVal.y + (show_ui ? SE_MENU_BAR_HEIGHT : 0) };
   float y_off = (3+gui_state.menubar_hide_timer-se_time())*2.;
   if(y_off>0)y_off=0;
   if(gui_state.settings.always_show_menubar)y_off=0;

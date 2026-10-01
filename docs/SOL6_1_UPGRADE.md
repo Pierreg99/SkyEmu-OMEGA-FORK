@@ -49,6 +49,9 @@ expose all new controls.
 - Save-state host APIs ignore invalid slot indices and requests without a ROM.
 - Color correction clamps negative values before gamma conversion.
 - Download caching is restored from settings on every launch.
+- Android locale queries use matching JNI UTF-8 acquire/release calls, close local
+  references, terminate the output string and retain existing JVM attachments.
+  Menu height correctly adds the native menu offset.
 
 ## Platform builds
 
@@ -63,7 +66,8 @@ immersive bars and safe drawing areas. Final behavior still needs device testing
 
 Windows builds use one dynamic CRT, including the matching Debug CRT, across
 the DLL and its dependencies. Compiler flags respect the selected build
-configuration. CI builds with the installed SDK on Windows 2022 and 2025 runners.
+configuration. CI builds with Ninja Multi-Config, the installed MSVC toolchain and SDK on
+Windows 2022 and 2025 runners.
 The output remains the Windows host DLL.
 
 Linux uses OpenGL's portable CMake target and supports current system curl,

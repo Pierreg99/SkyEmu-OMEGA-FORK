@@ -161,11 +161,7 @@ if(NOT RETRO_CORE_ONLY)
       add_definitions(-DCURL_STATICLIB)
       add_subdirectory(src/curl)
       # Use dynamic CRT (/MD) for DLL compatibility with .NET host
-      if(WIN32)
-        set_property(TARGET libcurl_static PROPERTY MSVC_RUNTIME_LIBRARY "${CMAKE_MSVC_RUNTIME_LIBRARY}")
-      else()
-        set_property(TARGET libcurl_static PROPERTY MSVC_RUNTIME_LIBRARY "${CMAKE_MSVC_RUNTIME_LIBRARY}")
-      endif()
+      set_property(TARGET libcurl_static PROPERTY MSVC_RUNTIME_LIBRARY "${CMAKE_MSVC_RUNTIME_LIBRARY}")
       # Mac Catalyst support for libcurl_static
       set_target_properties(libcurl_static PROPERTIES
           XCODE_ATTRIBUTE_SUPPORTED_PLATFORMS "macosx iphonesimulator maccatalyst"
@@ -179,13 +175,8 @@ if(NOT RETRO_CORE_ONLY)
       set(BUILD_SHARED_LIBS OFF)
       set(BUILD_STATIC_LIBS ON)
       add_subdirectory(src/openssl)
-      if(WIN32)
-        set_property(TARGET ssl PROPERTY MSVC_RUNTIME_LIBRARY "${CMAKE_MSVC_RUNTIME_LIBRARY}")
-        set_property(TARGET crypto PROPERTY MSVC_RUNTIME_LIBRARY "${CMAKE_MSVC_RUNTIME_LIBRARY}")
-      else()
-        set_property(TARGET ssl PROPERTY MSVC_RUNTIME_LIBRARY "${CMAKE_MSVC_RUNTIME_LIBRARY}")
-        set_property(TARGET crypto PROPERTY MSVC_RUNTIME_LIBRARY "${CMAKE_MSVC_RUNTIME_LIBRARY}")
-      endif()
+      set_property(TARGET ssl PROPERTY MSVC_RUNTIME_LIBRARY "${CMAKE_MSVC_RUNTIME_LIBRARY}")
+      set_property(TARGET crypto PROPERTY MSVC_RUNTIME_LIBRARY "${CMAKE_MSVC_RUNTIME_LIBRARY}")
       # Mac Catalyst support for SSL and crypto
       set_target_properties(ssl PROPERTIES
           XCODE_ATTRIBUTE_SUPPORTED_PLATFORMS "macosx iphonesimulator maccatalyst"
