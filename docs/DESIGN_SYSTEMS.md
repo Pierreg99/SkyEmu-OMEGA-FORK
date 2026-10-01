@@ -3,7 +3,7 @@
 # Design systems
 
 SkyEmu OMEGA's GUI follows the design language of the platform it runs on, including its light or dark mode,
-accent color and UI font.
+contrast setting, accent color and UI font.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="images/hero-dark.png">
@@ -34,6 +34,7 @@ Every design is available on every platform. Pick one in **Menu → GUI → Desi
 With Material 3, Fluent or Adwaita selected, the same section offers:
 
 - **Color Scheme**: *Follow System*, *Light*, *Dark* or *Black* (pure black surfaces for AMOLED screens).
+- **Contrast**: *Follow System*, *Standard* or *High*. See [High contrast](#high-contrast).
 - **Custom Accent Color**: replaces the system accent with a preset or any color from the picker. Material 3
   derives its whole tonal scheme from it, like Android does from a wallpaper.
 - **Use System Font**: uses the platform UI font when it is installed and readable, otherwise the bundled font.
@@ -74,6 +75,36 @@ SkyEmu Classic renders exactly as before.
 
 </details>
 
+## High contrast
+
+With **Contrast** set to *High*, or set to *Follow System* while the system asks for more contrast, every design
+switches to its platform's high contrast style:
+
+- **Material 3** is modeled on Material's high contrast scheme: darker accents in light mode and lighter ones in
+  dark mode, accent containers as strong fills with white or black text, text and outlines tuned for 11:1 and
+  7:1, and outlined buttons and fields.
+- **Fluent** uses the colors of the active Windows contrast theme (*Aquatic*, *Desert*, *Dusk*, *Night sky* or a
+  custom one), like WinUI apps do. The contrast theme also decides between light and dark. When Windows has no
+  contrast theme active, SkyEmu uses colors modeled on *Desert* (light) and *Night sky* (dark).
+- **Adwaita** keeps its colors and, like libadwaita's high contrast style, outlines buttons and fields and makes
+  borders, dividers and dimmed labels much stronger. Text is fully opaque.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="images/contrast-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="images/contrast-light.png">
+  <img alt="The menu of Material 3, Fluent and Adwaita with standard and with high contrast" src="images/contrast-dark.png">
+</picture>
+
+| Platform | *Follow System* turns high contrast on when |
+|---|---|
+| Windows | A contrast theme is on (Settings › Accessibility › Contrast themes) |
+| Linux, FreeBSD | The desktop portal reports higher contrast, or GNOME's *High Contrast* accessibility setting is on |
+| Android | The system contrast level is *High* (Android 14+), or *High contrast text* is on |
+| Web | The browser reports `prefers-contrast: more` or forced colors |
+| Host apps | The host reports it with `se_set_system_high_contrast()` (see [APIs](#apis)) |
+
+SkyEmu Classic is not affected by the contrast setting.
+
 ## How the colors are made
 
 [`src/se_design.c`](../src/se_design.c) builds the design tokens and has no Dear ImGui dependency.
@@ -90,7 +121,9 @@ SkyEmu Classic renders exactly as before.
   does.
 
 A unit test checks the tones, the Material baseline, the Android palette path and that text stays readable (7:1
-for body text, 3:1 on accent fills) for every design, color scheme and a set of accents:
+for body text, 4.5:1 for button labels, 3:1 on accent fills) for every design, color scheme, contrast level and a
+set of accents. In high contrast it also requires 10:1 body text, 7:1 secondary text and button labels, and 3:1
+borders:
 
 ```sh
 cc -O2 -Isrc tools/se_design_test.c src/se_design.c -lm -o se_design_test && ./se_design_test
@@ -105,55 +138,63 @@ From [`src/skyemu_dll.h`](../src/skyemu_dll.h), each with a matching getter:
 ```c
 se_set_design_system(uint32_t design);                   // 0 native, 1 classic, 2 Material 3, 3 Fluent, 4 Adwaita
 se_set_color_scheme(uint32_t scheme);                    // 0 system, 1 light, 2 dark, 3 black
+se_set_contrast(uint32_t contrast);                      // 0 system, 1 standard, 2 high
 se_set_accent_color(uint32_t rgb);                       // 0xRRGGBB, or 0xFFFFFFFF to follow the system
 se_set_system_appearance(int dark, uint32_t accent_rgb); // what the host knows about the OS
+se_set_system_high_contrast(int high_contrast);          // 1 on, 0 off, -1 let SkyEmu ask the OS
 ```
 
-SkyEmu reads the Windows registry itself. A host that cannot give it that access, such as a packaged UWP or
-WinUI app, reports the appearance instead, and again whenever it changes:
+SkyEmu reads the Windows registry and the contrast theme itself. A host that cannot give it that access, such as
+a packaged UWP or WinUI app, reports the appearance instead, and again whenever it changes:
 
 ```csharp
 [DllImport("SkyEmu.dll")] static extern void se_set_system_appearance(int dark, uint accentRgb);
+[DllImport("SkyEmu.dll")] static extern void se_set_system_high_contrast(int highContrast);
 
 var ui = new Windows.UI.ViewManagement.UISettings();
+var accessibility = new Windows.UI.ViewManagement.AccessibilitySettings();
 void Report(){
     var bg = ui.GetColorValue(UIColorType.Background);
     var a = ui.GetColorValue(UIColorType.Accent);
     se_set_system_appearance(bg.R < 128 ? 1 : 0, (uint)(a.R << 16 | a.G << 8 | a.B));
+    se_set_system_high_contrast(accessibility.HighContrast ? 1 : 0);
 }
 Report();
 ui.ColorValuesChanged += (s, e) => Report();
+accessibility.HighContrastChanged += (s, e) => Report();
 ```
 
 ### Android
 
-`EnhancedNativeActivity.getSystemAppearance()` is called from native code for the dark mode flag and the
-Material You palettes. The activity handles `uiMode` configuration changes, so switching the system theme
+`EnhancedNativeActivity.getSystemAppearance()` is called from native code for the dark mode flag, the
+Material You palettes and the high contrast flag. The activity handles `uiMode` configuration changes, so switching the system theme
 restyles the GUI without restarting the game. `MainSkyEmuObject` exposes the settings to host apps:
 
 ```java
 se_android_set_design_system(int design);
 se_android_set_color_scheme(int scheme);
+se_android_set_contrast(int contrast);                  // 0 system, 1 standard, 2 high
 se_android_set_accent_color(int rgb);                   // -1 follows the system
 se_android_set_system_appearance(int dark, int accent); // for hosts with their own activity
+se_android_set_system_high_contrast(int highContrast);  // for hosts with their own activity
 ```
 
 ### HTTP control server
 
-[`/setting`](HTTP_CONTROL_SERVER.md#setting) accepts `design`, `color_scheme`, `accent` (hex `RRGGBB` or
-`system`) and `system_font` (`0` / `1`):
+[`/setting`](HTTP_CONTROL_SERVER.md#setting) accepts `design`, `color_scheme`, `contrast`, `accent` (hex
+`RRGGBB` or `system`) and `system_font` (`0` / `1`):
 
 ```
-http://localhost:8080/setting?design=2&color_scheme=1&accent=3584e4
+http://localhost:8080/setting?design=2&color_scheme=1&contrast=2&accent=3584e4
 ```
 
-[`/settings`](HTTP_CONTROL_SERVER.md#settings) reports `design_system`, `color_scheme`, `use_custom_accent`,
-`custom_accent` and `use_bundled_font`.
+[`/settings`](HTTP_CONTROL_SERVER.md#settings) reports `design_system`, `color_scheme`, `contrast`,
+`use_custom_accent`, `custom_accent` and `use_bundled_font`.
 
 ## Notes
 
 - Dear ImGui renders a single font weight, so bold titles are drawn with a second pass shifted by one point.
-- On Linux the appearance is read with `gdbus` (desktop portal) and `gsettings`. To avoid starting processes
+- On Linux the appearance and the contrast setting are read with `gdbus` (desktop portal) and `gsettings`. To avoid starting processes
   during gameplay it is only refreshed while no game is running.
 - Fonts are checked before they reach Dear ImGui (TrueType or CFF outlines with a Unicode character map). CFF2
   variable fonts such as `Cantarell-VF.otf` are skipped in favor of the next candidate.

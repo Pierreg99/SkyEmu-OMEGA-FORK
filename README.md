@@ -17,7 +17,7 @@
 [![iOS](https://github.com/Pierreg99/SkyEmu-OMEGA-FORK/actions/workflows/deploy_ios.yml/badge.svg)](https://github.com/Pierreg99/SkyEmu-OMEGA-FORK/actions/workflows/deploy_ios.yml)
 [![Web](https://github.com/Pierreg99/SkyEmu-OMEGA-FORK/actions/workflows/deploy_web.yml/badge.svg)](https://github.com/Pierreg99/SkyEmu-OMEGA-FORK/actions/workflows/deploy_web.yml)
 
-[**Get started**](#-get-started) · [**Build**](docs/BUILDING.md) · [**Embed**](docs/EMBEDDING.md) · [**Design systems**](docs/DESIGN_SYSTEMS.md) · [**All docs**](docs/README.md)
+[**Get started**](#-get-started) · [**Build**](docs/BUILDING.md) · [**Embed**](docs/EMBEDDING.md) · [**Design systems**](docs/DESIGN_SYSTEMS.md) · [**Shaders**](docs/GRAPHICS.md) · [**All docs**](docs/README.md)
 
 </div>
 
@@ -33,13 +33,14 @@
 
 > [!NOTE]
 > SkyEmu OMEGA is a fork of [SkyEmu](https://github.com/skylersaleh/SkyEmu) by Skyler "Sky" Saleh. The emulation
-> cores are SkyEmu's. This fork adds platform native design systems and turns SkyEmu into a component that other
-> apps can host on Windows, Android and iOS.
+> cores are SkyEmu's. This fork adds platform native design systems with high contrast support, CRT and scanline
+> shaders, and turns SkyEmu into a component that other apps can host on Windows, Android and iOS.
 
 ## Contents
 
 - [Highlights](#-highlights)
 - [What OMEGA adds](#-what-omega-adds)
+- [Screen shaders](#-screen-shaders)
 - [Platforms](#-platforms)
 - [Get started](#-get-started)
 - [Controls](#-controls)
@@ -68,6 +69,7 @@
 - Fluent on Windows 11
 - Adwaita on GNOME / Linux
 - Light, dark and AMOLED black, following the system
+- Standard or high contrast, following the system
 - System accent colors and UI fonts
 - The original SkyEmu skin and custom skins stay available
 
@@ -96,7 +98,7 @@
 <td valign="top">
 
 ### 🖥️ Great picture
-- LCD, subpixel and xBRZ upscaling shaders
+- LCD, subpixel, xBRZ, CRT and scanline shaders
 - GBA color correction (SkyEmu or Higan)
 - Screen ghosting
 - Flexible DS screen layouts
@@ -120,13 +122,27 @@
 | | Upstream SkyEmu | SkyEmu OMEGA |
 |---|---|---|
 | **GUI** | One image based skin (dark, light, black, custom) | Material 3, Fluent and Adwaita, chosen per platform, plus the original skin |
-| **System integration** | | Dark mode, accent color, UI font and window frame follow the OS |
+| **System integration** | | Dark mode, high contrast, accent color, UI font and window frame follow the OS |
+| **Accessibility** | | A high contrast style for each design, checked by unit tests for 7:1 text and 3:1 borders |
+| **Screen shaders** | Pixelate, bilinear, LCD, LCD & subpixels, xBRZ | Adds CRT and scanlines |
 | **Windows** | Stand-alone app | `SkyEmu.dll` with a C API ([`skyemu_dll.h`](src/skyemu_dll.h)) for host apps |
 | **Android** | Stand-alone app | Android library with a JNI settings and control API |
 | **iOS / macOS** | Stand-alone app | Static libraries for host apps (the macOS app bundle is still available) |
 | **Host APIs** | HTTP control server | Framebuffer access, key injection, UI and menu callbacks, save state slots, every setting |
 
 The design systems are described in [docs/DESIGN_SYSTEMS.md](docs/DESIGN_SYSTEMS.md) and the host APIs in [docs/EMBEDDING.md](docs/EMBEDDING.md).
+
+## 📺 Screen shaders
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/shaders-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="docs/images/shaders-light.png">
+  <img alt="The same Game Boy Advance scene with each of the seven screen shaders" src="docs/images/shaders-dark.png">
+</picture>
+
+Seven shaders, from sharp pixels to a handheld LCD grid or a CRT with scanlines and an aperture grille. Pick one
+in **Menu → Display Settings → Screen Shader**. Color correction, ghosting, integer scaling and the DS screen
+layouts are in [docs/GRAPHICS.md](docs/GRAPHICS.md).
 
 ## 📦 Platforms
 
@@ -178,7 +194,7 @@ Dependencies and the steps for Windows, Android, iOS, macOS, the web and libretr
 
 > [!TIP]
 > Change the look in **Menu → GUI → Design**: *Platform Native*, *Material 3*, *Fluent (Windows 11)*,
-> *Adwaita (GNOME)* or *SkyEmu Classic*. Color scheme, accent color and font are right below it.
+> *Adwaita (GNOME)* or *SkyEmu Classic*. Color scheme, contrast, accent color and font are right below it.
 
 ## 🎹 Controls
 
@@ -229,7 +245,8 @@ The comparison with other emulators is in [docs/Accuracy.md](docs/Accuracy.md).
 |---|---|
 | [Building](docs/BUILDING.md) | Dependencies and build steps for every platform |
 | [Embedding](docs/EMBEDDING.md) | Hosting SkyEmu from a Windows, Android or iOS app |
-| [Design systems](docs/DESIGN_SYSTEMS.md) | Material 3, Fluent, Adwaita and how they follow the OS |
+| [Design systems](docs/DESIGN_SYSTEMS.md) | Material 3, Fluent, Adwaita, high contrast and how they follow the OS |
+| [Display and shaders](docs/GRAPHICS.md) | Screen shaders, color correction, scaling and DS screen layouts |
 | [HTTP control server](docs/HTTP_CONTROL_SERVER.md) | Scripting and automation over HTTP |
 | [Custom themes](docs/CUSTOM_THEMES.md) | Making image skins for the classic design |
 | [Accuracy](docs/Accuracy.md) | Test ROM and game compatibility comparison |

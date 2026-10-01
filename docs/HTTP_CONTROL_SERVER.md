@@ -237,8 +237,8 @@ http://localhost:8080/remove_cheat?id=0&id=1
 
 ### `/settings`
 
-Returns every setting as JSON, including `design_system`, `color_scheme`, `use_custom_accent`, `custom_accent`
-and `use_bundled_font`.
+Returns every setting as JSON, including `screen_shader`, `design_system`, `color_scheme`, `contrast`,
+`use_custom_accent`, `custom_accent` and `use_bundled_font`.
 
 ```
 http://localhost:8080/settings
@@ -253,12 +253,13 @@ settings are applied either way.
 |---|---|
 | `design` | `0` platform native, `1` SkyEmu classic, `2` Material 3, `3` Fluent, `4` Adwaita ([details](DESIGN_SYSTEMS.md)) |
 | `color_scheme` | `0` follow system, `1` light, `2` dark, `3` black |
+| `contrast` | `0` follow system, `1` standard, `2` high ([details](DESIGN_SYSTEMS.md#high-contrast)) |
 | `accent` | Accent color as hex `RRGGBB`, or `system` |
 | `system_font` | `1` platform UI font, `0` bundled font |
 | `theme` | Classic skin: `0` dark, `1` light, `2` black, `3` custom |
 | `language` | Language code such as `en`, `de` or `ja` (locales like `de_DE` work too) |
 | `volume` | `0.0` – `1.0` |
-| `shader` | `0` pixelate, `1` bilinear, `2` LCD, `3` LCD & subpixels, `4` xBRZ |
+| `shader` | `0` pixelate, `1` bilinear, `2` LCD, `3` LCD & subpixels, `4` xBRZ, `5` CRT, `6` scanlines ([details](GRAPHICS.md#screen-shaders)) |
 | `screen_rotation` | `0`–`3` for 0°, 90°, 180°, 270° |
 | `integer_scaling`, `ghosting`, `color_correction` | Screen options |
 | `gba_color_correction_mode` | `0` SkyEmu, `1` Higan |
@@ -274,7 +275,8 @@ Touch control, RetroAchievements and other options use their `/settings` names (
 `touch_controls_opacity`, `hardcore_mode`, `enable_download_cache`).
 
 ```
-http://localhost:8080/setting?design=2&color_scheme=1&accent=3584e4
+http://localhost:8080/setting?design=2&color_scheme=1&contrast=2&accent=3584e4
+http://localhost:8080/setting?shader=5
 ```
 
 ### `/show_ui` · `/hide_ui`

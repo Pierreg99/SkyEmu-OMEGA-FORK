@@ -86,11 +86,14 @@ The look of the GUI is controlled with:
 ```c
 se_set_design_system(2);                  // 0 native, 1 classic, 2 Material 3, 3 Fluent, 4 Adwaita
 se_set_color_scheme(0);                   // 0 system, 1 light, 2 dark, 3 black
+se_set_contrast(0);                       // 0 system, 1 standard, 2 high
 se_set_accent_color(0x3584E4);            // or 0xFFFFFFFF to follow the system
 se_set_system_appearance(1, 0x0078D4);    // what the host knows about the OS: dark, accent
+se_set_system_high_contrast(1);           // and whether it uses high contrast (-1 if unknown)
 ```
 
-See [Design systems](DESIGN_SYSTEMS.md) for what each value does.
+See [Design systems](DESIGN_SYSTEMS.md) for what each value does. The screen shaders and the other display
+options are described in [Display and shaders](GRAPHICS.md).
 
 ## Windows DLL
 
@@ -160,13 +163,19 @@ must exist with the same signatures:
 | `void showKeyboard()`, `void hideKeyboard()` | On-screen keyboard |
 | `void openFile()` | File picker |
 | `void requestPermissions()` | Storage permissions |
-| `int[] getSystemAppearance()` | Dark mode and Material You colors (optional) |
+| `int[] getSystemAppearance()` | Dark mode, Material You colors and high contrast (optional, layout below) |
 | `void setRemoteKeycodeCallback(String)` | HTTP `/input` notifications (first character of the input name and of the value, e.g. `"A=1"`) |
 | `void ping()` | HTTP `/ping` notifications |
 | `void openExternalMenu()` | HTTP `/external_menu` requests |
 
-If `getSystemAppearance` is missing, call `se_android_set_system_appearance(dark, accent)` whenever the theme
-changes.
+If `getSystemAppearance` is missing, call `se_android_set_system_appearance(dark, accent)` and
+`se_android_set_system_high_contrast(high)` whenever the theme changes.
+
+`getSystemAppearance()` returns up to 69 values: `[0]` dark (1, 0 or -1 if unknown), `[1]` accent as ARGB (0 if
+unknown), `[2]` the number of Material You palettes (0 or 5), `[3]`–`[67]` the `system_accent1`,
+`system_accent2`, `system_accent3`, `system_neutral1` and `system_neutral2` colors at tones 100, 99, 95, 90, 80, 70,
+60, 50, 40, 30, 20, 10 and 0 (zeros when `[2]` is 0) and `[68]` high contrast (1, 0 or -1). Shorter arrays from
+older hosts still work.
 
 ## iOS and macOS
 
