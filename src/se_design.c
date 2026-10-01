@@ -23,6 +23,7 @@
   #include <windows.h>
   #ifdef _MSC_VER
   #pragma comment(lib, "advapi32.lib")
+  #pragma comment(lib, "user32.lib")
   #endif
 #endif
 
@@ -258,6 +259,18 @@ bool se_design_is_dark(int color_scheme, const se_system_appearance_t* sys){
   if(sys&&sys->dark>=0)return sys->dark!=0;
   return true;
 }
+bool se_design_is_high_contrast(int contrast, const se_system_appearance_t* sys){
+  switch(contrast){
+    case SE_CONTRAST_STANDARD: return false;
+    case SE_CONTRAST_HIGH: return true;
+  }
+  return sys&&sys->high_contrast>0;
+}
+void se_design_default_contrast_colors(bool dark, se_contrast_colors_t* out){
+  static const se_contrast_colors_t night_sky = {0x000000,0xFFFFFF,0xD6B4FD,0x2B2B2B,0x8080FF,0xA6A6A6,0x000000,0xFFFFFF};
+  static const se_contrast_colors_t desert    = {0xFFFAEF,0x3D3D3D,0x903909,0xFFF5E3,0x1C5E75,0x676767,0xFFFAEF,0x202020};
+  *out = dark? night_sky : desert;
+}
 uint32_t se_design_default_accent(int design){
   switch(design){
     case SE_DESIGN_MATERIAL3: return 0x6750A4; // Material 3 baseline seed
@@ -272,14 +285,24 @@ uint32_t se_design_default_accent(int design){
 static void se_build_material3(const se_core_palette_t* p, se_design_tokens_t* t){
   const se_tonal_palette_t *P=&p->primary, *S=&p->secondary, *T=&p->tertiary, *N=&p->neutral, *NV=&p->neutral_variant;
   bool dark = t->dark;
-  t->primary              = se_tone(P, dark? 80:40);
-  t->on_primary           = se_tone(P, dark? 20:100);
-  t->primary_container    = se_tone(P, dark? 30:90);
-  t->on_primary_container = se_tone(P, dark? 90:10);
-  t->secondary_container    = se_tone(S, dark? 30:90);
-  t->on_secondary_container = se_tone(S, dark? 90:10);
-  t->tertiary_container     = se_tone(T, dark? 30:90);
-  t->on_tertiary_container  = se_tone(T, dark? 90:10);
+  bool hc = t->high_contrast;
+  // High contrast follows Material's contrast level 1: accents move away from the surface,
+  // accent containers become strong fills carrying white (light) or black (dark) text, and
+  // text and outlines get the tones that reach Material's high contrast targets (11:1, 7:1).
+  float container = dark? (hc? 80:30) : (hc? 30:90);
+  float on_container = dark? (hc? 0:90) : (hc? 100:10);
+  // Buttons, tabs and selected list items are filled with the secondary container but Dear
+  // ImGui draws their labels with on_surface, so it keeps a tone that works with that text.
+  // In high contrast these controls get an outline instead.
+  float secondary = dark? (hc? 25:30) : (hc? 85:90);
+  t->primary              = se_tone(P, dark? (hc? 90:80) : (hc? 30:40));
+  t->on_primary           = se_tone(P, dark? (hc? 10:20) : 100);
+  t->primary_container    = se_tone(P, container);
+  t->on_primary_container = se_tone(P, on_container);
+  t->secondary_container    = se_tone(S, secondary);
+  t->on_secondary_container = se_tone(S, dark? (hc? 100:90) : (hc? 0:10));
+  t->tertiary_container     = se_tone(T, container);
+  t->on_tertiary_container  = se_tone(T, on_container);
   t->error    = se_rgba(dark? 0xF2B8B5:0xB3261E,1);
   t->on_error = se_rgba(dark? 0x601410:0xFFFFFF,1);
   t->accent_text = t->primary;
@@ -306,11 +329,11 @@ static void se_build_material3(const se_core_palette_t* p, se_design_tokens_t* t
     t->surface_input = se_tone(N,17);
   }
   t->surface_content     = t->background;
-  t->on_surface          = se_tone(N, dark? 90:10);
-  t->on_surface_variant  = se_tone(NV,dark? 80:30);
-  t->on_surface_disabled = se_alpha(t->on_surface,0.38f);
-  t->outline             = se_tone(NV,dark? 60:50);
-  t->outline_variant     = se_tone(NV,dark? 30:80);
+  t->on_surface          = se_tone(N, dark? (hc? 100:90) : (hc? 0:10));
+  t->on_surface_variant  = se_tone(NV,dark? (hc? 90:80) : (hc? 20:30));
+  t->on_surface_disabled = se_alpha(t->on_surface,hc? 0.6f:0.38f);
+  t->outline             = se_tone(NV,dark? (hc? 70:60) : (hc? 35:50));
+  t->outline_variant     = se_tone(NV,dark? (hc? 55:30) : (hc? 45:80));
   // Filled tonal buttons
   t->control        = t->secondary_container;
   t->control_hover  = se_color_blend(t->control,se_alpha(t->on_secondary_container,0.08f));
@@ -328,7 +351,7 @@ static void se_build_material3(const se_core_palette_t* p, se_design_tokens_t* t
   t->item_spacing_x = 8;   t->item_spacing_y = 8;
   t->window_padding = 12;
   t->scrollbar_size = 8;   t->grab_min_size = 12;
-  t->control_border = 0;   t->popup_border = 0;   t->check_border = 2;
+  t->control_border = hc? 1:0; t->popup_border = hc? 1:0; t->check_border = 2;
   t->font_size = 14;
   t->slider_track_h = 4;   t->slider_thumb_r = 10;
   t->section_accent = true;
@@ -422,17 +445,42 @@ static void se_build_fluent(uint32_t accent, se_design_tokens_t* t){
   t->thumb_ring = true;
 }
 
+// In a contrast theme Windows replaces the Fluent colors with the theme's system colors
+static void se_build_fluent_contrast(const se_contrast_colors_t* c, se_design_tokens_t* t){
+  se_color_t window = se_rgba(c->window,1), text = se_rgba(c->window_text,1);
+  se_color_t highlight = se_rgba(c->highlight,1), highlight_text = se_rgba(c->highlight_text,1);
+  t->background = t->surface_bar = t->surface_panel = t->surface_content = window;
+  t->surface_card = t->surface_popup = t->surface_input = window;
+  t->on_surface = t->on_surface_variant = text;
+  t->on_surface_disabled = se_rgba(c->gray_text,1);
+  t->outline = t->outline_variant = text;
+  t->control = t->secondary_container = se_rgba(c->button_face,1);
+  t->on_secondary_container = se_rgba(c->button_text,1);
+  t->control_hover  = se_color_blend(t->control,se_alpha(text,0.16f));
+  t->control_active = se_color_blend(t->control,se_alpha(text,0.28f));
+  t->primary = t->selected = t->primary_container = t->tertiary_container = highlight;
+  t->on_primary = t->on_selected = t->on_primary_container = t->on_tertiary_container = highlight_text;
+  t->accent_text = se_rgba(c->hotlight,1);
+  t->state_hover = se_alpha(text,0.16f);
+  t->state_press = se_alpha(text,0.28f);
+  t->scrim = se_rgba(0x000000,0.5f);
+  t->control_border = 1;   t->popup_border = 2;   t->check_border = 1;
+}
+
 /*** libadwaita (GNOME) ***/
 
 static void se_build_adwaita(uint32_t accent, se_design_tokens_t* t){
   bool dark = t->dark;
+  // libadwaita's high contrast style keeps the colors but draws borders around buttons,
+  // makes borders and dimmed labels much stronger and the text fully opaque.
+  bool hc = t->high_contrast;
   // accent_bg_color is the accent itself, accent_color (text on surfaces) clamps
   // its OKLab lightness like libadwaita 1.6 does.
   t->primary = se_rgba(accent,1);
   t->on_primary = se_rgba(0xFFFFFF,1);
-  t->accent_text = dark? se_accent_with_lightness(accent,0.85f,1.f) : se_accent_with_lightness(accent,0.f,0.5f);
+  t->accent_text = dark? se_accent_with_lightness(accent,hc? 0.9f:0.85f,1.f) : se_accent_with_lightness(accent,0.f,hc? 0.4f:0.5f);
   uint32_t fg = dark? 0xFFFFFF : 0x000006;
-  float fg_a = dark? 1.f : 0.8f; // window_fg_color
+  float fg_a = dark||hc? 1.f : 0.8f; // window_fg_color
   if(dark){
     t->background    = se_rgba(t->black? 0x000000:0x222226,1); // window_bg
     t->surface_bar   = se_rgba(t->black? 0x121214:0x2E2E32,1); // headerbar_bg
@@ -451,12 +499,12 @@ static void se_build_adwaita(uint32_t accent, se_design_tokens_t* t){
   t->on_error = se_rgba(0xFFFFFF,1);
   t->surface_content = t->background;
   // Widgets are tinted with alpha(currentColor, x) in libadwaita
-  t->surface_input       = se_rgba(fg,0.1f*fg_a);
+  t->surface_input       = se_rgba(fg,(hc? 0.15f:0.1f)*fg_a);
   t->on_surface          = se_rgba(fg,fg_a);
-  t->on_surface_variant  = se_rgba(fg,0.55f*fg_a); // .dim-label
+  t->on_surface_variant  = se_rgba(fg,(hc? 0.9f:0.55f)*fg_a); // .dim-label
   t->on_surface_disabled = se_rgba(fg,0.5f*fg_a);
-  t->outline             = se_rgba(fg,0.3f*fg_a);
-  t->outline_variant     = se_rgba(fg,0.15f*fg_a);
+  t->outline             = se_rgba(fg,(hc? 0.6f:0.3f)*fg_a);
+  t->outline_variant     = se_rgba(fg,(hc? 0.5f:0.15f)*fg_a);
   t->control             = se_rgba(fg,0.1f*fg_a);
   t->control_hover       = se_rgba(fg,0.15f*fg_a);
   t->control_active      = se_rgba(fg,0.3f*fg_a);
@@ -480,7 +528,7 @@ static void se_build_adwaita(uint32_t accent, se_design_tokens_t* t){
   t->item_spacing_x = 6;   t->item_spacing_y = 6;
   t->window_padding = 12;
   t->scrollbar_size = 8;   t->grab_min_size = 12;
-  t->control_border = 0;   t->popup_border = 1;   t->check_border = 2;
+  t->control_border = hc? 1:0; t->popup_border = 1; t->check_border = 2;
   t->font_size = 14;
   t->slider_track_h = 6;   t->slider_thumb_r = 10;
   t->section_bold = true;
@@ -488,7 +536,7 @@ static void se_build_adwaita(uint32_t accent, se_design_tokens_t* t){
   t->thumb_light = true;
 }
 
-void se_design_build_tokens(int design, int color_scheme, uint32_t custom_accent,
+void se_design_build_tokens(int design, int color_scheme, int contrast, uint32_t custom_accent,
                             const se_system_appearance_t* sys, se_design_tokens_t* t){
   memset(t,0,sizeof(*t));
   design = se_design_resolve(design);
@@ -496,13 +544,26 @@ void se_design_build_tokens(int design, int color_scheme, uint32_t custom_accent
   t->design = design;
   t->dark = se_design_is_dark(color_scheme,sys);
   t->black = t->dark && color_scheme==SE_COLOR_SCHEME_BLACK;
+  t->high_contrast = se_design_is_high_contrast(contrast,sys);
   uint32_t accent = custom_accent;
   if(accent==SE_ACCENT_NONE&&sys)accent = sys->accent;
   if(accent==SE_ACCENT_NONE)accent = se_design_default_accent(design);
   accent&=0xffffff;
   t->accent = accent;
   switch(design){
-    case SE_DESIGN_FLUENT:  se_build_fluent(accent,t); break;
+    case SE_DESIGN_FLUENT:{
+      se_contrast_colors_t c = {0};
+      if(t->high_contrast){
+        // An active Windows contrast theme decides between light and dark itself
+        if(sys&&sys->has_contrast_colors){
+          c = sys->contrast_colors;
+          t->dark = se_color_tone(c.window)<50.f;
+          t->black = (c.window&0xffffff)==0;
+        }else se_design_default_contrast_colors(t->dark,&c);
+      }
+      se_build_fluent(accent,t);
+      if(t->high_contrast)se_build_fluent_contrast(&c,t);
+    }break;
     case SE_DESIGN_ADWAITA: se_build_adwaita(accent,t); break;
     default:{
       se_core_palette_t core;
@@ -534,7 +595,27 @@ void se_design_query_system_appearance(se_system_appearance_t* out){
   memset(out,0,sizeof(*out));
   out->dark = -1;
   out->accent = SE_ACCENT_NONE;
+  out->high_contrast = -1;
 #if defined(_WIN32)
+  HIGHCONTRASTW hc;
+  memset(&hc,0,sizeof(hc));
+  hc.cbSize = sizeof(hc);
+  if(SystemParametersInfoW(SPI_GETHIGHCONTRAST,sizeof(hc),&hc,0)){
+    out->high_contrast = (hc.dwFlags&HCF_HIGHCONTRASTON)!=0;
+    if(out->high_contrast){
+      // The colors of the active contrast theme (Aquatic, Desert, Dusk, Night sky or custom)
+      se_contrast_colors_t* c = &out->contrast_colors;
+      const int ids[8]={COLOR_WINDOW,COLOR_WINDOWTEXT,COLOR_HIGHLIGHT,COLOR_HIGHLIGHTTEXT,
+                        COLOR_HOTLIGHT,COLOR_GRAYTEXT,COLOR_BTNFACE,COLOR_BTNTEXT};
+      uint32_t* dst[8]={&c->window,&c->window_text,&c->highlight,&c->highlight_text,
+                        &c->hotlight,&c->gray_text,&c->button_face,&c->button_text};
+      for(int i=0;i<8;++i){
+        DWORD v = GetSysColor(ids[i]);
+        *dst[i] = ((uint32_t)GetRValue(v)<<16)|((uint32_t)GetGValue(v)<<8)|GetBValue(v);
+      }
+      out->has_contrast_colors = true;
+    }
+  }
   DWORD value = 0, type = 0, size = sizeof(value);
   HKEY key;
   if(RegOpenKeyExW(HKEY_CURRENT_USER,L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",0,KEY_READ,&key)==ERROR_SUCCESS){
@@ -562,13 +643,15 @@ void se_design_query_system_appearance(se_system_appearance_t* out){
     "echo \"portal-accent=$(p accent-color)\";"
     "echo \"gnome-scheme=$(g color-scheme)\";"
     "echo \"gnome-accent=$(g accent-color)\";"
-    "echo \"gtk-theme=$(g gtk-theme)\"";
+    "echo \"gtk-theme=$(g gtk-theme)\";"
+    "echo \"portal-contrast=$(p contrast)\";"
+    "echo \"gnome-hc=$(gsettings get org.gnome.desktop.a11y.interface high-contrast 2>/dev/null)\"";
   char cmd[1024];
   snprintf(cmd,sizeof(cmd),"sh -c '%s' 2>/dev/null",script);
   FILE* f = popen(cmd,"r");
   if(f){
     char line[512];
-    int portal_scheme = -1, gnome_dark = -1, gtk_dark = -1;
+    int portal_scheme = -1, gnome_dark = -1, gtk_dark = -1, portal_contrast = -1, gnome_hc = -1;
     uint32_t portal_accent = SE_ACCENT_NONE, gnome_accent = SE_ACCENT_NONE;
     while(fgets(line,sizeof(line),f)){
       char* v = strchr(line,'=');
@@ -592,6 +675,13 @@ void se_design_query_system_appearance(se_system_appearance_t* out){
         gnome_accent = se_gnome_accent_from_name(v);
       }else if(strcmp(line,"gtk-theme")==0){
         if(strstr(v,"'"))gtk_dark = strstr(v,"dark")||strstr(v,"Dark");
+      }else if(strcmp(line,"portal-contrast")==0){
+        // "(<uint32 1>,)": 0 no preference, 1 higher contrast
+        const char* n = strstr(v,"uint32 ");
+        if(n)portal_contrast = atoi(n+7);
+      }else if(strcmp(line,"gnome-hc")==0){
+        if(strstr(v,"true"))gnome_hc = 1;
+        else if(strstr(v,"false"))gnome_hc = 0;
       }
     }
     pclose(f);
@@ -601,6 +691,9 @@ void se_design_query_system_appearance(se_system_appearance_t* out){
     else if(portal_scheme==0)out->dark = 0;
     else if(gtk_dark>=0)out->dark = gtk_dark;
     out->accent = portal_accent!=SE_ACCENT_NONE? portal_accent : gnome_accent;
+    // High contrast when either source asks for it
+    if(portal_contrast==1||gnome_hc==1)out->high_contrast = 1;
+    else if(portal_contrast==0||gnome_hc==0)out->high_contrast = 0;
   }
   const char* gtk_theme = getenv("GTK_THEME");
   if(out->dark<0&&gtk_theme)out->dark = strstr(gtk_theme,":dark")!=NULL;

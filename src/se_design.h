@@ -35,6 +35,12 @@ extern "C" {
 #define SE_COLOR_SCHEME_BLACK  3 // Dark with pure black surfaces (AMOLED)
 #define SE_COLOR_SCHEME_COUNT  4
 
+// Values of persistent_settings_t.contrast
+#define SE_CONTRAST_SYSTEM   0 // Follow the OS high contrast setting
+#define SE_CONTRAST_STANDARD 1
+#define SE_CONTRAST_HIGH     2
+#define SE_CONTRAST_COUNT    3
+
 #define SE_ACCENT_NONE 0xffffffffu // No accent color is known
 
 typedef struct{float r,g,b,a;}se_color_t;
@@ -59,18 +65,31 @@ typedef struct{
   se_tonal_palette_t primary, secondary, tertiary, neutral, neutral_variant;
 }se_core_palette_t;
 
+// System colors of a high contrast theme, as 0xRRGGBB (the Windows contrast theme colors).
+typedef struct{
+  uint32_t window, window_text;       // Background and text
+  uint32_t highlight, highlight_text; // Selected items
+  uint32_t hotlight;                  // Hyperlinks
+  uint32_t gray_text;                 // Disabled text
+  uint32_t button_face, button_text;  // Buttons
+}se_contrast_colors_t;
+
 // Appearance reported by the operating system.
 typedef struct{
   int dark;              // 1 dark, 0 light, -1 unknown
   uint32_t accent;       // 0xRRGGBB or SE_ACCENT_NONE
   bool has_core_palette; // Android 12+ Material You palette extracted from the wallpaper
   se_core_palette_t core_palette;
+  int high_contrast;     // 1 high contrast is on, 0 off, -1 unknown
+  bool has_contrast_colors;            // A Windows contrast theme is active
+  se_contrast_colors_t contrast_colors; // Its colors, Fluent uses them in high contrast
 }se_system_appearance_t;
 
 typedef struct{
   int design; // Resolved design system, never SE_DESIGN_AUTO or SE_DESIGN_CLASSIC
   bool dark;
   bool black;
+  bool high_contrast;
   uint32_t accent; // Accent (or Material seed) the tokens were built from
 
   // Color roles use Material 3 names, the other design systems map their own
@@ -123,11 +142,16 @@ int se_design_platform_default(void);
 int se_design_resolve(int design);
 const char* se_design_name(int design);
 bool se_design_is_dark(int color_scheme, const se_system_appearance_t* sys);
+bool se_design_is_high_contrast(int contrast, const se_system_appearance_t* sys);
 uint32_t se_design_default_accent(int design);
 // Builds the tokens of design (not AUTO/CLASSIC). A custom_accent of SE_ACCENT_NONE uses the
 // system accent, and falls back to the design's default accent when the system has none.
-void se_design_build_tokens(int design, int color_scheme, uint32_t custom_accent,
+// contrast is one of SE_CONTRAST_*.
+void se_design_build_tokens(int design, int color_scheme, int contrast, uint32_t custom_accent,
                             const se_system_appearance_t* sys, se_design_tokens_t* out);
+// Built-in contrast themes used by Fluent when Windows does not provide one
+// (modeled on the Night sky and Desert contrast themes of Windows 11).
+void se_design_default_contrast_colors(bool dark, se_contrast_colors_t* out);
 
 // Color science helpers
 float se_color_tone(uint32_t rgb); // CIELAB L* of an sRGB color
@@ -145,8 +169,9 @@ uint32_t se_color_to_rgb(se_color_t c);
 se_color_t se_color_blend(se_color_t base, se_color_t overlay); // overlay composited over base
 
 // Platform integration. Each is a no-op on platforms it does not apply to.
-// Queries the desktop OS light/dark preference and accent color (Windows registry,
-// GNOME settings). Android and UWP hosts push theirs through the public API instead.
+// Queries the desktop OS light/dark preference, accent color and high contrast setting
+// (Windows registry and system colors, GNOME settings). Android and UWP hosts push theirs
+// through the public API instead.
 void se_design_query_system_appearance(se_system_appearance_t* out);
 // Matches the native window frame to the app: dark title bar and caption colors on
 // Windows 11, and the GTK theme variant that GNOME Shell uses to draw X11 decorations.

@@ -218,7 +218,7 @@ typedef struct{
   float ghosting;
   float color_correction;
   uint32_t integer_scaling; 
-  uint32_t screen_shader; //0: pixels, 1: lcd, 2: lcd+subpixels, 3: upscale
+  uint32_t screen_shader; //0: pixelate, 1: bilinear, 2: lcd, 3: lcd+subpixels, 4: xBRZ, 5: CRT, 6: scanlines
   uint32_t screen_rotation; //0: No rotation, 1: Rotate Left, 2: Rotate Right, 3: Upside Down
   uint32_t stretch_to_fit;
   uint32_t auto_hide_touch_controls;
@@ -250,7 +250,8 @@ typedef struct{
   uint32_t use_custom_accent; // 0 = system accent (Material You, Windows, GNOME), 1 = custom_accent
   uint32_t custom_accent;     // 0xRRGGBB
   uint32_t use_bundled_font;  // 0 = use the platform UI font when it is available, 1 = bundled font
-  uint32_t padding[213];
+  uint32_t contrast;          // SE_CONTRAST_* (0 = follow the system)
+  uint32_t padding[212];
 }persistent_settings_t; 
 _Static_assert(sizeof(persistent_settings_t)==1024, "persistent_settings_t must be exactly 1024 bytes");
 #define SE_STATS_GRAPH_DATA 256
@@ -536,6 +537,7 @@ typedef struct {
     bool host_appearance_set;
     int host_dark;
     uint32_t host_accent;
+    int host_high_contrast; // -1 not reported, see se_set_system_high_contrast()
     int loaded_skin_key;  // Skin variant loaded by se_reload_theme() (-1 = layout only skin of the design systems)
     int font_design_key;  // Design/font combination the font atlas was built for
     char system_font_path[SB_FILE_PATH_SIZE]; // Platform UI font in use, empty when the bundled font is used
@@ -548,6 +550,8 @@ typedef struct {
 
 #define SE_NUM_SAVE_STATES 4
 #define SE_MAX_SCREENSHOT_SIZE (NDS_LCD_H*NDS_LCD_W*2*4)
+
+#define SE_SCREEN_SHADER_COUNT 7 // See display_mode in lcd_shaders.shd
 
 #define SE_THEME_DARK 0
 #define SE_THEME_LIGHT 1
@@ -631,7 +635,7 @@ void se_png_write_mem(void *context, void *data, int size){
   cont->size+=size; 
 }
 static void se_sync_cloud_save_states();
-gui_state_t gui_state={ .update_font_atlas=true }; 
+gui_state_t gui_state={ .update_font_atlas=true, .host_high_contrast=-1 };
 
 void se_draw_image(uint8_t *data, int im_width, int im_height,int x, int y, int render_width, int render_height, bool has_alpha);
 void se_draw_lcd(uint8_t *data, int im_width, int im_height,int x, int y, int render_width, int render_height, float rotation,bool is_touch);
@@ -2931,7 +2935,7 @@ SKYEMU_API void se_stretch_to_fit(int fit) {
 }
 
 SKYEMU_API void se_set_screen_shader(uint32_t shader_mode) {
-    if (shader_mode <= 4) {
+    if (shader_mode < SE_SCREEN_SHADER_COUNT) {
         gui_state.settings.screen_shader = shader_mode;
     }
 }
@@ -2974,6 +2978,16 @@ SKYEMU_API void se_set_accent_color(uint32_t rgb) {
 }
 SKYEMU_API uint32_t se_get_accent_color(void) {
     return gui_state.settings.use_custom_accent? gui_state.settings.custom_accent&0xffffff : SE_ACCENT_NONE;
+}
+SKYEMU_API void se_set_contrast(uint32_t contrast) {
+    gui_state.settings.contrast = contrast<SE_CONTRAST_COUNT? contrast : SE_CONTRAST_SYSTEM;
+}
+SKYEMU_API uint32_t se_get_contrast(void) {
+    return gui_state.settings.contrast;
+}
+SKYEMU_API void se_set_system_high_contrast(int high_contrast) {
+    gui_state.host_high_contrast = high_contrast<0? -1 : high_contrast!=0;
+    gui_state.last_appearance_query = 0;
 }
 SKYEMU_API void se_set_system_appearance(int dark, uint32_t accent_rgb) {
     gui_state.host_appearance_set = true;
@@ -5379,13 +5393,16 @@ void se_android_get_visible_rect(float * top, float * bottom){
     (*pJavaVM)->DetachCurrentThread(pJavaVM);
   }
 }
-// Light/dark mode and the Material You palette (Android 12+) from EnhancedNativeActivity.getSystemAppearance().
+// Light/dark mode, the Material You palette (Android 12+) and high contrast from
+// EnhancedNativeActivity.getSystemAppearance().
 // Layout: [dark (1 dark, 0 light, -1 unknown), accent ARGB (0 unknown), palette count (0 or 5),
-//          accent1, accent2, accent3, neutral1, neutral2 at tones 100,99,95,90,80,70,60,50,40,30,20,10,0]
+//          accent1, accent2, accent3, neutral1, neutral2 at tones 100,99,95,90,80,70,60,50,40,30,20,10,0
+//          (zeros when the count is 0), high contrast (1 on, 0 off, -1 unknown; optional, index 68)]
 static void se_android_get_system_appearance(se_system_appearance_t* out){
   memset(out,0,sizeof(*out));
   out->dark = -1;
   out->accent = SE_ACCENT_NONE;
+  out->high_contrast = -1;
   ANativeActivity* activity =(ANativeActivity*)sapp_android_get_native_activity();
   if(!activity)return;
   JavaVM *pJavaVM = activity->vm;
@@ -5402,16 +5419,17 @@ static void se_android_get_system_appearance(se_system_appearance_t* out){
     jintArray array = (jintArray)(*pJNIEnv)->CallObjectMethod(pJNIEnv, nativeActivity, method);
     if((*pJNIEnv)->ExceptionCheck(pJNIEnv))(*pJNIEnv)->ExceptionClear(pJNIEnv);
     else if(array){
-      enum{num_values = 3+5*SE_NUM_STANDARD_TONES};
-      jint values[num_values]={0};
+      enum{num_palette_values = 5*SE_NUM_STANDARD_TONES, max_values = 3+num_palette_values+1};
+      jint values[max_values]={0};
       jsize len = (*pJNIEnv)->GetArrayLength(pJNIEnv,array);
-      if(len>num_values)len = num_values;
+      if(len>max_values)len = max_values;
       (*pJNIEnv)->GetIntArrayRegion(pJNIEnv,array,0,len,values);
       if(len>=2){
         out->dark = values[0];
         if(values[1])out->accent = ((uint32_t)values[1])&0xffffff;
       }
-      if(len==num_values&&values[2]==5){
+      if(len==max_values)out->high_contrast = values[max_values-1];
+      if(len>=3+num_palette_values&&values[2]==5){
         se_tonal_palette_t* palettes[5]={&out->core_palette.primary,&out->core_palette.secondary,&out->core_palette.tertiary,
                                          &out->core_palette.neutral,&out->core_palette.neutral_variant};
         for(int p=0;p<5;++p){
@@ -6428,6 +6446,10 @@ EM_JS(int, se_em_prefers_dark, (), {
   if(!window.matchMedia)return -1;
   return window.matchMedia('(prefers-color-scheme: dark)').matches? 1 : 0;
 });
+EM_JS(int, se_em_prefers_contrast, (), {
+  if(!window.matchMedia)return -1;
+  return window.matchMedia('(prefers-contrast: more)').matches||window.matchMedia('(forced-colors: active)').matches? 1 : 0;
+});
 #endif
 #ifdef SE_PLATFORM_ANDROID
 static void se_android_get_system_appearance(se_system_appearance_t* out);
@@ -6440,11 +6462,13 @@ static void se_query_system_appearance(se_system_appearance_t* sys){
 #endif
 #if defined(EMSCRIPTEN)
   sys->dark = se_em_prefers_dark();
+  sys->high_contrast = se_em_prefers_contrast();
 #endif
   if(gui_state.host_appearance_set){
     if(gui_state.host_dark>=0)sys->dark = gui_state.host_dark;
     if(gui_state.host_accent!=SE_ACCENT_NONE)sys->accent = gui_state.host_accent;
   }
+  if(gui_state.host_high_contrast>=0)sys->high_contrast = gui_state.host_high_contrast;
 }
 // Matches the native window frame (title bar / decorations) to the GUI
 static void se_design_style_window(){
@@ -6468,7 +6492,8 @@ static void se_update_design(){
   int design = se_design_resolve(gui_state.settings.design_system);
   bool active = design!=SE_DESIGN_CLASSIC;
   uint32_t accent = gui_state.settings.use_custom_accent? (gui_state.settings.custom_accent&0xffffff) : SE_ACCENT_NONE;
-  bool follows_system = gui_state.settings.color_scheme==SE_COLOR_SCHEME_SYSTEM||accent==SE_ACCENT_NONE;
+  bool follows_system = gui_state.settings.color_scheme==SE_COLOR_SCHEME_SYSTEM||accent==SE_ACCENT_NONE||
+                        gui_state.settings.contrast==SE_CONTRAST_SYSTEM;
   // The query is cheap everywhere except on Linux, where it runs gdbus/gsettings. There it
   // is not repeated while a game runs, changes are picked up when the emulator is paused.
   double interval = 2.0;
@@ -6482,7 +6507,7 @@ static void se_update_design(){
     gui_state.last_appearance_query = now>0? now : 1e-6;
   }
 
-  typedef struct{bool active; int design; uint32_t theme, scheme, accent; se_system_appearance_t sys;}se_design_key_t;
+  typedef struct{bool active; int design; uint32_t theme, scheme, contrast, accent; se_system_appearance_t sys;}se_design_key_t;
   static se_design_key_t last_key;
   static bool has_key = false;
   se_design_key_t key;
@@ -6491,10 +6516,11 @@ static void se_update_design(){
   key.design = design;
   key.theme = active? 0 : gui_state.settings.theme;
   key.scheme = gui_state.settings.color_scheme;
+  key.contrast = gui_state.settings.contrast;
   key.accent = accent;
   key.sys = gui_state.system_appearance;
   if(!has_key||memcmp(&key,&last_key,sizeof(key))!=0){
-    if(active)se_design_build_tokens(design,key.scheme,key.accent,&key.sys,&gui_state.design);
+    if(active)se_design_build_tokens(design,key.scheme,key.contrast,key.accent,&key.sys,&gui_state.design);
     gui_state.design_active = active;
     se_design_style_window();
     last_key = key;
@@ -7174,6 +7200,14 @@ static void se_draw_design_settings(){
   igPopItemWidth();
   gui_state.settings.color_scheme = scheme;
 
+  int contrast = gui_state.settings.contrast;
+  if(contrast<0||contrast>=SE_CONTRAST_COUNT)contrast = SE_CONTRAST_SYSTEM;
+  se_field_label("Contrast");igSameLine(SE_FIELD_INDENT,0);
+  igPushItemWidth(-1);
+  se_combo_str("##Contrast",&contrast,"Follow System\0Standard\0High\0",0);
+  igPopItemWidth();
+  gui_state.settings.contrast = contrast;
+
   bool custom = gui_state.settings.use_custom_accent;
   se_checkbox("Custom Accent Color",&custom);
   // Start from the accent in use so enabling the option does not change the colors
@@ -7719,7 +7753,7 @@ void se_draw_menu_panel(){
   int v = gui_state.settings.screen_shader;
   igPushItemWidth(-1);
   se_field_label("Screen Shader");igSameLine(SE_FIELD_INDENT,0);
-  se_combo_str("##Screen Shader",&v,"Pixelate\0Bilinear\0LCD\0LCD & Subpixels\0Smooth Upscale (xBRZ)\0",0);
+  se_combo_str("##Screen Shader",&v,"Pixelate\0Bilinear\0LCD\0LCD & Subpixels\0Smooth Upscale (xBRZ)\0CRT\0Scanlines\0",0);
   gui_state.settings.screen_shader=v;
   v = gui_state.settings.screen_rotation;
   se_field_label("Screen Rotation");igSameLine(SE_FIELD_INDENT,0);
@@ -8085,6 +8119,7 @@ uint8_t* se_hcs_callback(const char* cmd, const char** params, uint64_t* result_
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"show_screen_bezel\": %d,\n",gui_state.settings.show_screen_bezel);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"design_system\": %d,\n",gui_state.settings.design_system);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"color_scheme\": %d,\n",gui_state.settings.color_scheme);
+    off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"contrast\": %d,\n",gui_state.settings.contrast);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"use_custom_accent\": %d,\n",gui_state.settings.use_custom_accent);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"custom_accent\": \"%06x\",\n",gui_state.settings.custom_accent&0xffffff);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"use_bundled_font\": %d,\n",gui_state.settings.use_bundled_font);
@@ -8107,7 +8142,7 @@ uint8_t* se_hcs_callback(const char* cmd, const char** params, uint64_t* result_
       else if(strcmp(params[0],"dpi")==0)gui_state.dpi_override=atof(params[1]);
       else if(strcmp(params[0],"touch_controls_scale")==0)gui_state.settings.touch_controls_scale=atof(params[1]);
       else if(strcmp(params[0],"language")==0)gui_state.settings.language=se_convert_locale_to_enum(params[1]);
-      else if(strcmp(params[0],"shader")==0)gui_state.settings.screen_shader=atof(params[1]);
+      else if(strcmp(params[0],"shader")==0)se_set_screen_shader(atoi(params[1]));
       else if(strcmp(params[0],"load_slot")==0)se_restore_state_slot(atoi(params[1]));
       else if(strcmp(params[0],"capture_slot")==0)se_capture_state_slot(atoi(params[1]));
       else if(strcmp(params[0],"edit_cheat_index")==0)gui_state.editing_cheat_index = atoi(params[1]);
@@ -8116,6 +8151,7 @@ uint8_t* se_hcs_callback(const char* cmd, const char** params, uint64_t* result_
       else if(strcmp(params[0],"theme")==0)gui_state.settings.theme = atoi(params[1]);
       else if(strcmp(params[0],"design")==0)gui_state.settings.design_system = atoi(params[1]);
       else if(strcmp(params[0],"color_scheme")==0)gui_state.settings.color_scheme = atoi(params[1]);
+      else if(strcmp(params[0],"contrast")==0)se_set_contrast(atoi(params[1]));
       else if(strcmp(params[0],"accent")==0){
         // Hex RRGGBB, or "system" to follow the accent of the OS
         gui_state.settings.use_custom_accent = strcmp(params[1],"system")!=0&&params[1][0];
@@ -9076,7 +9112,7 @@ void se_load_settings(){
       gui_state.settings.screen_rotation=0;
       gui_state.settings.stretch_to_fit = 0; 
     }
-    if(gui_state.settings.screen_shader>4)gui_state.settings.screen_shader=4;
+    if(gui_state.settings.screen_shader>=SE_SCREEN_SHADER_COUNT)gui_state.settings.screen_shader=3;
     if(gui_state.settings.settings_file_version<2){
       gui_state.settings.settings_file_version = 2; 
       gui_state.settings.auto_hide_touch_controls=true;
@@ -9122,6 +9158,7 @@ void se_load_settings(){
     }
     if(gui_state.settings.design_system>=SE_DESIGN_COUNT)gui_state.settings.design_system=SE_DESIGN_AUTO;
     if(gui_state.settings.color_scheme>=SE_COLOR_SCHEME_COUNT)gui_state.settings.color_scheme=SE_COLOR_SCHEME_SYSTEM;
+    if(gui_state.settings.contrast>=SE_CONTRAST_COUNT)gui_state.settings.contrast=SE_CONTRAST_SYSTEM;
     if(gui_state.settings.gui_scale_factor<0.5)gui_state.settings.gui_scale_factor=1.0;
     if(gui_state.settings.gui_scale_factor>4.0)gui_state.settings.gui_scale_factor=1.0;
 
@@ -10697,6 +10734,25 @@ void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1accent_1color(JNIEnv
 jint Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1get_1accent_1color(JNIEnv *env, jobject thiz) { return (jint) se_get_accent_color(); }
 jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1accent_1color(JNIEnv *env, jobject thiz) {
   return Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1get_1accent_1color(env, thiz);
+}
+
+/* Contrast: 0 follow the system, 1 standard, 2 high */
+void Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1set_1contrast(JNIEnv *env, jobject thiz, jint value) {
+  se_set_contrast((uint32_t) value);
+}
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1contrast(JNIEnv *env, jobject thiz, jint value) {
+  Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1set_1contrast(env, thiz, value);
+}
+jint Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1get_1contrast(JNIEnv *env, jobject thiz) { return (jint) se_get_contrast(); }
+jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1contrast(JNIEnv *env, jobject thiz) {
+  return Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1get_1contrast(env, thiz);
+}
+/* Host apps that use their own activity report the system high contrast setting (1/0/-1) */
+void Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1set_1system_1high_1contrast(JNIEnv *env, jobject thiz, jint value) {
+  se_set_system_high_contrast((int) value);
+}
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1system_1high_1contrast(JNIEnv *env, jobject thiz, jint value) {
+  Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1set_1system_1high_1contrast(env, thiz, value);
 }
 
 /* Host apps that use their own activity report the system appearance (dark: 1/0/-1, accent: ARGB or -1) */

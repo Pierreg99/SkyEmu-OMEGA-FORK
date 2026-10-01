@@ -60,6 +60,8 @@ SKYEMU_API void se_stretch_to_fit(int fit);
  *   2 = LCD filter
  *   3 = LCD & Subpixels
  *   4 = Smooth Upscale (xBRZ)
+ *   5 = CRT (scanlines and aperture grille)
+ *   6 = Scanlines
  */
 SKYEMU_API void se_set_screen_shader(uint32_t shader_mode);
 SKYEMU_API uint32_t se_get_screen_shader(void);
@@ -94,6 +96,10 @@ SKYEMU_API uint32_t se_get_design_system(void);
 SKYEMU_API void se_set_color_scheme(uint32_t scheme);
 SKYEMU_API uint32_t se_get_color_scheme(void);
 
+/* Contrast of the design systems: 0 = follow system, 1 = standard, 2 = high */
+SKYEMU_API void se_set_contrast(uint32_t contrast);
+SKYEMU_API uint32_t se_get_contrast(void);
+
 /* Accent color 0xRRGGBB, or 0xFFFFFFFF to follow the system accent (Material You, Windows, GNOME) */
 SKYEMU_API void se_set_accent_color(uint32_t rgb);
 SKYEMU_API uint32_t se_get_accent_color(void);
@@ -105,6 +111,10 @@ SKYEMU_API uint32_t se_get_accent_color(void);
  *   accent_rgb: 0xRRGGBB, or 0xFFFFFFFF if unknown
  */
 SKYEMU_API void se_set_system_appearance(int dark, uint32_t accent_rgb);
+
+/* Lets a host app report the system high contrast setting (e.g. UWP AccessibilitySettings.HighContrast):
+   1 = on, 0 = off, -1 = unknown (SkyEmu queries the system itself) */
+SKYEMU_API void se_set_system_high_contrast(int high_contrast);
 
 /* GB palette colors (index 0-3) */
 SKYEMU_API void se_set_gb_palette(int index, uint32_t color);

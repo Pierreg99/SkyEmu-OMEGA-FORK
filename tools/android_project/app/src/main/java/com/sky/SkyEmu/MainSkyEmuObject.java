@@ -47,15 +47,20 @@ public class MainSkyEmuObject {
     /* ---- Design system ----
      * design: 0 platform native (Material 3 on Android), 1 SkyEmu classic, 2 Material 3, 3 Fluent, 4 Adwaita
      * scheme: 0 follow system, 1 light, 2 dark, 3 black (AMOLED)
+     * contrast: 0 follow system, 1 standard, 2 high
      * accent: 0xRRGGBB, or -1 to use the Material You wallpaper colors */
     public native void se_android_set_design_system(int design);
     public native int se_android_get_design_system();
     public native void se_android_set_color_scheme(int scheme);
     public native int se_android_get_color_scheme();
+    public native void se_android_set_contrast(int contrast);
+    public native int se_android_get_contrast();
     public native void se_android_set_accent_color(int rgb);
     public native int se_android_get_accent_color();
     /* For hosts that embed SkyEmu in their own activity: dark 1/0/-1, accent ARGB or -1 */
     public native void se_android_set_system_appearance(int dark, int accent);
+    /* For hosts that embed SkyEmu in their own activity: system high contrast 1/0/-1 */
+    public native void se_android_set_system_high_contrast(int highContrast);
 
     /* ---- GB Palette (index 0-3) ---- */
     public native void se_android_set_gb_palette(int index, int color);

@@ -77,30 +77,82 @@ static void test_exact_system_palette(void){
   CHECK(fabsf(se_color_tone(between)-94.f)<0.75f,"generated tone 94");
 }
 
+// Contrast of a (possibly translucent) color drawn over an opaque surface
+static float contrast_over(se_color_t surface, se_color_t fg){
+  return se_contrast_ratio(se_color_to_rgb(se_color_blend(surface,fg)),se_color_to_rgb(surface));
+}
+
 static void test_scheme_contrast(void){
   // Text roles must stay readable on the surfaces they are drawn on
   int designs[]={SE_DESIGN_MATERIAL3,SE_DESIGN_FLUENT,SE_DESIGN_ADWAITA};
   int schemes[]={SE_COLOR_SCHEME_LIGHT,SE_COLOR_SCHEME_DARK,SE_COLOR_SCHEME_BLACK};
+  int contrasts[]={SE_CONTRAST_STANDARD,SE_CONTRAST_HIGH};
   uint32_t accents[]={SE_ACCENT_NONE,0xE62D42,0x3A944A,0xC88800,0x000080,0xFFFF00};
-  for(size_t d=0;d<3;++d)for(size_t s=0;s<3;++s)for(size_t a=0;a<sizeof(accents)/sizeof(accents[0]);++a){
+  for(size_t d=0;d<3;++d)for(size_t s=0;s<3;++s)for(size_t k=0;k<2;++k)for(size_t a=0;a<sizeof(accents)/sizeof(accents[0]);++a){
     se_design_tokens_t t;
-    se_design_build_tokens(designs[d],schemes[s],accents[a],NULL,&t);
+    se_design_build_tokens(designs[d],schemes[s],contrasts[k],accents[a],NULL,&t);
+    bool hc = contrasts[k]==SE_CONTRAST_HIGH;
+    const char* name = se_design_name(designs[d]);
     CHECK(t.design==designs[d],"resolved design");
     CHECK(t.dark==(schemes[s]!=SE_COLOR_SCHEME_LIGHT),"dark flag");
+    CHECK(t.high_contrast==hc,"high contrast flag");
     se_color_t panel = t.surface_panel;
-    uint32_t text = se_color_to_rgb(se_color_blend(panel,t.on_surface));
-    float c = se_contrast_ratio(text,se_color_to_rgb(panel));
-    CHECK(c>=7.f,"%s scheme %d accent %06X: on_surface contrast %.2f",se_design_name(designs[d]),schemes[s],accents[a],c);
+    float c = contrast_over(panel,t.on_surface);
+    CHECK(c>=(hc? 10.f:7.f),"%s scheme %d contrast %d accent %06X: on_surface contrast %.2f",name,schemes[s],contrasts[k],accents[a],c);
     uint32_t sel = se_color_to_rgb(se_color_blend(panel,t.selected));
     uint32_t on_sel = se_color_to_rgb(se_color_blend(se_color_from_rgb(sel,1),t.on_selected));
     c = se_contrast_ratio(on_sel,sel);
-    CHECK(c>=3.f,"%s scheme %d accent %06X: selected contrast %.2f",se_design_name(designs[d]),schemes[s],accents[a],c);
+    CHECK(c>=3.f,"%s scheme %d contrast %d accent %06X: selected contrast %.2f",name,schemes[s],contrasts[k],accents[a],c);
     uint32_t prim = se_color_to_rgb(se_color_blend(panel,t.primary));
     uint32_t on_prim = se_color_to_rgb(t.on_primary);
     c = se_contrast_ratio(on_prim,prim);
     // libadwaita keeps white on the raw accent (e.g. yellow), everything else must pass
-    if(designs[d]!=SE_DESIGN_ADWAITA)CHECK(c>=3.f,"%s scheme %d accent %06X: on_primary contrast %.2f",se_design_name(designs[d]),schemes[s],accents[a],c);
+    if(designs[d]!=SE_DESIGN_ADWAITA)CHECK(c>=(hc? 4.5f:3.f),"%s scheme %d contrast %d accent %06X: on_primary contrast %.2f",name,schemes[s],contrasts[k],accents[a],c);
+    if(hc){
+      // High contrast: secondary text reaches AAA, borders and dividers reach the 3:1
+      // non-text minimum and accent colored text stays readable
+      c = contrast_over(panel,t.on_surface_variant);
+      CHECK(c>=7.f,"%s scheme %d accent %06X: high contrast on_surface_variant %.2f",name,schemes[s],accents[a],c);
+      c = contrast_over(t.background,t.outline_variant);
+      CHECK(c>=3.f,"%s scheme %d accent %06X: high contrast outline_variant %.2f",name,schemes[s],accents[a],c);
+      c = contrast_over(t.background,t.accent_text);
+      CHECK(c>=4.5f,"%s scheme %d accent %06X: high contrast accent_text %.2f",name,schemes[s],accents[a],c);
+      CHECK(t.control_border>=1.f,"%s scheme %d: high contrast outlines buttons and fields",name,schemes[s]);
+    }
+    // Dear ImGui draws the labels of buttons, tabs and selected list items with on_surface
+    se_color_t fills[]={t.control,t.control_hover,t.secondary_container};
+    for(int f=0;f<3;++f){
+      c = contrast_over(se_color_blend(panel,fills[f]),t.on_surface);
+      CHECK(c>=(hc? 7.f:4.5f),"%s scheme %d contrast %d accent %06X: label on fill %d %.2f",name,schemes[s],contrasts[k],accents[a],f,c);
+    }
   }
+}
+
+static void test_high_contrast_system(void){
+  se_system_appearance_t sys;
+  memset(&sys,0,sizeof(sys));
+  sys.dark = 0;
+  sys.accent = SE_ACCENT_NONE;
+  sys.high_contrast = 1;
+  CHECK(se_design_is_high_contrast(SE_CONTRAST_SYSTEM,&sys),"follows system high contrast");
+  CHECK(!se_design_is_high_contrast(SE_CONTRAST_STANDARD,&sys),"standard overrides the system");
+  CHECK(!se_design_is_high_contrast(SE_CONTRAST_SYSTEM,NULL),"unknown system means standard");
+  sys.high_contrast = 0;
+  CHECK(se_design_is_high_contrast(SE_CONTRAST_HIGH,&sys),"high overrides the system");
+  // An active Windows contrast theme replaces the colors and decides light or dark
+  sys.high_contrast = 1;
+  sys.has_contrast_colors = true;
+  se_design_default_contrast_colors(true,&sys.contrast_colors);
+  se_design_tokens_t t;
+  se_design_build_tokens(SE_DESIGN_FLUENT,SE_COLOR_SCHEME_LIGHT,SE_CONTRAST_SYSTEM,0x3A944A,&sys,&t);
+  CHECK(t.high_contrast&&t.dark,"Windows contrast theme decides dark mode");
+  CHECK(se_color_to_rgb(t.background)==sys.contrast_colors.window,"Window system color is the background");
+  CHECK(se_color_to_rgb(t.primary)==sys.contrast_colors.highlight,"Highlight system color replaces the accent");
+  CHECK(se_color_to_rgb(t.accent_text)==sys.contrast_colors.hotlight,"Hotlight system color is used for links");
+  CHECK(t.control_border>=1.f,"buttons are outlined");
+  // The other designs keep their own look in high contrast
+  se_design_build_tokens(SE_DESIGN_ADWAITA,SE_COLOR_SCHEME_LIGHT,SE_CONTRAST_SYSTEM,SE_ACCENT_NONE,&sys,&t);
+  CHECK(t.high_contrast&&!t.dark&&t.control_border>=1.f,"Adwaita high contrast outlines buttons");
 }
 
 static void test_system_appearance(void){
@@ -109,18 +161,19 @@ static void test_system_appearance(void){
   sys.dark = 0;
   sys.accent = 0xE62D42;
   se_design_tokens_t t;
-  se_design_build_tokens(SE_DESIGN_ADWAITA,SE_COLOR_SCHEME_SYSTEM,SE_ACCENT_NONE,&sys,&t);
+  se_design_build_tokens(SE_DESIGN_ADWAITA,SE_COLOR_SCHEME_SYSTEM,SE_CONTRAST_SYSTEM,SE_ACCENT_NONE,&sys,&t);
   CHECK(!t.dark,"follows system light mode");
+  CHECK(!t.high_contrast,"standard contrast unless the system asks for more");
   CHECK(t.accent==0xE62D42,"uses system accent");
   CHECK(se_color_to_rgb(t.primary)==0xE62D42,"Adwaita accent_bg is the accent");
-  se_design_build_tokens(SE_DESIGN_ADWAITA,SE_COLOR_SCHEME_SYSTEM,0x3A944A,&sys,&t);
+  se_design_build_tokens(SE_DESIGN_ADWAITA,SE_COLOR_SCHEME_SYSTEM,SE_CONTRAST_SYSTEM,0x3A944A,&sys,&t);
   CHECK(t.accent==0x3A944A,"custom accent wins over system accent");
   sys.dark = -1;
-  se_design_build_tokens(SE_DESIGN_FLUENT,SE_COLOR_SCHEME_SYSTEM,SE_ACCENT_NONE,&sys,&t);
+  se_design_build_tokens(SE_DESIGN_FLUENT,SE_COLOR_SCHEME_SYSTEM,SE_CONTRAST_SYSTEM,SE_ACCENT_NONE,&sys,&t);
   CHECK(t.dark,"unknown system preference defaults to dark");
-  se_design_build_tokens(SE_DESIGN_FLUENT,SE_COLOR_SCHEME_DARK,SE_ACCENT_NONE,NULL,&t);
+  se_design_build_tokens(SE_DESIGN_FLUENT,SE_COLOR_SCHEME_DARK,SE_CONTRAST_STANDARD,SE_ACCENT_NONE,NULL,&t);
   CHECK(se_color_to_rgb(t.primary)==0x60CDFF,"Windows default accent in dark mode is #60CDFF");
-  se_design_build_tokens(SE_DESIGN_FLUENT,SE_COLOR_SCHEME_LIGHT,SE_ACCENT_NONE,NULL,&t);
+  se_design_build_tokens(SE_DESIGN_FLUENT,SE_COLOR_SCHEME_LIGHT,SE_CONTRAST_STANDARD,SE_ACCENT_NONE,NULL,&t);
   CHECK(se_color_to_rgb(t.primary)==0x005FB8,"Windows default accent in light mode is #005FB8");
   CHECK(se_design_resolve(SE_DESIGN_AUTO)==se_design_platform_default(),"auto resolves to platform");
   CHECK(se_design_resolve(99)==se_design_platform_default(),"invalid resolves to platform");
@@ -141,6 +194,7 @@ int main(void){
   test_exact_system_palette();
   test_scheme_contrast();
   test_system_appearance();
+  test_high_contrast_system();
   test_font_validation();
   if(failures){printf("%d check(s) failed\n",failures);return 1;}
   printf("All design token checks passed\n");
