@@ -51,9 +51,42 @@ your display at any window size.
 | **Force Integer Scaling** | Only scales by whole numbers so every console pixel covers the same number of screen pixels |
 | **Stretch Screen to Fit** | Fills the window, ignoring the aspect ratio |
 | **Show Screen Bezel** | Draws the bezel of the skin around the screen (only when the skin has one) |
-| **NDS Screen Layout** | *Auto*, *Vertical*, *Horizontal*, *Hybrid Large Top* or *Bottom*, *Vertical Large Top* or *Bottom* and *Horizontal Large Top* or *Bottom* |
+| **NDS Screen Layout** | Where the two DS screens go, see [DS screen layouts](#ds-screen-layouts) |
 
-*Auto* uses *Vertical* in portrait windows and *Hybrid Large Top* in landscape windows.
+## DS screen layouts
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="images/ds-layouts-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="images/ds-layouts-light.png">
+  <img alt="The ten DS screen layouts, and Vertical with a screen gap, Vertical Large Top with a 75% small screen and Hybrid Large Top with swapped screens" src="images/ds-layouts-dark.png">
+</picture>
+
+**NDS Screen Layout** places the top screen and the touch screen. *Auto* (`0`) uses *Vertical* in portrait windows
+and *Hybrid Large Top* in landscape windows, and *Vertical* while the on-screen controller is shown.
+
+| # | Layout | Screens |
+|---|---|---|
+| 1 | **Vertical** | Top screen above the touch screen, like the console |
+| 2 | **Horizontal** | Side by side, the top screen on the left |
+| 3 | **Hybrid Large Top** | A large top screen, and both screens small beside it |
+| 4 | **Hybrid Large Bottom** | A large touch screen, and both screens small beside it |
+| 5, 6 | **Vertical Large Top** / **Bottom** | One screen large, the other small below or above it |
+| 7, 8 | **Horizontal Large Top** / **Bottom** | One screen large, the other small beside it |
+| 9 | **Top Screen Only** | Only the top screen, for games that barely use the touch screen |
+| 10 | **Bottom Screen Only** | Only the touch screen |
+
+| Option | What it does |
+|---|---|
+| **Swap Screens** | Exchanges the two screens, so the touch screen goes where the top screen would. Hotkey <kbd>F8</kbd> (**Swap Screens (NDS)** in **Menu → Keybinds**). With *Top Screen Only* or *Bottom Screen Only* the hotkey switches between the two screens during play |
+| **Screen Gap** | Space between the screens, 0 to 96 DS pixels (the DS has about 90 between its screens) |
+| **Small Screen Size** | Size of the small screen of the *Large* and *Hybrid* layouts, 25% to 100% of the large one (50% by default) |
+
+The touch screen takes taps and clicks wherever it is shown, also when it is shown twice by the *Hybrid* layouts.
+Screen rotation turns the whole layout, so *Horizontal* rotated 90° shows the screens one above the other.
+
+> [!NOTE]
+> Before this version *Horizontal* showed the touch screen on the left. It now matches *Horizontal Large Top* and
+> other DS emulators; turn on **Swap Screens** for the old order.
 
 ## Changing them from another app
 
@@ -66,7 +99,10 @@ your display at any window size.
 | Screen ghosting | `ghosting=0.0` … `1.0` | `se_set_ghosting()` |
 | Integer scaling | `integer_scaling=0` or `1` | `se_set_integer_scaling()` |
 | Stretch to fit | [`/stretch_on`, `/stretch_off`](HTTP_CONTROL_SERVER.md#stretch_on--stretch_off) | `se_stretch_to_fit()` |
-| NDS layout | `nds_layout=0` … `8` | `se_set_nds_layout()` |
+| NDS layout | `nds_layout=0` … `10` | `se_set_nds_layout()` |
+| Swap DS screens | `nds_swap_screens=0` or `1` | `se_set_nds_swap_screens()` |
+| DS screen gap | `nds_screen_gap=0` … `96` | `se_set_nds_screen_gap()` |
+| DS small screen size | `nds_small_screen=25` … `100` (percent) | `se_set_nds_small_screen()` |
 
 On Android, `MainSkyEmuObject` has the same calls with an `se_android_` prefix, for example
 `se_android_set_screen_shader(int)` (stretch to fit is `se_android_set_stretch_to_fit(int)`). Each setter has a

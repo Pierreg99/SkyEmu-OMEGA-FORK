@@ -104,7 +104,8 @@
 #define SE_KEY_SCREENSHOT 36
 #define SE_KEY_RECORD_VIDEO 37
 #define SE_KEY_SAVE_REPLAY 38
-#define SE_NUM_KEYBINDS 39
+#define SE_KEY_SWAP_SCREENS 39
+#define SE_NUM_KEYBINDS 40
 
 //Should be power of 2 for perf, 8192 samples gives ~85ms maximal latency for 48kHz
 #define SB_AUDIO_RING_BUFFER_SIZE (2048*8)

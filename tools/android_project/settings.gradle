@@ -1,2 +1,3 @@
-include ':app'
-
+// app: the SkyEmu Android library (AAR) that host apps embed
+// standalone: the SkyEmu app (APK) built from it
+include ':app', ':standalone'

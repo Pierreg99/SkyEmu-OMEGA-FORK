@@ -373,7 +373,7 @@ add_definitions(-DGIT_BRANCH=\"${GIT_BRANCH}\")
 add_definitions(-DGIT_TAG=\"${GIT_TAG}\")
 
 if(NOT RETRO_CORE_ONLY)
-  set(SKYEMU_SRC src/main.c src/shared.c src/se_design.c src/se_patch.c src/se_cheat_finder.c src/se_record.c src/cloud.cpp src/https.cpp src/stb.c src/miniz.c src/res.c src/localization.c src/mutex.cpp)
+  set(SKYEMU_SRC src/main.c src/shared.c src/se_design.c src/se_patch.c src/se_cheat_finder.c src/se_record.c src/se_screen_layout.c src/cloud.cpp src/https.cpp src/stb.c src/miniz.c src/res.c src/localization.c src/mutex.cpp)
   
   if(ENABLE_HTTP_CONTROL_SERVER)
     add_definitions(-DENABLE_HTTP_CONTROL_SERVER=1)
@@ -475,6 +475,17 @@ if(NOT RETRO_CORE_ONLY)
     if(WIN32)
       add_library(${PROJECT_NAME} SHARED ${SKYEMU_SRC})
       target_compile_definitions(${PROJECT_NAME} PRIVATE SE_PLATFORM_WINDOWS_DLL SKYEMU_DLL_EXPORTS SOKOL_NO_ENTRY)
+      # SkyEmu.exe starts SkyEmu.dll, so the Windows build runs without a host app
+      add_executable(SkyEmuLauncher WIN32 src/win_launcher.c src/resources/icons/appicon.rc)
+      target_compile_definitions(SkyEmuLauncher PRIVATE SE_PLATFORM_WINDOWS_DLL)
+      # The icon resource names its file relative to its own folder
+      target_include_directories(SkyEmuLauncher PRIVATE src src/resources/icons)
+      target_link_libraries(SkyEmuLauncher PRIVATE ${PROJECT_NAME} shell32)
+      # Same name as the DLL, but its debug files must not overwrite those of the DLL
+      set_target_properties(SkyEmuLauncher PROPERTIES OUTPUT_NAME "SkyEmu" PDB_NAME "SkyEmu-launcher")
+      if(MSVC)
+        target_link_options(SkyEmuLauncher PRIVATE /INCREMENTAL:NO)
+      endif()
     elseif(MACOS)
       if(BUILD_MACOS_STATIC_LIB)
         add_library(${PROJECT_NAME} STATIC ${SKYEMU_SRC})
@@ -592,6 +603,10 @@ if(NOT RETRO_CORE_ONLY)
   endif()
 
   target_link_libraries(${PROJECT_NAME} ${LINK_LIBS})
+  if(TARGET SkyEmuLauncher)
+      # The DLL links its libraries itself, the launcher only needs its import library
+      set_property(TARGET ${PROJECT_NAME} PROPERTY INTERFACE_LINK_LIBRARIES "")
+  endif()
   if (SE_PLATFORM_LINUX OR SE_PLATFORM_FREEBSD)
       # src/se_design.c sets the GTK theme variant of the X11 window
       target_include_directories(${PROJECT_NAME} PRIVATE "${X11_INCLUDE_DIR}")
@@ -604,6 +619,10 @@ if(NOT RETRO_CORE_ONLY)
           set_property(TARGET ${PROJECT_NAME} PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
           # Also switch dependency static libs to /MD so all objects use the same CRT
           target_compile_options(${PROJECT_NAME} PRIVATE /MD)
+          if(TARGET SkyEmuLauncher)
+              set_property(TARGET SkyEmuLauncher PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
+              target_compile_options(SkyEmuLauncher PRIVATE /MD)
+          endif()
           set_property(TARGET sokol PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
           target_compile_options(sokol PRIVATE /MD)
           set_property(TARGET cimgui PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")

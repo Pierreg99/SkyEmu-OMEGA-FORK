@@ -407,7 +407,10 @@ settings are applied either way.
 | `screen_rotation` | `0`–`3` for 0°, 90°, 180°, 270° |
 | `integer_scaling`, `ghosting`, `color_correction` | Screen options |
 | `gba_color_correction_mode` | `0` SkyEmu, `1` Higan |
-| `nds_layout` | DS screen layout, `0` auto |
+| `nds_layout` | DS screen layout, `0` auto … `10` bottom screen only ([details](GRAPHICS.md#ds-screen-layouts)) |
+| `nds_swap_screens` | `1` swaps the DS screens |
+| `nds_screen_gap` | Space between the DS screens, `0`–`96` DS pixels |
+| `nds_small_screen` | Size of the small DS screen, `25`–`100` percent |
 | `gb_palette_0` … `gb_palette_3` | Game Boy palette colors |
 | `force_dmg_mode` | Run Game Boy Color games as original Game Boy |
 | `gui_scale_factor` | GUI scale |

@@ -435,6 +435,7 @@
 		626C62C5E04146AC9CD9427D /* xts128.c in Sources */ = {isa = PBXBuildFile; fileRef = 4C9A1DE164F64399A62E5616 /* xts128.c */; };
 		62758E65A4B84BDEA693913D /* shared.c in Sources */ = {isa = PBXBuildFile; fileRef = 61E79C93B7FA4C50972E4C44 /* shared.c */; };
 		2C4E8D8A68932DA937E7E155 /* se_design.c in Sources */ = {isa = PBXBuildFile; fileRef = F0EAA8289C6E720CFC1A827D /* se_design.c */; };
+		FE90C39B8BE27D7DF5EE42F4 /* se_screen_layout.c in Sources */ = {isa = PBXBuildFile; fileRef = 1D9323F678B8C3333BE2A358 /* se_screen_layout.c */; };
 		D6245D2E4211B24F694A74B5 /* se_record.c in Sources */ = {isa = PBXBuildFile; fileRef = 610C4606BFBF8D650B4D9F74 /* se_record.c */; };
 		87AA1F1139FE016425EB0FD3 /* se_cheat_finder.c in Sources */ = {isa = PBXBuildFile; fileRef = 4E8F25961B125B6EC287C417 /* se_cheat_finder.c */; };
 		FEE78D80E273AE9A02520FE5 /* se_patch.c in Sources */ = {isa = PBXBuildFile; fileRef = 4BA6BADDA4DFA606C12FB2A4 /* se_patch.c */; };
@@ -931,6 +932,7 @@
 		EEB640CF74C3495BBAA2EA3C /* e_xcbc_d.c in Sources */ = {isa = PBXBuildFile; fileRef = 3DD1FFEB6F6045EB88DD4F69 /* e_xcbc_d.c */; };
 		EF2C3E00D0FF473389939F8A /* shared.c in Sources */ = {isa = PBXBuildFile; fileRef = 55E799B4508A467E8A7668D9 /* shared.c */; };
 		35B12CE77D16D6E37711594B /* se_design.c in Sources */ = {isa = PBXBuildFile; fileRef = 85C548DB0E92EA69EFEC132D /* se_design.c */; };
+		E96997AEDE2EFBA00B021D27 /* se_screen_layout.c in Sources */ = {isa = PBXBuildFile; fileRef = 777D4D3405964FC6ADF17F42 /* se_screen_layout.c */; };
 		6B5EA4338A715E92A7332B2B /* se_record.c in Sources */ = {isa = PBXBuildFile; fileRef = 4F2792A58AF5A2B868AE301C /* se_record.c */; };
 		C30DD6A2D4942CDB26CA480F /* se_cheat_finder.c in Sources */ = {isa = PBXBuildFile; fileRef = 29E46166E8ADA57FD553D02A /* se_cheat_finder.c */; };
 		F7DE4A32846009FD4A1BC04C /* se_patch.c in Sources */ = {isa = PBXBuildFile; fileRef = 104DBFF498652C2008CA233B /* se_patch.c */; };
@@ -1576,6 +1578,7 @@
 		55B9ABC8C7134840B419F16A /* doh.c */ = {isa = PBXFileReference; explicitFileType = sourcecode.c.c; fileEncoding = 4; name = doh.c; path = src/curl/lib/doh.c; sourceTree = SOURCE_ROOT; };
 		55E799B4508A467E8A7668D9 /* shared.c */ = {isa = PBXFileReference; explicitFileType = sourcecode.c.c; fileEncoding = 4; name = shared.c; path = src/shared.c; sourceTree = SOURCE_ROOT; };
 		85C548DB0E92EA69EFEC132D /* se_design.c */ = {isa = PBXFileReference; explicitFileType = sourcecode.c.c; fileEncoding = 4; name = se_design.c; path = src/se_design.c; sourceTree = SOURCE_ROOT; };
+		777D4D3405964FC6ADF17F42 /* se_screen_layout.c */ = {isa = PBXFileReference; explicitFileType = sourcecode.c.c; fileEncoding = 4; name = se_screen_layout.c; path = src/se_screen_layout.c; sourceTree = SOURCE_ROOT; };
 		4F2792A58AF5A2B868AE301C /* se_record.c */ = {isa = PBXFileReference; explicitFileType = sourcecode.c.c; fileEncoding = 4; name = se_record.c; path = src/se_record.c; sourceTree = SOURCE_ROOT; };
 		29E46166E8ADA57FD553D02A /* se_cheat_finder.c */ = {isa = PBXFileReference; explicitFileType = sourcecode.c.c; fileEncoding = 4; name = se_cheat_finder.c; path = src/se_cheat_finder.c; sourceTree = SOURCE_ROOT; };
 		104DBFF498652C2008CA233B /* se_patch.c */ = {isa = PBXFileReference; explicitFileType = sourcecode.c.c; fileEncoding = 4; name = se_patch.c; path = src/se_patch.c; sourceTree = SOURCE_ROOT; };
@@ -1638,6 +1641,7 @@
 		61D2D24C34814EDCAEE2764D /* bio_meth.c */ = {isa = PBXFileReference; explicitFileType = sourcecode.c.c; fileEncoding = 4; name = bio_meth.c; path = src/openssl/crypto/bio/bio_meth.c; sourceTree = SOURCE_ROOT; };
 		61E79C93B7FA4C50972E4C44 /* shared.c */ = {isa = PBXFileReference; explicitFileType = sourcecode.c.c; fileEncoding = 4; name = shared.c; path = src/shared.c; sourceTree = SOURCE_ROOT; };
 		F0EAA8289C6E720CFC1A827D /* se_design.c */ = {isa = PBXFileReference; explicitFileType = sourcecode.c.c; fileEncoding = 4; name = se_design.c; path = src/se_design.c; sourceTree = SOURCE_ROOT; };
+		1D9323F678B8C3333BE2A358 /* se_screen_layout.c */ = {isa = PBXFileReference; explicitFileType = sourcecode.c.c; fileEncoding = 4; name = se_screen_layout.c; path = src/se_screen_layout.c; sourceTree = SOURCE_ROOT; };
 		610C4606BFBF8D650B4D9F74 /* se_record.c */ = {isa = PBXFileReference; explicitFileType = sourcecode.c.c; fileEncoding = 4; name = se_record.c; path = src/se_record.c; sourceTree = SOURCE_ROOT; };
 		4E8F25961B125B6EC287C417 /* se_cheat_finder.c */ = {isa = PBXFileReference; explicitFileType = sourcecode.c.c; fileEncoding = 4; name = se_cheat_finder.c; path = src/se_cheat_finder.c; sourceTree = SOURCE_ROOT; };
 		4BA6BADDA4DFA606C12FB2A4 /* se_patch.c */ = {isa = PBXFileReference; explicitFileType = sourcecode.c.c; fileEncoding = 4; name = se_patch.c; path = src/se_patch.c; sourceTree = SOURCE_ROOT; };
@@ -3689,6 +3693,7 @@
 				BA7BAE171ECE4AA1B2963D20 /* retro_achievements.cpp */,
 				55E799B4508A467E8A7668D9 /* shared.c */,
 				85C548DB0E92EA69EFEC132D /* se_design.c */,
+				777D4D3405964FC6ADF17F42 /* se_screen_layout.c */,
 				4F2792A58AF5A2B868AE301C /* se_record.c */,
 				29E46166E8ADA57FD553D02A /* se_cheat_finder.c */,
 				104DBFF498652C2008CA233B /* se_patch.c */,
@@ -3859,6 +3864,7 @@
 				A3C2A4A72D014E24A717CD82 /* localization.c */,
 				61E79C93B7FA4C50972E4C44 /* shared.c */,
 				F0EAA8289C6E720CFC1A827D /* se_design.c */,
+				1D9323F678B8C3333BE2A358 /* se_screen_layout.c */,
 				610C4606BFBF8D650B4D9F74 /* se_record.c */,
 				4E8F25961B125B6EC287C417 /* se_cheat_finder.c */,
 				4BA6BADDA4DFA606C12FB2A4 /* se_patch.c */,
@@ -4260,6 +4266,7 @@
 				40D677A3388C45F080107C66 /* retro_achievements.cpp in Sources */,
 				EF2C3E00D0FF473389939F8A /* shared.c in Sources */,
 				35B12CE77D16D6E37711594B /* se_design.c in Sources */,
+				E96997AEDE2EFBA00B021D27 /* se_screen_layout.c in Sources */,
 				6B5EA4338A715E92A7332B2B /* se_record.c in Sources */,
 				C30DD6A2D4942CDB26CA480F /* se_cheat_finder.c in Sources */,
 				F7DE4A32846009FD4A1BC04C /* se_patch.c in Sources */,
@@ -4348,6 +4355,7 @@
 				774900777ECB473AA3E47AF0 /* localization.c in Sources */,
 				62758E65A4B84BDEA693913D /* shared.c in Sources */,
 				2C4E8D8A68932DA937E7E155 /* se_design.c in Sources */,
+				FE90C39B8BE27D7DF5EE42F4 /* se_screen_layout.c in Sources */,
 				D6245D2E4211B24F694A74B5 /* se_record.c in Sources */,
 				87AA1F1139FE016425EB0FD3 /* se_cheat_finder.c in Sources */,
 				FEE78D80E273AE9A02520FE5 /* se_patch.c in Sources */,

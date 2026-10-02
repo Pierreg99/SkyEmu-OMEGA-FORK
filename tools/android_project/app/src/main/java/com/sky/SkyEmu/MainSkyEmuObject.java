@@ -167,6 +167,12 @@ public class MainSkyEmuObject {
     public native int se_android_get_save_to_path();
     public native void se_android_set_nds_layout(int layout);
     public native int se_android_get_nds_layout();
+    public native void se_android_set_nds_swap_screens(int value);
+    public native int se_android_get_nds_swap_screens();
+    public native void se_android_set_nds_screen_gap(int value);
+    public native int se_android_get_nds_screen_gap();
+    public native void se_android_set_nds_small_screen(int value);
+    public native int se_android_get_nds_small_screen();
     public native void se_android_set_show_screen_bezel(int value);
     public native int se_android_get_show_screen_bezel();
 

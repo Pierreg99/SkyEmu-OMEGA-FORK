@@ -81,6 +81,17 @@ Every persistent setting has a getter and a setter, for example `se_set_volume` 
 `se_set_screen_shader`, `se_set_gb_palette`, `se_set_nds_layout`, `se_set_hardcore_mode` and
 `se_set_gui_scale_factor`. Changes are saved like changes made in the GUI.
 
+A host with a second display or a folding screen can arrange the DS screens:
+
+```c
+se_set_nds_layout(9);                     // 9 top screen only, 10 bottom screen only, 1 vertical, ...
+se_set_nds_swap_screens(1);               // the touch screen where the top screen would be
+se_set_nds_screen_gap(90);                // DS pixels between the screens, 0-96
+se_set_nds_small_screen(75);              // small screen of the large and hybrid layouts, 25-100 percent
+```
+
+All layouts are listed in [Display and shaders › DS screen layouts](GRAPHICS.md#ds-screen-layouts).
+
 The look of the GUI is controlled with:
 
 ```c
@@ -152,8 +163,10 @@ and explained in [Cheats and ROM patches](CHEATS_AND_PATCHES.md) and [RetroAchie
 
 ## Windows DLL
 
-The Windows build is a DLL. Load it, register the callbacks you need and call `win_main`, which creates the
-SkyEmu window and runs until it is closed.
+The emulator is built as `SkyEmu.dll`. The `SkyEmu.exe` next to it is a few lines that call `win_main` (see
+[`src/win_launcher.c`](../src/win_launcher.c)), so players start SkyEmu like any app. A host app does the same:
+load the DLL, register the callbacks you need and call `win_main`, which creates the SkyEmu window and runs until
+it is closed.
 
 ```c
 #include "skyemu_dll.h"
@@ -182,8 +195,22 @@ read the registry for should report the system theme itself, see
 
 ## Android library
 
-`tools/android_project` builds an Android library that contains `libSkyEmu.so` and the Java classes. See the
+`tools/android_project` builds an Android library (`app-release.aar`) that contains `libSkyEmu.so` and the Java
+classes, and the SkyEmu app (`SkyEmu-v32-release.apk`) built from it. See the
 [Android project page](../tools/android_project/README.md) for the build.
+
+A host app depends on the library, either on the module inside the same Gradle build or on the AAR file:
+
+```groovy
+dependencies {
+    implementation project(':app')                   // the module, as the SkyEmu app does
+    // or: implementation files('libs/app-release.aar')
+}
+```
+
+The library's manifest declares `EnhancedNativeActivity` but no launcher entry; the app module adds the
+`MAIN` / `LAUNCHER` intent filter in its own manifest, see
+[`standalone/src/main/AndroidManifest.xml`](../tools/android_project/standalone/src/main/AndroidManifest.xml).
 
 ### The activity
 

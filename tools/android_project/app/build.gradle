@@ -1,25 +1,17 @@
 apply plugin: 'com.android.library'
 
+// ABIs to build, for example -PskyemuAbis=arm64-v8a for a quicker local build
+def skyemuAbis = (project.findProperty('skyemuAbis') ?: 'arm64-v8a,armeabi-v7a,x86_64,x86').split(',')
+
 android {
     namespace = "com.skyemu"
-    signingConfigs {
-        release {
-            storePassword 'skyemu-super-secure-password'
-            keyAlias 'skyemu-open-code-certificate'
-            keyPassword 'skyemu-super-secure-password'
-            storeFile file('../skyemu-open-signing-store')
-        }
-    }
     compileSdkVersion 35
     ndkVersion '28.2.13676358'
 
     defaultConfig {
-        signingConfig signingConfigs.release
         minSdkVersion 24
         targetSdkVersion 35
-        versionCode 32
-        versionName "v3.2"
-        setProperty("archivesBaseName", applicationId + "-v" + versionCode)
+        consumerProguardFiles 'consumer-rules.pro'
         externalNativeBuild {
             cmake {
                 arguments '-DANDROID_STL=c++_static', '-DANDROID=1', '-DNDK_DEBUG=0', '-DHAVE_LIBZ=0', '-DCMAKE_BUILD_TYPE=RELWITHDEBINFO', "-DANDROID_ARM_NEON=TRUE"
@@ -27,19 +19,17 @@ android {
             }
         }
         ndk {
-            abiFilters "arm64-v8a", "x86", "armeabi-v7a", "x86_64"
+            abiFilters(*skyemuAbis)
         }
     }
     buildTypes {
         release {
             minifyEnabled false
-            proguardFiles getDefaultProguardFile('proguard-android.txt'),
-                    'proguard-rules.pro'
         }
     }
     externalNativeBuild {
         cmake {
-            version '3.18.1'
+            version '3.22.1'
             path '../../../CMakeLists.txt'
         }
     }

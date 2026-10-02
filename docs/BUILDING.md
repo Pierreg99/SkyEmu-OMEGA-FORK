@@ -59,15 +59,18 @@ cmake -B build && cmake --build build
 
 ## Windows
 
-Windows builds produce **`SkyEmu.dll`**, not an executable. A host application loads it and starts the emulator
-with `win_main(argc, argv)`, see [Embedding](EMBEDDING.md#windows-dll).
+The emulator is built as **`SkyEmu.dll`**, with a small **`SkyEmu.exe`** next to it that starts it, so SkyEmu runs
+on its own like on other platforms. Host applications load the DLL themselves and call `win_main(argc, argv)`,
+see [Embedding](EMBEDDING.md#windows-dll).
 
 ```bat
 cmake -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_SYSTEM_VERSION=10.0.19041.0
 cmake --build build --config RelWithDebInfo
+build\bin\RelWithDebInfo\SkyEmu.exe path\to\game.gba
 ```
 
-The DLL is written to `build\bin\RelWithDebInfo\`.
+`SkyEmu.exe`, `SkyEmu.dll` and their debug symbols are written to `build\bin\RelWithDebInfo\`. Keep the two files
+together; the `WindowsRelease` artifact of the *Build Windows* workflow contains both.
 
 ## macOS
 
@@ -107,8 +110,14 @@ it (see [Embedding › iOS and macOS](EMBEDDING.md#ios-and-macos)).
 ## Android
 
 The Gradle project in `tools/android_project` builds SkyEmu with the NDK through the top-level `CMakeLists.txt`.
-It is an **Android library module** (namespace `com.skyemu`) that host apps depend on; see the
-[Android project page](../tools/android_project/README.md) and [Embedding](EMBEDDING.md#android-library).
+It has two modules:
+
+| Module | Builds | Output |
+|---|---|---|
+| `standalone` | The SkyEmu app, ready to install | `standalone/build/outputs/apk/release/SkyEmu-v32-release.apk` |
+| `app` | The **Android library** (namespace `com.skyemu`) that the app and host apps embed | `app/build/outputs/aar/app-release.aar` |
+
+See the [Android project page](../tools/android_project/README.md) and [Embedding](EMBEDDING.md#android-library).
 
 | | |
 |---|---|
@@ -119,8 +128,13 @@ It is an **Android library module** (namespace `com.skyemu`) that host apps depe
 
 ```sh
 cd tools/android_project
-./gradlew assembleRelease
+./gradlew :standalone:assembleRelease :app:assembleRelease
+adb install standalone/build/outputs/apk/release/SkyEmu-v32-release.apk
 ```
+
+Add `-PskyemuAbis=arm64-v8a` to build only the ABI of your device, which is faster. The SDK location comes from
+`ANDROID_HOME` or a `local.properties` file (`sdk.dir=...`), which is not checked in. The *Build Android*
+workflow uploads the app as `AndroidRelease` and the library as `AndroidLibrary`.
 
 ## Web
 
@@ -149,14 +163,15 @@ nix run             # build and start SkyEmu
 
 ## Tests
 
-The design token engine, the ROM patch engine, the cheat finder and the recorder have stand-alone unit tests, also run by the
-Linux workflow:
+The design token engine, the ROM patch engine, the cheat finder, the recorder and the DS screen layouts have
+stand-alone unit tests, also run by the Linux workflow:
 
 ```sh
 cc -O2 -Isrc tools/se_design_test.c src/se_design.c -lm -o se_design_test && ./se_design_test
 cc -O2 -Isrc tools/se_patch_test.c src/se_patch.c -o se_patch_test && ./se_patch_test
 cc -O2 -Isrc tools/se_cheat_finder_test.c src/se_cheat_finder.c -o se_cheat_finder_test && ./se_cheat_finder_test
 cc -O2 -Isrc tools/se_record_test.c src/se_record.c src/stb.c -lm -o se_record_test && ./se_record_test
+cc -O2 -Isrc tools/se_screen_layout_test.c src/se_screen_layout.c -lm -o se_screen_layout_test && ./se_screen_layout_test
 ```
 
 The emulation cores can be checked against test ROMs with the `run_gb_test` and `run_gba_test` command line

@@ -3,9 +3,13 @@ on: [push,pull_request]
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
+    # The deploy steps push to the gh-pages branch
+    permissions:
+      contents: write
+      pull-requests: write
     steps:
       - name: Checkout 🛎️
-        uses: actions/checkout@v2.3.1
+        uses: actions/checkout@v4
       - name: Setup emsdk                 
         uses: mymindstorm/setup-emsdk@v14
         with:
@@ -18,7 +22,14 @@ jobs:
           emcmake cmake .. -DPLATFORM=Web && cmake --build .
           mkdir website
           mv bin/SkyEmu.html bin/index.html
+      - name: Upload 📦
+        uses: actions/upload-artifact@v4
+        with:
+           name: WebRelease
+           path: build/bin
       - name: Deploy 🚀
+        # Pull requests from forks get a read-only token
+        if: github.event_name == 'push'
         uses: JamesIves/github-pages-deploy-action@v4
         with:
           branch: gh-pages # The branch the action should deploy to.

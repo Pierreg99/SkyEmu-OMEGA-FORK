@@ -340,9 +340,23 @@ SKYEMU_API uint32_t se_get_only_one_notification(void);
 SKYEMU_API void se_set_enable_download_cache(uint32_t value);
 SKYEMU_API uint32_t se_get_enable_download_cache(void);
 
-/* NDS layout index */
+/* NDS screen layout: 0 Auto, 1 Vertical, 2 Horizontal, 3 Hybrid Large Top, 4 Hybrid Large Bottom,
+   5 Vertical Large Top, 6 Vertical Large Bottom, 7 Horizontal Large Top, 8 Horizontal Large Bottom,
+   9 Top Screen Only, 10 Bottom Screen Only */
 SKYEMU_API void se_set_nds_layout(uint32_t layout);
 SKYEMU_API uint32_t se_get_nds_layout(void);
+
+/* NDS swap screens: 1 = the bottom screen goes where the top screen would (also bound to F8) */
+SKYEMU_API void se_set_nds_swap_screens(uint32_t swap);
+SKYEMU_API uint32_t se_get_nds_swap_screens(void);
+
+/* Space between the NDS screens in DS pixels, 0-96 */
+SKYEMU_API void se_set_nds_screen_gap(uint32_t gap);
+SKYEMU_API uint32_t se_get_nds_screen_gap(void);
+
+/* Size of the small NDS screen of the large and hybrid layouts in percent, 25-100 (default 50) */
+SKYEMU_API void se_set_nds_small_screen(uint32_t percent);
+SKYEMU_API uint32_t se_get_nds_small_screen(void);
 
 /* Touch screen show button labels: 0 = off, 1 = on */
 SKYEMU_API void se_set_touch_screen_show_button_labels(uint32_t value);

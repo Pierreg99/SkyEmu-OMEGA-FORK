@@ -34,6 +34,10 @@ jobs:
         run: |
           cc -O2 -Wall -Wextra -Isrc tools/se_record_test.c src/se_record.c src/stb.c -lm -o se_record_test
           ./se_record_test
+      - name: Screen layout tests 🖥️
+        run: |
+          cc -O2 -Wall -Wextra -Isrc tools/se_screen_layout_test.c src/se_screen_layout.c -lm -o se_screen_layout_test
+          ./se_screen_layout_test
           
       - name: GH Release 🚀
         # You may pin to the exact commit or the version.

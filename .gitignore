@@ -53,3 +53,9 @@ cmake-build-*/
 tools/android_project/app/release
 /.vs
 /out/install/x64-Debug
+
+# Android SDK location of each machine
+tools/android_project/local.properties
+tools/android_project/.gradle/
+tools/android_project/**/build/
+tools/android_project/app/.cxx/

@@ -42,6 +42,7 @@
 #include "se_patch.h"
 #include "se_cheat_finder.h"
 #include "se_record.h"
+#include "se_screen_layout.h"
 #include <sys/stat.h>
 #ifdef _WIN32
 #include <sys/utime.h>
@@ -173,7 +174,8 @@ const static char* se_keybind_names[SE_NUM_KEYBINDS]={
   "Toggle Full Screen",
   "Screenshot",
   "Record Video",
-  "Save Replay"
+  "Save Replay",
+  "Swap Screens (NDS)"
 };
 
 #define SE_ANALOG_UP_DOWN    0
@@ -191,6 +193,9 @@ const static char* se_analog_bind_names[]={
 //Reserve space for extra keybinds/analog binds so that adding them in new versions don't break
 //a users settings.
 #define SE_NUM_BINDS_ALLOC 64
+// The last slot of the saved bindings holds their format, to give new hotkeys their defaults
+#define SE_BIND_FORMAT_SLOT (SE_NUM_BINDS_ALLOC-1)
+#define SE_BIND_FORMAT 2
 
 #define GUI_MAX_IMAGES_PER_FRAME 16
 #define SE_NUM_RECENT_PATHS 32
@@ -299,7 +304,10 @@ typedef struct{
   uint32_t screenshot_scale;          // 1-8, 0 = 1
   uint32_t stream_scale;              // MJPEG stream size 1-3, 0 = 2
   uint32_t stream_fps;                // 0 = 60 fps, 1 = 30 fps
-  uint32_t padding[139];
+  uint32_t nds_screen_gap;            // Space between the DS screens in DS pixels, 0-96
+  uint32_t nds_small_screen;          // Size of the small DS screen in percent, 25-100, 0 = 50
+  uint32_t nds_swap_screens;          // 1 = the bottom screen goes where the top screen would
+  uint32_t padding[136];
 }persistent_settings_t; 
 _Static_assert(sizeof(persistent_settings_t)==1024, "persistent_settings_t must be exactly 1024 bytes");
 #define SE_STATS_GRAPH_DATA 256
@@ -471,15 +479,6 @@ typedef struct{
 #define SE_THEME_DREW_SCREEN     0x2  
 #define SE_THEME_DREW_CONTROLLER 0x4
 
-#define SE_NDS_LAYOUT_AUTO 0 
-#define SE_NDS_LAYOUT_VERTICAL 1
-#define SE_NDS_LAYOUT_HORIZONTAL 2
-#define SE_NDS_LAYOUT_HYBRID_LARGE_TOP 3
-#define SE_NDS_LAYOUT_HYBRID_LARGE_BOTTOM 4
-#define SE_NDS_LAYOUT_VERTICAL_LARGE_TOP 5
-#define SE_NDS_LAYOUT_VERTICAL_LARGE_BOTTOM 6
-#define SE_NDS_LAYOUT_HORIZONTAL_LARGE_TOP 7
-#define SE_NDS_LAYOUT_HORIZONTAL_LARGE_BOTTOM 8
 
 typedef struct{
   uint16_t start_pixel;
@@ -4062,6 +4061,16 @@ SKYEMU_API void se_set_nds_layout(uint32_t layout) {
 SKYEMU_API uint32_t se_get_nds_layout(void) {
     return gui_state.settings.nds_layout;
 }
+SKYEMU_API void se_set_nds_swap_screens(uint32_t swap){gui_state.settings.nds_swap_screens = swap!=0;}
+SKYEMU_API uint32_t se_get_nds_swap_screens(void){return gui_state.settings.nds_swap_screens;}
+SKYEMU_API void se_set_nds_screen_gap(uint32_t gap){gui_state.settings.nds_screen_gap = gap>96? 96 : gap;}
+SKYEMU_API uint32_t se_get_nds_screen_gap(void){return gui_state.settings.nds_screen_gap;}
+SKYEMU_API void se_set_nds_small_screen(uint32_t percent){
+  if(percent<25)percent = 25;
+  if(percent>100)percent = 100;
+  gui_state.settings.nds_small_screen = percent;
+}
+SKYEMU_API uint32_t se_get_nds_small_screen(void){return gui_state.settings.nds_small_screen? gui_state.settings.nds_small_screen : 50;}
 
 SKYEMU_API void se_set_touch_screen_show_button_labels(uint32_t value) {
     gui_state.settings.touch_screen_show_button_labels = value;
@@ -5698,41 +5707,44 @@ static float se_draw_debug_panels(float screen_x, float sidebar_w, float y, floa
   }
   return screen_x;
 }
-void se_set_default_keybind(gui_state_t *gui){
-  for(int i=0;i<SE_NUM_KEYBINDS;++i)gui->key.bound_id[i]=-1;
-  gui->key.bound_id[SE_KEY_A]     = SAPP_KEYCODE_J;  
-  gui->key.bound_id[SE_KEY_B]     = SAPP_KEYCODE_K;
-  gui->key.bound_id[SE_KEY_X]     = SAPP_KEYCODE_N;
-  gui->key.bound_id[SE_KEY_Y]     = SAPP_KEYCODE_M;
-  gui->key.bound_id[SE_KEY_UP]     = SAPP_KEYCODE_W;  
-  gui->key.bound_id[SE_KEY_DOWN]   = SAPP_KEYCODE_S;    
-  gui->key.bound_id[SE_KEY_LEFT]   = SAPP_KEYCODE_A;    
-  gui->key.bound_id[SE_KEY_RIGHT]  = SAPP_KEYCODE_D;     
-  gui->key.bound_id[SE_KEY_L]      = SAPP_KEYCODE_U; 
-  gui->key.bound_id[SE_KEY_R]      = SAPP_KEYCODE_I; 
-  gui->key.bound_id[SE_KEY_START]  = SAPP_KEYCODE_ENTER;      
-  gui->key.bound_id[SE_KEY_SELECT] = SAPP_KEYCODE_APOSTROPHE; 
-  gui->key.bound_id[SE_KEY_FOLD_SCREEN]= SAPP_KEYCODE_B;     
-  gui->key.bound_id[SE_KEY_PEN_DOWN]= SAPP_KEYCODE_V; 
-  gui->key.bound_id[SE_KEY_EMU_PAUSE]= SAPP_KEYCODE_V;
+static void se_set_default_keys(int32_t* bound_id){
+  for(int i=0;i<SE_NUM_KEYBINDS;++i)bound_id[i]=-1;
+  bound_id[SE_KEY_A]     = SAPP_KEYCODE_J;  
+  bound_id[SE_KEY_B]     = SAPP_KEYCODE_K;
+  bound_id[SE_KEY_X]     = SAPP_KEYCODE_N;
+  bound_id[SE_KEY_Y]     = SAPP_KEYCODE_M;
+  bound_id[SE_KEY_UP]     = SAPP_KEYCODE_W;  
+  bound_id[SE_KEY_DOWN]   = SAPP_KEYCODE_S;    
+  bound_id[SE_KEY_LEFT]   = SAPP_KEYCODE_A;    
+  bound_id[SE_KEY_RIGHT]  = SAPP_KEYCODE_D;     
+  bound_id[SE_KEY_L]      = SAPP_KEYCODE_U; 
+  bound_id[SE_KEY_R]      = SAPP_KEYCODE_I; 
+  bound_id[SE_KEY_START]  = SAPP_KEYCODE_ENTER;      
+  bound_id[SE_KEY_SELECT] = SAPP_KEYCODE_APOSTROPHE; 
+  bound_id[SE_KEY_FOLD_SCREEN]= SAPP_KEYCODE_B;     
+  bound_id[SE_KEY_PEN_DOWN]= SAPP_KEYCODE_V; 
+  bound_id[SE_KEY_EMU_PAUSE]= SAPP_KEYCODE_V;
 
-  gui->key.bound_id[SE_KEY_EMU_PAUSE]= SAPP_KEYCODE_SPACE;     
-  gui->key.bound_id[SE_KEY_EMU_REWIND]= SAPP_KEYCODE_R;     
-  gui->key.bound_id[SE_KEY_EMU_FF_2X]= SAPP_KEYCODE_F;     
-  gui->key.bound_id[SE_KEY_EMU_FF_MAX]= SAPP_KEYCODE_TAB;     
-  gui->key.bound_id[SE_KEY_SOLAR_M]= SAPP_KEYCODE_MINUS;     
-  gui->key.bound_id[SE_KEY_SOLAR_P]= SAPP_KEYCODE_EQUAL;     
-  gui->key.bound_id[SE_KEY_TOGGLE_FULLSCREEN] = SAPP_KEYCODE_F11;
-  gui->key.bound_id[SE_KEY_SCREENSHOT] = SAPP_KEYCODE_F12;
-  gui->key.bound_id[SE_KEY_RECORD_VIDEO] = SAPP_KEYCODE_F9;
-  gui->key.bound_id[SE_KEY_SAVE_REPLAY] = SAPP_KEYCODE_F10;
+  bound_id[SE_KEY_EMU_PAUSE]= SAPP_KEYCODE_SPACE;     
+  bound_id[SE_KEY_EMU_REWIND]= SAPP_KEYCODE_R;     
+  bound_id[SE_KEY_EMU_FF_2X]= SAPP_KEYCODE_F;     
+  bound_id[SE_KEY_EMU_FF_MAX]= SAPP_KEYCODE_TAB;     
+  bound_id[SE_KEY_SOLAR_M]= SAPP_KEYCODE_MINUS;     
+  bound_id[SE_KEY_SOLAR_P]= SAPP_KEYCODE_EQUAL;     
+  bound_id[SE_KEY_TOGGLE_FULLSCREEN] = SAPP_KEYCODE_F11;
+  bound_id[SE_KEY_SCREENSHOT] = SAPP_KEYCODE_F12;
+  bound_id[SE_KEY_RECORD_VIDEO] = SAPP_KEYCODE_F9;
+  bound_id[SE_KEY_SAVE_REPLAY] = SAPP_KEYCODE_F10;
+  bound_id[SE_KEY_SWAP_SCREENS] = SAPP_KEYCODE_F8;
+  bound_id[SE_BIND_FORMAT_SLOT] = SE_BIND_FORMAT;
 
   for(int i=0;i<SE_NUM_SAVE_STATES;++i){
-    gui->key.bound_id[SE_KEY_CAPTURE_STATE(i)]=SAPP_KEYCODE_1+i;
-    gui->key.bound_id[SE_KEY_RESTORE_STATE(i)]=SAPP_KEYCODE_F1+i;
+    bound_id[SE_KEY_CAPTURE_STATE(i)]=SAPP_KEYCODE_1+i;
+    bound_id[SE_KEY_RESTORE_STATE(i)]=SAPP_KEYCODE_F1+i;
   }
 
 }
+void se_set_default_keybind(gui_state_t *gui){se_set_default_keys(gui->key.bound_id);}
 void sb_poll_controller_input(sb_joy_t* joy){
   for(int i=0;i<SE_NUM_KEYBINDS;++i){
     gui_state.key.value[i]=se_key_is_pressed(gui_state.key.bound_id[i]);
@@ -8212,6 +8224,9 @@ void se_update_frame() {
   se_update_key_turbo(&emu_state);
   se_update_solar_sensor(&emu_state);
   se_rec_update();
+  if(emu_state.joy.inputs[SE_KEY_SWAP_SCREENS]&&!emu_state.prev_frame_joy.inputs[SE_KEY_SWAP_SCREENS]){
+    gui_state.settings.nds_swap_screens = !gui_state.settings.nds_swap_screens;
+  }
 
   if(emu_state.run_mode == SB_MODE_RESET){
     se_reset_core();
@@ -8736,9 +8751,11 @@ bool se_load_controller_settings(se_controller_state_t * cont){
       cont->key.bound_id[i]=bind_map[i];
       cont->analog.bound_id[i]=bind_map[i+SE_NUM_BINDS_ALLOC];
     }
-    // Saved before the recording hotkeys existed: their slots hold 0, which is a real button
-    if(cont->key.bound_id[SE_KEY_SCREENSHOT]==0&&cont->key.bound_id[SE_KEY_RECORD_VIDEO]==0&&cont->key.bound_id[SE_KEY_SAVE_REPLAY]==0){
-      cont->key.bound_id[SE_KEY_SCREENSHOT] = cont->key.bound_id[SE_KEY_RECORD_VIDEO] = cont->key.bound_id[SE_KEY_SAVE_REPLAY] = -1;
+    // Saved before the recording and swap hotkeys existed: their slots are unbound, but a 0
+    // would be a real button
+    if(cont->key.bound_id[SE_BIND_FORMAT_SLOT]<SE_BIND_FORMAT){
+      for(int i=SE_KEY_SCREENSHOT;i<=SE_KEY_SWAP_SCREENS;++i)if(cont->key.bound_id[i]==0)cont->key.bound_id[i]=-1;
+      cont->key.bound_id[SE_BIND_FORMAT_SLOT]=SE_BIND_FORMAT;
     }
   }
   return load_old_settings;
@@ -8919,6 +8936,7 @@ static void se_save_controller_bindings(se_controller_state_t* cont, const char*
     bind_map[i]= cont->key.bound_id[i];
     bind_map[i+SE_NUM_BINDS_ALLOC]= cont->analog.bound_id[i];
   }
+  bind_map[SE_BIND_FORMAT_SLOT]=SE_BIND_FORMAT;
   char settings_path[SB_FILE_PATH_SIZE];
   snprintf(settings_path,SB_FILE_PATH_SIZE,"%s%s-bindings.bin",se_get_pref_path(),name);
   sb_save_file_data(settings_path,(uint8_t*)bind_map,sizeof(bind_map));
@@ -9990,8 +10008,21 @@ void se_draw_menu_panel(){
     se_field_label("NDS Screen Layout");
     int layout = gui_state.settings.nds_layout;
     igSameLine(SE_FIELD_INDENT,0);
-    se_combo_str("##NDSLayout",&layout,"Auto\0Vertical\0Horizontal\0Hybrid Large Top\0Hybrid Large Bottom\0Vertical Large Top\0Vertical Large Bottom\0Horizontal Large Top\0Horizontal Large Bottom\0\0",0);
+    se_combo_str("##NDSLayout",&layout,"Auto\0Vertical\0Horizontal\0Hybrid Large Top\0Hybrid Large Bottom\0Vertical Large Top\0Vertical Large Bottom\0Horizontal Large Top\0Horizontal Large Bottom\0Top Screen Only\0Bottom Screen Only\0\0",0);
     gui_state.settings.nds_layout=layout; 
+    bool swap = gui_state.settings.nds_swap_screens;
+    se_checkbox("Swap Screens",&swap);
+    gui_state.settings.nds_swap_screens = swap;
+    float gap = gui_state.settings.nds_screen_gap;
+    se_field_label("Screen Gap");igSameLine(SE_FIELD_INDENT,0);
+    se_slider_float("##NDSScreenGap",&gap,0,96,"%.0f px");
+    gui_state.settings.nds_screen_gap = gap+0.5f;
+    if(layout==SE_NDS_LAYOUT_AUTO||(layout>=SE_NDS_LAYOUT_HYBRID_LARGE_TOP&&layout<=SE_NDS_LAYOUT_HORIZONTAL_LARGE_BOTTOM)){
+      float small = gui_state.settings.nds_small_screen? gui_state.settings.nds_small_screen : 50;
+      se_field_label("Small Screen Size");igSameLine(SE_FIELD_INDENT,0);
+      se_slider_float("##NDSSmallScreen",&small,25,100,"%.0f%%");
+      gui_state.settings.nds_small_screen = small+0.5f;
+    }
   }
   igPopItemWidth();
   se_text("Game Boy Color Palette");
@@ -10034,6 +10065,7 @@ void se_draw_menu_panel(){
     if(modified){
       char settings_path[SB_FILE_PATH_SIZE];
       snprintf(settings_path,SB_FILE_PATH_SIZE,"%skeyboard-bindings.bin",se_get_pref_path());
+      gui_state.key.bound_id[SE_BIND_FORMAT_SLOT]=SE_BIND_FORMAT;
       sb_save_file_data(settings_path,(uint8_t*)gui_state.key.bound_id,sizeof(gui_state.key.bound_id));
       se_emscripten_flush_fs();
     }
@@ -10391,6 +10423,9 @@ uint8_t* se_hcs_callback(const char* cmd, const char** params, uint64_t* result_
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"only_one_notification\": %d,\n",gui_state.settings.only_one_notification);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"enable_download_cache\": %d,\n",gui_state.settings.enable_download_cache);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"nds_layout\": %d,\n",gui_state.settings.nds_layout);
+    off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"nds_swap_screens\": %d,\n",se_get_nds_swap_screens());
+    off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"nds_screen_gap\": %d,\n",se_get_nds_screen_gap());
+    off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"nds_small_screen\": %d,\n",se_get_nds_small_screen());
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"touch_screen_show_button_labels\": %d,\n",gui_state.settings.touch_screen_show_button_labels);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"show_screen_bezel\": %d,\n",gui_state.settings.show_screen_bezel);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"design_system\": %d,\n",gui_state.settings.design_system);
@@ -10485,7 +10520,13 @@ uint8_t* se_hcs_callback(const char* cmd, const char** params, uint64_t* result_
       else if(strcmp(params[0],"gui_scale_factor")==0)gui_state.settings.gui_scale_factor=atof(params[1]);
       else if(strcmp(params[0],"only_one_notification")==0)gui_state.settings.only_one_notification=atoi(params[1]);
       else if(strcmp(params[0],"enable_download_cache")==0)gui_state.settings.enable_download_cache=atoi(params[1]);
-      else if(strcmp(params[0],"nds_layout")==0)gui_state.settings.nds_layout=atoi(params[1]);
+      else if(strcmp(params[0],"nds_layout")==0){
+        int layout = atoi(params[1]);
+        if(layout>=0&&layout<SE_NDS_NUM_LAYOUTS)gui_state.settings.nds_layout=layout;
+      }
+      else if(strcmp(params[0],"nds_swap_screens")==0)se_set_nds_swap_screens(atoi(params[1]));
+      else if(strcmp(params[0],"nds_screen_gap")==0)se_set_nds_screen_gap(atoi(params[1]));
+      else if(strcmp(params[0],"nds_small_screen")==0)se_set_nds_small_screen(atoi(params[1]));
       else if(strcmp(params[0],"touch_screen_show_button_labels")==0)gui_state.settings.touch_screen_show_button_labels=atoi(params[1]);
       else if(strcmp(params[0],"show_screen_bezel")==0)gui_state.settings.show_screen_bezel=atoi(params[1]);
       params+=2;
@@ -11436,12 +11477,14 @@ void se_load_settings(){
     snprintf(keybind_path,SB_FILE_PATH_SIZE,"%skeyboard-bindings.bin",se_get_pref_path());
     if(!sb_load_file_data_into_buffer(keybind_path,(uint8_t*)gui_state.key.bound_id,sizeof(gui_state.key.bound_id))){
       se_set_default_keybind(&gui_state);
-    }else if(gui_state.key.bound_id[SE_KEY_SCREENSHOT]==0&&gui_state.key.bound_id[SE_KEY_RECORD_VIDEO]==0&&
-             gui_state.key.bound_id[SE_KEY_SAVE_REPLAY]==0){
-      // Saved before these hotkeys existed: give them their default keys
-      gui_state.key.bound_id[SE_KEY_SCREENSHOT] = SAPP_KEYCODE_F12;
-      gui_state.key.bound_id[SE_KEY_RECORD_VIDEO] = SAPP_KEYCODE_F9;
-      gui_state.key.bound_id[SE_KEY_SAVE_REPLAY] = SAPP_KEYCODE_F10;
+    }else if(gui_state.key.bound_id[SE_BIND_FORMAT_SLOT]<SE_BIND_FORMAT){
+      // Saved before the recording and swap hotkeys existed: give them their default keys
+      int32_t defaults[SE_NUM_BINDS_ALLOC];
+      se_set_default_keys(defaults);
+      for(int i=SE_KEY_SCREENSHOT;i<=SE_KEY_SWAP_SCREENS;++i){
+        if(gui_state.key.bound_id[i]<=0)gui_state.key.bound_id[i]=defaults[i];
+      }
+      gui_state.key.bound_id[SE_BIND_FORMAT_SLOT]=SE_BIND_FORMAT;
     }
   }
 #if defined(USE_SDL) || defined(SE_PLATFORM_ANDROID)
@@ -11544,6 +11587,13 @@ void se_load_settings(){
   retro_achievements_set_options(gui_state.settings.ra_unofficial,gui_state.settings.ra_spectator);
 #endif
 }
+// Places the DS screens with the gap, small screen size and swap settings
+static int se_nds_layout_places(int layout, se_screen_place_t places[3], float* box_w, float* box_h){
+  float gap = gui_state.settings.nds_screen_gap;
+  if(gap>96)gap = 96;
+  float small = gui_state.settings.nds_small_screen? gui_state.settings.nds_small_screen/100.f : 0.5f;
+  return se_nds_layout_place(layout,gap,small,gui_state.settings.nds_swap_screens,places,box_w,box_h);
+}
 static void se_compute_draw_lcd_rect(float *lcd_render_w, float *lcd_render_h, int* nds_layout){
   float rotation = gui_state.settings.screen_rotation*0.5*3.14159;
   if(!gui_state.settings.stretch_to_fit){
@@ -11555,34 +11605,16 @@ static void se_compute_draw_lcd_rect(float *lcd_render_w, float *lcd_render_h, i
     *nds_layout= gui_state.settings.nds_layout;
     if(emu_state.system==SYSTEM_GBA){native_w = GBA_LCD_W; native_h = GBA_LCD_H;}
     else if(emu_state.system==SYSTEM_NDS){
+      if(*nds_layout<SE_NDS_LAYOUT_AUTO||*nds_layout>=SE_NDS_NUM_LAYOUTS){
+        gui_state.settings.nds_layout = SE_NDS_LAYOUT_AUTO;
+        *nds_layout = SE_NDS_LAYOUT_AUTO;
+      }
       if(*nds_layout==SE_NDS_LAYOUT_AUTO){
         *nds_layout = SE_NDS_LAYOUT_VERTICAL;
         if(scr_w/scr_h>1&&!touch_controller_active)*nds_layout = SE_NDS_LAYOUT_HYBRID_LARGE_TOP;
       }
-      switch(*nds_layout){
-        case SE_NDS_LAYOUT_VERTICAL: 
-          native_w = NDS_LCD_W; native_h = NDS_LCD_H*2;
-          break; 
-        case SE_NDS_LAYOUT_HORIZONTAL: 
-          native_w = NDS_LCD_W*2; native_h = NDS_LCD_H;
-          break; 
-        case SE_NDS_LAYOUT_HYBRID_LARGE_TOP:  
-        case SE_NDS_LAYOUT_HYBRID_LARGE_BOTTOM: 
-         native_w = NDS_LCD_W+NDS_LCD_W*0.5;
-         native_h = NDS_LCD_H;
-          break; 
-        case SE_NDS_LAYOUT_VERTICAL_LARGE_BOTTOM: 
-        case SE_NDS_LAYOUT_VERTICAL_LARGE_TOP: 
-          native_w = NDS_LCD_W; native_h = NDS_LCD_H*1.5;
-          break;
-        case SE_NDS_LAYOUT_HORIZONTAL_LARGE_BOTTOM: 
-        case SE_NDS_LAYOUT_HORIZONTAL_LARGE_TOP: 
-          native_w = NDS_LCD_W*1.5; native_h = NDS_LCD_H;
-          break; 
-        default:
-          gui_state.settings.nds_layout = SE_NDS_LAYOUT_AUTO;
-          break;
-      }
+      se_screen_place_t places[3];
+      se_nds_layout_places(*nds_layout,places,&native_w,&native_h);
     }
     float lcd_aspect= native_h/native_w;
 
@@ -11638,114 +11670,20 @@ static void se_draw_lcd_in_rect(float lcd_render_x, float lcd_render_y, float lc
   if(emu_state.system==SYSTEM_GBA){
     se_draw_lcd_defer(core.gba.framebuffer,GBA_LCD_W,GBA_LCD_H,lx,ly, lw, lh,rotation,false);
   }else if (emu_state.system==SYSTEM_NDS){
-    if(nds_layout==SE_NDS_LAYOUT_HYBRID_LARGE_TOP){
-      float p[6]={
-        0.3333* lw,- lh*0.25,
-        0.3333* lw, lh*0.25,
-        -0.1666* lw,0,
-      };
-      for(int i=0;i<3;++i){
-        float x = p[i*2+0];
-        float y = p[i*2+1];
-        p[i*2+0] = x*cos(-rotation)+y*sin(-rotation);
-        p[i*2+1] = x*-sin(-rotation)+y*cos(-rotation);
-      }
-      se_draw_lcd_defer(core.nds.framebuffer_top,NDS_LCD_W,NDS_LCD_H,lx+p[0],ly+p[1], lw/3, lh*0.5,rotation,false);
-      se_draw_lcd_defer(core.nds.framebuffer_bottom,NDS_LCD_W,NDS_LCD_H,lx+p[2],ly+p[3], lw/3, lh*0.5,rotation,true);
-      se_draw_lcd_defer(core.nds.framebuffer_top,NDS_LCD_W,NDS_LCD_H,lx+p[4],ly+p[5], lw*2/3, lh,rotation,false);
-    }else if(nds_layout==SE_NDS_LAYOUT_HYBRID_LARGE_BOTTOM){
-      float p[6]={
-        0.3333* lw,- lh*0.25,
-        0.3333* lw, lh*0.25,
-        -0.1666* lw,0,
-      };
-      for(int i=0;i<3;++i){
-        float x = p[i*2+0];
-        float y = p[i*2+1];
-        p[i*2+0] = x*cos(-rotation)+y*sin(-rotation);
-        p[i*2+1] = x*-sin(-rotation)+y*cos(-rotation);
-      }
-      se_draw_lcd_defer(core.nds.framebuffer_top,NDS_LCD_W,NDS_LCD_H,lx+p[0],ly+p[1], lw/3, lh*0.5,rotation,false);
-      se_draw_lcd_defer(core.nds.framebuffer_bottom,NDS_LCD_W,NDS_LCD_H,lx+p[2],ly+p[3], lw/3, lh*0.5,rotation,true);
-      se_draw_lcd_defer(core.nds.framebuffer_bottom,NDS_LCD_W,NDS_LCD_H,lx+p[4],ly+p[5], lw*2/3, lh,rotation,true);
-    }else if(nds_layout==SE_NDS_LAYOUT_HORIZONTAL){
-      float p[4]={
-        0.25* lw,0,
-        -0.25* lw,0,
-      };
-      for(int i=0;i<2;++i){
-        float x = p[i*2+0];
-        float y = p[i*2+1];
-        p[i*2+0] = x*cos(-rotation)+y*sin(-rotation);
-        p[i*2+1] = x*-sin(-rotation)+y*cos(-rotation);
-      }
-      se_draw_lcd_defer(core.nds.framebuffer_top,NDS_LCD_W,NDS_LCD_H,lx+p[0],ly+p[1], lw/2, lh,rotation,false);
-      se_draw_lcd_defer(core.nds.framebuffer_bottom,NDS_LCD_W,NDS_LCD_H,lx+p[2],ly+p[3], lw/2, lh,rotation,true);
-    }else if(nds_layout==SE_NDS_LAYOUT_HORIZONTAL_LARGE_TOP){
-      float p[4]={
-        -0.166666* lw,0,
-        0.3333333* lw,0,
-      };
-      for(int i=0;i<2;++i){
-        float x = p[i*2+0];
-        float y = p[i*2+1];
-        p[i*2+0] = x*cos(-rotation)+y*sin(-rotation);
-        p[i*2+1] = x*-sin(-rotation)+y*cos(-rotation);
-      }
-      se_draw_lcd_defer(core.nds.framebuffer_top,NDS_LCD_W,NDS_LCD_H,lx+p[0],ly+p[1], lw*2/3, lh,rotation,false);
-      se_draw_lcd_defer(core.nds.framebuffer_bottom,NDS_LCD_W,NDS_LCD_H,lx+p[2],ly+p[3], lw/3, lh*0.5,rotation,true);
-    }else if(nds_layout==SE_NDS_LAYOUT_HORIZONTAL_LARGE_BOTTOM){
-      float p[4]={
-        -0.3333333* lw,0,
-        0.166666* lw,0,
-      };
-      for(int i=0;i<2;++i){
-        float x = p[i*2+0];
-        float y = p[i*2+1];
-        p[i*2+0] = x*cos(-rotation)+y*sin(-rotation);
-        p[i*2+1] = x*-sin(-rotation)+y*cos(-rotation);
-      }
-      se_draw_lcd_defer(core.nds.framebuffer_top,NDS_LCD_W,NDS_LCD_H,lx+p[0],ly+p[1], lw/3, lh*0.5,rotation,false);
-      se_draw_lcd_defer(core.nds.framebuffer_bottom,NDS_LCD_W,NDS_LCD_H,lx+p[2],ly+p[3], lw*2/3, lh,rotation,true);
-    }else if(nds_layout==SE_NDS_LAYOUT_VERTICAL_LARGE_TOP){
-      float p[4]={
-        0,-0.1666666*lh,
-        0, 0.33333333*lh,
-      };
-      for(int i=0;i<2;++i){
-        float x = p[i*2+0];
-        float y = p[i*2+1];
-        p[i*2+0] = x*cos(-rotation)+y*sin(-rotation);
-        p[i*2+1] = x*-sin(-rotation)+y*cos(-rotation);
-      }
-      se_draw_lcd_defer(core.nds.framebuffer_top,NDS_LCD_W,NDS_LCD_H,lx+p[0],ly+p[1], lw, lh*2/3,rotation,false);
-      se_draw_lcd_defer(core.nds.framebuffer_bottom,NDS_LCD_W,NDS_LCD_H,lx+p[2],ly+p[3], lw*0.5, lh/3,rotation,true);
-    }else if(nds_layout==SE_NDS_LAYOUT_VERTICAL_LARGE_BOTTOM){
-      float p[4]={
-        0,-0.333333*lh,
-        0,0.16666666*lh,
-      };
-      for(int i=0;i<2;++i){
-        float x = p[i*2+0];
-        float y = p[i*2+1];
-        p[i*2+0] = x*cos(-rotation)+y*sin(-rotation);
-        p[i*2+1] = x*-sin(-rotation)+y*cos(-rotation);
-      }
-      se_draw_lcd_defer(core.nds.framebuffer_top,NDS_LCD_W,NDS_LCD_H,lx+p[0],ly+p[1], lw*0.5, lh/3,rotation,false);
-      se_draw_lcd_defer(core.nds.framebuffer_bottom,NDS_LCD_W,NDS_LCD_H,lx+p[2],ly+p[3], lw, lh*2/3,rotation,true);
-    }else{
-      float p[4]={
-        0,- lh*0.25,
-        0,lh*0.25
-      };
-      for(int i=0;i<2;++i){
-        float x = p[i*2+0];
-        float y = p[i*2+1];
-        p[i*2+0] = x*cos(-rotation)+y*sin(-rotation);
-        p[i*2+1] = x*-sin(-rotation)+y*cos(-rotation);
-      }
-      se_draw_lcd_defer(core.nds.framebuffer_top,NDS_LCD_W,NDS_LCD_H,lx+p[0],ly+p[1], lw, lh*0.5,rotation,false);
-      se_draw_lcd_defer(core.nds.framebuffer_bottom,NDS_LCD_W,NDS_LCD_H,lx+p[2],ly+p[3], lw, lh*0.5,rotation,true);
+    // Auto is resolved by se_compute_draw_lcd_rect, except when stretching to fit
+    if(nds_layout<=SE_NDS_LAYOUT_AUTO||nds_layout>=SE_NDS_NUM_LAYOUTS)nds_layout = SE_NDS_LAYOUT_VERTICAL;
+    se_screen_place_t places[3];
+    float box_w = 1, box_h = 1;
+    int count = se_nds_layout_places(nds_layout,places,&box_w,&box_h);
+    for(int i=0;i<count;++i){
+      // The center of the screen relative to the center of the box, rotated with the box
+      float x = (places[i].x+places[i].w*0.5f-box_w*0.5f)/box_w*lw;
+      float y = (places[i].y+places[i].h*0.5f-box_h*0.5f)/box_h*lh;
+      float px = x*cos(-rotation)+y*sin(-rotation);
+      float py = x*-sin(-rotation)+y*cos(-rotation);
+      bool bottom = places[i].screen==SE_NDS_SCREEN_BOTTOM;
+      se_draw_lcd_defer(bottom? core.nds.framebuffer_bottom : core.nds.framebuffer_top,NDS_LCD_W,NDS_LCD_H,
+                        lx+px,ly+py,places[i].w/box_w*lw,places[i].h/box_h*lh,rotation,bottom);
     }
   }else if (emu_state.system==SYSTEM_GB){
     se_draw_lcd_defer(core.gb.lcd.framebuffer,SB_LCD_W,SB_LCD_H,lx,ly, lw, lh,rotation,false);
@@ -12967,6 +12905,12 @@ void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1gba_1color_1correcti
 jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1gba_1color_1correction_1mode(JNIEnv *env, jobject thiz) { return (jint)se_get_gba_color_correction_mode(); }
 void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1nds_1layout(JNIEnv *env, jobject thiz, jint layout) { se_set_nds_layout((uint32_t)layout); }
 jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1nds_1layout(JNIEnv *env, jobject thiz) { return (jint)se_get_nds_layout(); }
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1nds_1swap_1screens(JNIEnv *env, jobject thiz, jint value) { se_set_nds_swap_screens((uint32_t)value); }
+jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1nds_1swap_1screens(JNIEnv *env, jobject thiz) { return (jint)se_get_nds_swap_screens(); }
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1nds_1screen_1gap(JNIEnv *env, jobject thiz, jint value) { se_set_nds_screen_gap((uint32_t)value); }
+jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1nds_1screen_1gap(JNIEnv *env, jobject thiz) { return (jint)se_get_nds_screen_gap(); }
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1nds_1small_1screen(JNIEnv *env, jobject thiz, jint value) { se_set_nds_small_screen((uint32_t)value); }
+jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1nds_1small_1screen(JNIEnv *env, jobject thiz) { return (jint)se_get_nds_small_screen(); }
 void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1show_1screen_1bezel(JNIEnv *env, jobject thiz, jint value) { se_set_show_screen_bezel((uint32_t)value); }
 jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1show_1screen_1bezel(JNIEnv *env, jobject thiz) { return (jint)se_get_show_screen_bezel(); }
 void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1language(JNIEnv *env, jobject thiz, jint language) { se_set_language_int((uint32_t)language); }

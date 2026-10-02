@@ -105,7 +105,7 @@
 - LCD, subpixel, xBRZ, CRT and scanline shaders
 - GBA color correction (SkyEmu or Higan)
 - Screen ghosting
-- Flexible DS screen layouts
+- Ten DS screen layouts with swap, gap and small screen size
 
 </td>
 <td valign="top">
@@ -129,6 +129,7 @@
 | **System integration** | | Dark mode, high contrast, accent color, UI font and window frame follow the OS |
 | **Accessibility** | | A high contrast style for each design, checked by unit tests for 7:1 text and 3:1 borders |
 | **Screen shaders** | Pixelate, bilinear, LCD, LCD & subpixels, xBRZ | Adds CRT and scanlines |
+| **DS screens** | 9 layouts | Adds top screen only and bottom screen only, swap screens (with a hotkey), screen gap and small screen size |
 | **On-screen controller** | One fixed layout | Layout editor with separate portrait and landscape layouts, Rewind and Fast Forward buttons |
 | **Game controllers** | Xbox style mapping | Choice of label or GBA positions for the face buttons, Xbox / PlayStation / Nintendo button names |
 | **Cheats** | Action Replay engine, 32 codes | Cheat finder that searches memory and makes Action Replay / GameShark codes, 128 codes |
@@ -136,8 +137,8 @@
 | **RetroAchievements** | Hardcore and Encore Mode | Adds unofficial achievements, spectator mode and rich presence in the panel |
 | **Recording** | | Videos (every frame, sound in sync, also when fast forwarded), sound, screenshots and a replay buffer |
 | **Streaming** | | Live MJPEG and WAV streams, Remote Play in a browser with touch and controller input, an OBS overlay |
-| **Windows** | Stand-alone app | `SkyEmu.dll` with a C API ([`skyemu_dll.h`](src/skyemu_dll.h)) for host apps |
-| **Android** | Stand-alone app | Android library with a JNI settings and control API |
+| **Windows** | Stand-alone app | `SkyEmu.exe`, plus `SkyEmu.dll` with a C API ([`skyemu_dll.h`](src/skyemu_dll.h)) for host apps |
+| **Android** | Stand-alone app | The app, plus an Android library (AAR) with a JNI settings and control API for host apps |
 | **iOS / macOS** | Stand-alone app | Static libraries for host apps (the macOS app bundle is still available) |
 | **Host APIs** | HTTP control server | Framebuffer access, key injection, UI and menu callbacks, save state slots, every setting, patches, cheats, the cheat finder and achievements as JSON |
 
@@ -159,10 +160,10 @@ layouts are in [docs/GRAPHICS.md](docs/GRAPHICS.md).
 
 | Platform | Build output | Default design | Notes |
 |---|---|---|---|
-| **Windows** 10 / 11 | `SkyEmu.dll` | Fluent | Started by a host app through `win_main()` |
+| **Windows** 10 / 11 | `SkyEmu.exe` and `SkyEmu.dll` | Fluent | Host apps load the DLL and call `win_main()` |
 | **Linux** | `SkyEmu` executable | Adwaita | X11 or XWayland, ALSA audio |
 | **FreeBSD** | `SkyEmu` executable | Adwaita | |
-| **Android** 7.0+ | `libSkyEmu.so` in an Android library | Material 3 | Material You colors on Android 12+ |
+| **Android** 7.0+ | `SkyEmu-v32-release.apk`, and an Android library (AAR) | Material 3 | Material You colors on Android 12+ |
 | **macOS** | `SkyEmu.app`, or a static library | SkyEmu Classic | |
 | **iOS** 15+ | Static library | SkyEmu Classic | The host app provides `main()` and calls `main_ios()` |
 | **Web** | WebAssembly progressive web app | Material 3 | Follows the browser's color scheme |
@@ -174,7 +175,7 @@ layouts are in [docs/GRAPHICS.md](docs/GRAPHICS.md).
 
 Every push builds all platforms on GitHub Actions. Open a workflow run under
 [**Actions**](https://github.com/Pierreg99/SkyEmu-OMEGA-FORK/actions) and download its artifact
-(`LinuxRelease`, `WindowsRelease`, `AndroidRelease`, ...).
+(`LinuxRelease`, `WindowsRelease`, `AndroidRelease` with the APK, `AndroidLibrary` with the AAR, ...).
 
 Stand-alone releases of upstream SkyEmu, including a version that runs in the browser, are at
 [github.com/skylersaleh/SkyEmu/releases](https://github.com/skylersaleh/SkyEmu/releases) and
@@ -225,6 +226,7 @@ Customize Layout** lets you move and resize its buttons. See [docs/CONTROLLERS.m
 | Tap screen (DS) | <kbd>V</kbd> | | Full screen | <kbd>F11</kbd> |
 | | | | Record video / Save replay | <kbd>F9</kbd> / <kbd>F10</kbd> |
 | | | | Screenshot | <kbd>F12</kbd> |
+| | | | Swap screens (DS) | <kbd>F8</kbd> |
 
 ## 🎯 Accuracy
 
