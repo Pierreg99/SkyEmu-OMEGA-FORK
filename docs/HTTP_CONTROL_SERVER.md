@@ -6,7 +6,8 @@ SkyEmu contains a small web server with a REST-like API, so other programs and s
 load games, read the screen, read and write memory, step frames, press buttons and change settings.
 
 It is available in all native builds (not in the web build). Enable it in **Menu → Advanced → Enable HTTP
-Control Server** and pick the port (8080 by default). Try it from a browser:
+Control Server** and pick the port (8080 by default). While you play in RetroAchievements Hardcore Mode it only
+answers [`/achievements`](#achievements). Try it from a browser:
 
 ```
 http://localhost:8080/ping
@@ -27,6 +28,7 @@ http://localhost:8080/ping
 | [`/ping`](#ping) | Check that the server is up | `pong` |
 | [`/status`](#status) | Emulator state and HTTP inputs | JSON |
 | [`/load_rom`](#load_rom) | Load a game | `ok` |
+| [`/load_patch`](#load_patch) | Add an IPS, UPS or BPS patch to the game | `ok` or the reason |
 | [`/run`](#run) | Play at normal speed | `ok` |
 | [`/step`](#step) | Advance a number of frames | `ok` |
 | [`/screen`](#screen) | Screenshot of the emulated screen | PNG, JPG or BMP |
@@ -34,7 +36,9 @@ http://localhost:8080/ping
 | [`/read_byte`](#read_byte) | Read memory | Hex bytes |
 | [`/write_byte`](#write_byte) | Write memory | `ok` |
 | [`/save`](#save) · [`/load`](#load) | Save or load a save state file | `ok` / `failed` |
-| [`/cheats`](#cheats) · [`/edit_cheat`](#edit_cheat) · [`/remove_cheat`](#remove_cheat) | Manage cheats | Text |
+| [`/cheats`](#cheats) · [`/edit_cheat`](#edit_cheat) · [`/remove_cheat`](#remove_cheat) | Manage cheats | Text or JSON |
+| [`/cheat_search`](#cheat_search) · [`/make_cheat`](#make_cheat) | Find values in memory and make codes for them | JSON |
+| [`/achievements`](#achievements) | RetroAchievements user, game and achievements | JSON |
 | [`/settings`](#settings) | All settings | JSON |
 | [`/setting`](#setting) | Change settings | `ok` |
 | [`/show_ui`](#show_ui--hide_ui) · [`/hide_ui`](#show_ui--hide_ui) | Show or hide the GUI | Empty |
@@ -73,6 +77,7 @@ http://localhost:8080/status
   "rom-loaded": true,
   "rom-path": "/Users/sky/roms/gba/varooom-3d.gba",
   "save-path": "/Users/sky/roms/gba/varooom-3d.sav",
+  "patch": { "path": "/Users/sky/roms/gba/varooom-3d.ips", "applied": true, "status": "varooom-3d.ips (IPS)" },
   "rewind-info": { "entries-used": 953, "capacity": 1048576, "percent_full": 0.1 },
   "inputs": {
     "A": 0.000000,
@@ -85,7 +90,8 @@ http://localhost:8080/status
 }
 ```
 
-<sub>The `inputs` object is shortened here, the real response lists every input.</sub>
+<sub>The `inputs` object is shortened here, the real response lists every input. `patch` describes the
+[ROM patch](CHEATS_AND_PATCHES.md#rom-patches) of the game; its `path` is empty when there is none.</sub>
 
 ### `/load_rom`
 
@@ -97,6 +103,24 @@ http://localhost:8080/status
 ```
 http://localhost:8080/load_rom?path=/tmp/rom.gba&pause=1
 → ok
+```
+
+### `/load_patch`
+
+Adds an IPS, UPS or BPS patch to the running game, like **Add Patch** in the menu: it is copied next to the save
+file under the ROM's name and the game restarts with it. A patch made for a different ROM is refused, not kept,
+and the reason is returned. See [ROM patches](CHEATS_AND_PATCHES.md#rom-patches).
+
+| Parameter | Description |
+|---|---|
+| `path` | Path of the patch on the machine running SkyEmu |
+
+```
+http://localhost:8080/load_patch?path=/tmp/translation.ips
+→ ok
+
+http://localhost:8080/load_patch?path=/tmp/other-version.bps
+→ other-version.bps: The patch was made for a different ROM
 ```
 
 ### `/run`
@@ -201,24 +225,30 @@ http://localhost:8080/load?path=/tmp/save.png
 
 ### `/cheats`
 
-Lists the cheats and whether they are enabled.
+Lists the cheats and whether they are enabled. `format=json` returns them as JSON.
 
 ```
 http://localhost:8080/cheats
 → 0 - My first cheat: 12345678 AABBCCDD (enabled)
   1 - My second cheat: 12345678 90ABCDEF (disabled)
+
+http://localhost:8080/cheats?format=json
+→ [
+    {"id": 0, "name": "My first cheat", "enabled": true, "code": "12345678 AABBCCDD"},
+    {"id": 1, "name": "My second cheat", "enabled": false, "code": "12345678 90ABCDEF"}
+  ]
 ```
 
 ### `/edit_cheat`
 
-Adds or changes a cheat. All parameters are optional, but at least one besides `id` is required. At least 32
-cheat slots are available.
+Adds or changes a cheat. All parameters are optional, but at least one besides `id` is required. There are 128
+cheat slots. Changes are saved to the game's `.code` file, like changes made in the menu.
 
 | Parameter | Description |
 |---|---|
 | `id` | Slot to change. Without it, the first free slot is used. |
 | `name` | Name shown in the GUI |
-| `code` | Action Replay code |
+| `code` | Action Replay code (GameShark for the Game Boy) |
 | `enabled` | `1` (default) or `0` |
 
 ```
@@ -235,11 +265,64 @@ http://localhost:8080/remove_cheat?id=0&id=1
 → ok
 ```
 
+### `/cheat_search`
+
+The [cheat finder](CHEATS_AND_PATCHES.md#cheat-finder): searches the game's RAM for a value again and again while
+it changes in the game, until only its address is left. Every request returns the state of the search and its
+first results. The menu shows the same search.
+
+| Parameter | Description |
+|---|---|
+| `start` | `1` starts a new search with every address |
+| `size` | With `start`: value size in bytes, `1` (default), `2` or `4` |
+| `signed` | With `start`: `1` for values that can be negative |
+| `compare` | Keeps the addresses whose value is `equal`, `not_equal`, `greater` or `less` than `value`, `changed`, `unchanged`, `increased` or `decreased` since the last search, or `increased_by` / `decreased_by` exactly `value` |
+| `value` | Number to compare with, decimal or `0x` hex |
+| `reset` | `1` ends the search |
+| `offset`, `count` | Which results to return, 50 from the first by default (256 at most) |
+
+```
+http://localhost:8080/cheat_search?start=1&size=2
+http://localhost:8080/cheat_search?compare=increased_by&value=10
+→ {"active": true, "value_size": 2, "signed": false, "searches": 1, "count": 1, "first": 0,
+   "results": [{"address": "0x03000200", "value": 1030, "previous": 1030}]}
+```
+
+`value` is the value now, `previous` the value at the last search. Errors are returned as `{"error": "…"}`.
+
+### `/make_cheat`
+
+Adds an enabled code that keeps a value at an address, in the format of the console (encrypted Action Replay v3
+for the GBA, Action Replay for the DS, GameShark for the Game Boy), and returns it.
+
+| Parameter | Description |
+|---|---|
+| `address` | Address, decimal or `0x` hex. For Game Boy cartridge RAM, bits 16–23 are the RAM bank. |
+| `value` | Value to keep |
+| `size` | `1`, `2` or `4` bytes. The size of the current search by default. |
+| `name` | Name of the code. The address and the value by default. |
+
+```
+http://localhost:8080/make_cheat?address=0x02000100&value=99&size=1&name=Infinite Lives
+→ {"id": 0, "name": "Infinite Lives", "code": "69E24E1F 0BA154FB"}
+```
+
+### `/achievements`
+
+Returns the [RetroAchievements](RETROACHIEVEMENTS.md) user, the modes, the game with its rich presence, and every
+achievement with its unlock state, progress and rarity. It only reads, so it also answers in Hardcore Mode. See
+[the example response](RETROACHIEVEMENTS.md#from-another-app).
+
+```
+http://localhost:8080/achievements
+→ {"available": true, "logged_in": true, "user": {...}, "game": {...}, "summary": {...}, "achievements": [...]}
+```
+
 ### `/settings`
 
 Returns every setting as JSON, including `screen_shader`, `design_system`, `color_scheme`, `contrast`,
-`use_custom_accent`, `custom_accent`, `use_bundled_font`, `touch_controller`, `touch_controls_show_speed` and
-`controller_face_layout`.
+`use_custom_accent`, `custom_accent`, `use_bundled_font`, `touch_controller`, `touch_controls_show_speed`,
+`controller_face_layout`, `soft_patching`, `hardcore_mode`, `ra_unofficial` and `ra_spectator`.
 
 ```
 http://localhost:8080/settings
@@ -276,9 +359,13 @@ settings are applied either way.
 | `touch_layout_editor` | `1` opens the on-screen controller layout editor, `0` closes it |
 | `reset_touch_layout` | `1` restores the default portrait and landscape layouts |
 | `controller_face_layout` | Game controller face buttons: `0` match the labels, `1` match the GBA positions |
+| `soft_patching` | `1` applies [ROM patches](CHEATS_AND_PATCHES.md#rom-patches) when games load, `0` loads the original ROM |
+| `hardcore_mode` | RetroAchievements [Hardcore Mode](RETROACHIEVEMENTS.md#modes) |
+| `ra_unofficial` | `1` also loads unofficial RetroAchievements |
+| `ra_spectator` | `1` turns on RetroAchievements spectator mode: unlocks are shown but not sent |
 
 Touch control, RetroAchievements and other options use their `/settings` names (for example
-`touch_controls_opacity`, `hardcore_mode`, `enable_download_cache`).
+`touch_controls_opacity`, `draw_notifications`, `enable_download_cache`).
 
 ```
 http://localhost:8080/setting?design=2&color_scheme=1&contrast=2&accent=3584e4

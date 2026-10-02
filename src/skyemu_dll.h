@@ -47,6 +47,49 @@ SKYEMU_API void se_load_rom(const char *filename);
 /* Show the emulator UI overlay */
 SKYEMU_API void se_show_ui(void);
 
+/*
+ * ROM patches (IPS, UPS, BPS). A patch named like the ROM next to it, next to its save file or in
+ * the patch path is applied in memory when the game loads; the ROM file is never changed.
+ * se_load_patch copies a patch next to the save file of the loaded game and reloads the game,
+ * returning true when the patch was applied. se_get_patch_status describes the patch in use or
+ * why it could not be applied (empty when the game has no patch).
+ */
+SKYEMU_API bool se_load_patch(const char *patch_path);
+SKYEMU_API const char* se_get_patch_status(void);
+SKYEMU_API void se_set_soft_patching(int enabled);
+SKYEMU_API int se_get_soft_patching(void);
+
+/*
+ * Cheats of the loaded game (Action Replay for the GBA and DS, GameShark for the Game Boy), saved
+ * in its .code file. Indices go from 0 to 127. se_add_cheat takes the code as hex digits, spaces
+ * and line breaks are ignored, and returns the new index or -1. se_get_cheats_json returns
+ * [{"id", "name", "enabled", "code"}, ...], valid until its next call. Cheats are refused in
+ * RetroAchievements Hardcore Mode.
+ */
+SKYEMU_API int se_add_cheat(const char* name, const char* code, int enabled);
+SKYEMU_API bool se_remove_cheat(int index);
+SKYEMU_API bool se_set_cheat_enabled(int index, int enabled);
+SKYEMU_API const char* se_get_cheats_json(void);
+
+/*
+ * Cheat finder: finds where the game keeps a value by searching its RAM while the value changes.
+ * se_cheat_search_start takes the value size (1, 2 or 4 bytes). compare is 0 equal, 1 not equal,
+ * 2 greater, 3 less, 4 changed, 5 unchanged, 6 increased, 7 decreased, 8 increased by,
+ * 9 decreased by (value is only used by 0-3, 8 and 9). se_cheat_search_filter returns the number
+ * of addresses left. se_make_cheat adds an enabled code that keeps value at address and returns
+ * its index or -1; se_cheat_search_add_code does the same with the size of the search.
+ * se_get_cheat_search_json returns {"active", "value_size", "signed", "searches", "count",
+ * "first", "results": [{"address", "value", "previous"}, ...]}, valid until its next call.
+ */
+SKYEMU_API bool se_cheat_search_start(int value_size, int is_signed);
+SKYEMU_API uint32_t se_cheat_search_filter(int compare, uint32_t value);
+SKYEMU_API uint32_t se_cheat_search_count(void);
+SKYEMU_API bool se_cheat_search_get_result(uint32_t index, uint32_t* address, uint32_t* value);
+SKYEMU_API void se_cheat_search_reset(void);
+SKYEMU_API int se_cheat_search_add_code(uint32_t address, uint32_t value, const char* name);
+SKYEMU_API int se_make_cheat(uint32_t address, uint32_t value, int value_size, const char* name);
+SKYEMU_API const char* se_get_cheat_search_json(uint32_t first_result, uint32_t max_results);
+
 /* Hide the emulator UI overlay */
 SKYEMU_API void se_hide_ui(void);
 
@@ -210,6 +253,24 @@ SKYEMU_API float se_get_custom_font_scale(void);
 /* Hardcore mode (achievements): 0 = off, 1 = on */
 SKYEMU_API void se_set_hardcore_mode(uint32_t value);
 SKYEMU_API uint32_t se_get_hardcore_mode(void);
+
+/*
+ * RetroAchievements. se_ra_login starts logging in (the token is saved, so it only has to be done
+ * once) and se_ra_get_login_state returns 0 logged out, 1 logging in or 2 logged in;
+ * se_ra_get_login_error explains a failed login. Unofficial achievements are loaded and listed
+ * too when enabled. In spectator mode unlocks and leaderboard entries are shown but not sent.
+ * se_get_achievements_json returns the user, the game, its rich presence and every achievement
+ * with its unlock state and progress, valid until its next call.
+ */
+SKYEMU_API void se_ra_login(const char* username, const char* password);
+SKYEMU_API void se_ra_logout(void);
+SKYEMU_API int se_ra_get_login_state(void);
+SKYEMU_API const char* se_ra_get_login_error(void);
+SKYEMU_API void se_set_ra_unofficial(int enabled);
+SKYEMU_API int se_get_ra_unofficial(void);
+SKYEMU_API void se_set_ra_spectator(int enabled);
+SKYEMU_API int se_get_ra_spectator(void);
+SKYEMU_API const char* se_get_achievements_json(void);
 
 /* Draw challenge indicators: 0 = off, 1 = on */
 SKYEMU_API void se_set_draw_challenge_indicators(uint32_t value);

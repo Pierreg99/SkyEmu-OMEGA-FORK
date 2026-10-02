@@ -17,7 +17,7 @@
 [![iOS](https://github.com/Pierreg99/SkyEmu-OMEGA-FORK/actions/workflows/deploy_ios.yml/badge.svg)](https://github.com/Pierreg99/SkyEmu-OMEGA-FORK/actions/workflows/deploy_ios.yml)
 [![Web](https://github.com/Pierreg99/SkyEmu-OMEGA-FORK/actions/workflows/deploy_web.yml/badge.svg)](https://github.com/Pierreg99/SkyEmu-OMEGA-FORK/actions/workflows/deploy_web.yml)
 
-[**Get started**](#-get-started) · [**Build**](docs/BUILDING.md) · [**Embed**](docs/EMBEDDING.md) · [**Design systems**](docs/DESIGN_SYSTEMS.md) · [**Shaders**](docs/GRAPHICS.md) · [**Controllers**](docs/CONTROLLERS.md) · [**All docs**](docs/README.md)
+[**Get started**](#-get-started) · [**Build**](docs/BUILDING.md) · [**Embed**](docs/EMBEDDING.md) · [**Design systems**](docs/DESIGN_SYSTEMS.md) · [**Shaders**](docs/GRAPHICS.md) · [**Controllers**](docs/CONTROLLERS.md) · [**Cheats & patches**](docs/CHEATS_AND_PATCHES.md) · [**All docs**](docs/README.md)
 
 </div>
 
@@ -91,7 +91,8 @@
 ### ⏪ Play your way
 - Fast forward, slow motion and very long rewind
 - 4 save state slots with screenshot previews
-- Action Replay cheat engine
+- Action Replay and GameShark codes, and a cheat finder that makes new ones
+- IPS, UPS and BPS patches for ROM hacks and translations, applied without touching the ROM
 - On-screen controller with a drag and drop layout editor
 - Game controllers with rumble, readable button names and rebindable keys
 
@@ -109,7 +110,7 @@
 
 ### 🧰 For tinkerers
 - CPU, MMIO and memory debuggers
-- RetroAchievements with hardcore mode
+- RetroAchievements with Hardcore, Encore, unofficial and spectator modes
 - Google Drive save state sync
 - ROMs inside `.zip` archives
 - Translated into 13 languages
@@ -128,10 +129,13 @@
 | **Screen shaders** | Pixelate, bilinear, LCD, LCD & subpixels, xBRZ | Adds CRT and scanlines |
 | **On-screen controller** | One fixed layout | Layout editor with separate portrait and landscape layouts, Rewind and Fast Forward buttons |
 | **Game controllers** | Xbox style mapping | Choice of label or GBA positions for the face buttons, Xbox / PlayStation / Nintendo button names |
+| **Cheats** | Action Replay engine, 32 codes | Cheat finder that searches memory and makes Action Replay / GameShark codes, 128 codes |
+| **ROM patches** | | IPS, UPS and BPS soft patching, by drag and drop or next to the ROM |
+| **RetroAchievements** | Hardcore and Encore Mode | Adds unofficial achievements, spectator mode and rich presence in the panel |
 | **Windows** | Stand-alone app | `SkyEmu.dll` with a C API ([`skyemu_dll.h`](src/skyemu_dll.h)) for host apps |
 | **Android** | Stand-alone app | Android library with a JNI settings and control API |
 | **iOS / macOS** | Stand-alone app | Static libraries for host apps (the macOS app bundle is still available) |
-| **Host APIs** | HTTP control server | Framebuffer access, key injection, UI and menu callbacks, save state slots, every setting |
+| **Host APIs** | HTTP control server | Framebuffer access, key injection, UI and menu callbacks, save state slots, every setting, patches, cheats, the cheat finder and achievements as JSON |
 
 The design systems are described in [docs/DESIGN_SYSTEMS.md](docs/DESIGN_SYSTEMS.md) and the host APIs in [docs/EMBEDDING.md](docs/EMBEDDING.md).
 
@@ -188,7 +192,8 @@ Dependencies and the steps for Windows, Android, iOS, macOS, the web and libretr
 ### Games, saves and BIOS files
 
 - Open a ROM (`.gb`, `.gbc`, `.gba`, `.nds` or a `.zip` of one) from the **Load Game** screen, by drag and drop,
-  or as the first command line argument.
+  or as the first command line argument. Drop an `.ips`, `.ups` or `.bps` patch on the window to play a
+  [ROM hack or translation](docs/CHEATS_AND_PATCHES.md#rom-patches) with it.
 - Save files use the ROM name with a `.sav` extension (`Game.gba` → `Game.sav`) and live next to the ROM.
   In the web version, drop them onto the page or load them with the file picker.
 - BIOS files are optional. SkyEmu ships open source replacements, but official dumps are more accurate and
@@ -253,6 +258,8 @@ The comparison with other emulators is in [docs/Accuracy.md](docs/Accuracy.md).
 | [Design systems](docs/DESIGN_SYSTEMS.md) | Material 3, Fluent, Adwaita, high contrast and how they follow the OS |
 | [Display and shaders](docs/GRAPHICS.md) | Screen shaders, color correction, scaling and DS screen layouts |
 | [Controllers](docs/CONTROLLERS.md) | On-screen controller, layout editor and game controller mapping |
+| [Cheats and ROM patches](docs/CHEATS_AND_PATCHES.md) | Cheat codes, the cheat finder, and IPS / UPS / BPS patches |
+| [RetroAchievements](docs/RETROACHIEVEMENTS.md) | Achievements, Hardcore, Encore, unofficial and spectator modes |
 | [HTTP control server](docs/HTTP_CONTROL_SERVER.md) | Scripting and automation over HTTP |
 | [Custom themes](docs/CUSTOM_THEMES.md) | Making image skins for the classic design |
 | [Accuracy](docs/Accuracy.md) | Test ROM and game compatibility comparison |

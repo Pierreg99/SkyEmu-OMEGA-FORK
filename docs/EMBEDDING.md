@@ -46,7 +46,7 @@ DLL; on the other platforms they are plain C functions of the library.
 
 | Function | Description |
 |---|---|
-| `se_load_rom(path)` | Loads and starts a `.gb`, `.gbc`, `.gba`, `.nds` or `.zip` file |
+| `se_load_rom(path)` | Loads and starts a `.gb`, `.gbc`, `.gba`, `.nds` or `.zip` file. An `.ips`, `.ups` or `.bps` patch is added to the running game instead, like `se_load_patch()`. |
 | `se_load_html(path)` | Loads an HTML page that the HTTP control server serves at `/index.html` |
 | `se_show_ui()` / `se_hide_ui()` | Shows or hides the whole SkyEmu GUI (menu bar, panels, touch controls) |
 | `se_stretch_to_fit(on)` | Stretches the game screen to the window |
@@ -105,6 +105,33 @@ se_set_controller_face_layout(1);         // game controllers: A on the right li
 
 The layout editor, the controller options and their API are described in [Controllers](CONTROLLERS.md).
 
+### Patches, cheats and achievements
+
+```c
+se_load_patch("/path/to/translation.ips");   // adds a patch to the running game, false if it was refused
+se_get_patch_status();                        // "translation.ips (IPS)", or why it could not be applied
+
+int id = se_add_cheat("Infinite Lives", "69E24E1F 0BA154FB", 1);
+se_set_cheat_enabled(id, 0);
+const char* cheats = se_get_cheats_json();   // [{"id", "name", "enabled", "code"}, ...]
+
+se_cheat_search_start(1, 0);                 // cheat finder: 8-bit unsigned values
+/* ... the value changes in the game ... */
+if (se_cheat_search_filter(9, 1) == 1) {     // 9 = decreased by 1
+  uint32_t address, value;
+  se_cheat_search_get_result(0, &address, &value);
+  se_make_cheat(address, 99, 1, "Infinite Lives");
+}
+
+se_ra_login("username", "password");        // RetroAchievements, the login token is saved
+se_set_ra_spectator(1);
+const char* achievements = se_get_achievements_json();
+```
+
+Strings returned by the `_json` and status functions stay valid until the same function is called again. The
+search comparisons, the JSON fields and the other functions are listed in [`skyemu_dll.h`](../src/skyemu_dll.h)
+and explained in [Cheats and ROM patches](CHEATS_AND_PATCHES.md) and [RetroAchievements](RETROACHIEVEMENTS.md).
+
 ## Windows DLL
 
 The Windows build is a DLL. Load it, register the callbacks you need and call `win_main`, which creates the
@@ -157,7 +184,10 @@ methods for the host:
 
 `com.sky.SkyEmu.MainSkyEmuObject` exposes the C API to Java as `se_android_*` methods, for example
 `se_android_send_key(String, float)`, `se_android_set_screen_shader(int)`, `se_android_set_volume(float)`,
-`se_android_capture_state_slot(int)` and `se_android_set_design_system(int)`.
+`se_android_capture_state_slot(int)` and `se_android_set_design_system(int)`. Patches, cheats, the cheat finder
+and RetroAchievements are there too, for example `se_android_load_patch(String)`, `se_android_add_cheat(String,
+String, int)`, `se_android_cheat_search_filter(int, long)` and `se_android_get_achievements_json()`. Addresses and
+values are passed as `long` so the whole unsigned 32-bit range fits.
 
 ### Your own activity
 

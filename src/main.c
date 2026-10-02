@@ -38,6 +38,14 @@
 #include "mutex.h"
 #include "res.h"
 #include "se_design.h"
+#include "se_patch.h"
+#include "se_cheat_finder.h"
+#include <sys/stat.h>
+#ifdef _WIN32
+#include <sys/utime.h>
+#else
+#include <utime.h>
+#endif
 #include "sokol_app.h"
 #include "sokol_audio.h"
 #include "sokol_gfx.h"
@@ -276,7 +284,10 @@ typedef struct{
   // Custom on-screen controller layout, [0] landscape and [1] portrait. Each element is moved by
   // {x, y} (fractions of the screen area) and scaled around its center (0 means 1).
   float touch_layout[2][SE_TOUCH_NUM_ELEMENTS][3];
-  uint32_t padding[149];
+  uint32_t soft_patching_off;         // 1 = load ROMs without their IPS / UPS / BPS patches
+  uint32_t ra_unofficial;             // 1 = load unofficial RetroAchievements too
+  uint32_t ra_spectator;              // 1 = RetroAchievements unlocks are shown but not sent
+  uint32_t padding[146];
 }persistent_settings_t; 
 _Static_assert(sizeof(persistent_settings_t)==1024, "persistent_settings_t must be exactly 1024 bytes");
 #define SE_STATS_GRAPH_DATA 256
@@ -324,7 +335,8 @@ typedef struct{
   char cheat_codes[SB_FILE_PATH_SIZE];
   char theme[SB_FILE_PATH_SIZE];
   char custom_font[SB_FILE_PATH_SIZE];
-  char padding[3][SB_FILE_PATH_SIZE];
+  char patches[SB_FILE_PATH_SIZE];
+  char padding[2][SB_FILE_PATH_SIZE];
 }se_search_paths_t;
 
 _Static_assert(sizeof(se_search_paths_t)==SB_FILE_PATH_SIZE*8, "se_search_paths_t must contain 8 paths");
@@ -505,6 +517,7 @@ typedef struct {
     bool ra_encore_mode;
     bool ra_logged_in;
     bool ra_needs_reload;
+    bool ra_apply_options; // RetroAchievements options changed by the API, applied by se_update_frame()
     se_keybind_state_t key;
     se_controller_state_t controller;
     se_game_info_t recently_loaded_games[SE_NUM_RECENT_PATHS];
@@ -576,6 +589,15 @@ typedef struct {
     bool touch_editor_portrait;    // Orientation being edited
     float touch_editor_canvas[4];  // Screen area being edited (x, y, w, h)
     int touch_editor_prev_run_mode;
+    // Soft patching of the loaded ROM
+    struct{
+      char rom_file[SB_FILE_PATH_SIZE]; // ROM (or zip) file that was loaded
+      char path[SB_FILE_PATH_SIZE];     // Patch found for it, empty when there is none
+      char status[SB_FILE_PATH_SIZE+128];
+      char add_error[SB_FILE_PATH_SIZE+128]; // Why the last patch added with se_load_patch() was refused
+      bool applied, failed;
+      size_t original_size, patched_size;
+    }patch;
     int loaded_skin_key;  // Skin variant loaded by se_reload_theme() (-1 = layout only skin of the design systems)
     int font_design_key;  // Design/font combination the font atlas was built for
     char system_font_path[SB_FILE_PATH_SIZE]; // Platform UI font in use, empty when the bundled font is used
@@ -1891,7 +1913,8 @@ void se_load_search_paths(){
   char * paths[]={
     gui_state.paths.save,
     gui_state.paths.bios,
-    gui_state.paths.cheat_codes
+    gui_state.paths.cheat_codes,
+    gui_state.paths.patches
   };
   for(int i=0;i<sizeof(paths)/sizeof(paths[0]);++i){
     paths[i][SB_FILE_PATH_SIZE-1]=0;
@@ -2775,7 +2798,588 @@ void se_draw_io_state(const char * label, mmio_reg_t* mmios, int mmios_size, emu
 /////////////////////////////////
 
 // Used for file loading dialogs
-static const char* valid_rom_file_types[] = { "*.gb", "*.gba","*.gbc" ,"*.nds","*.zip",NULL};
+static const char* valid_rom_file_types[] = { "*.gb", "*.gba","*.gbc" ,"*.nds","*.zip","*.ips","*.ups","*.bps",NULL};
+static const char* valid_patch_file_types[] = { "*.ips","*.ups","*.bps",NULL};
+
+// Patch added by se_load_patch(), preferred the next time the game is loaded
+static char se_added_patch[SB_FILE_PATH_SIZE];
+static double se_file_modification_time(const char* path){
+#ifdef _WIN32
+  struct _stat st;
+  if(_stat(path,&st)!=0)return 0;
+#else
+  struct stat st;
+  if(stat(path,&st)!=0)return 0;
+#endif
+  return (double)st.st_mtime;
+}
+static void se_set_file_modification_time(const char* path, double time){
+#ifdef _WIN32
+  struct _utimbuf times = {(time_t)time,(time_t)time};
+  _utime(path,&times);
+#else
+  struct utimbuf times = {(time_t)time,(time_t)time};
+  utime(path,&times);
+#endif
+}
+// Soft patching: <ROM name>.bps, .ups or .ips next to the ROM, next to its save file or in the
+// patch path is applied to the ROM in memory when it is loaded. The ROM file is never changed.
+// When there are several, the most recently changed file is used.
+static bool se_find_patch(const char* rom_file, char* out){
+  char dir[SB_FILE_PATH_SIZE], name[SB_FILE_PATH_SIZE];
+  const char *base, *file, *ext;
+  sb_breakup_path(rom_file,&base,&file,&ext);
+  snprintf(dir,sizeof(dir),"%s",base);
+  snprintf(name,sizeof(name),"%s",file);
+  bool found = false;
+  double newest = -1;
+  // On equal times formats with checksums win, they can not be applied to the wrong ROM
+  static const int order[SE_PATCH_NUM_EXTENSIONS] = {2,1,0};
+  for(int location=0;location<3;++location){
+    for(int o=0;o<SE_PATCH_NUM_EXTENSIONS;++o){
+      const char* patch_ext = se_patch_extensions[order[o]];
+      char path[SB_FILE_PATH_SIZE];
+      if(location==0)se_join_path(path,SB_FILE_PATH_SIZE,dir,name,patch_ext);
+      else if(location==1)snprintf(path,SB_FILE_PATH_SIZE,"%s%s",emu_state.save_data_base_path,patch_ext);
+      else se_join_path(path,SB_FILE_PATH_SIZE,gui_state.paths.patches,name,patch_ext);
+      if(!sb_file_exists(path))continue;
+      double time = strcmp(path,se_added_patch)==0? 1e300 : se_file_modification_time(path);
+      if(time>newest){
+        newest = time;
+        snprintf(out,SB_FILE_PATH_SIZE,"%s",path);
+        found = true;
+      }
+    }
+  }
+  se_added_patch[0] = 0;
+  return found;
+}
+// Applies the patch found by se_find_patch() to emu_state.rom_data before the core loads it
+static void se_soft_patch_rom(void){
+  gui_state.patch.applied = gui_state.patch.failed = false;
+  gui_state.patch.status[0] = 0;
+  if(gui_state.settings.soft_patching_off||!emu_state.rom_data||!gui_state.patch.path[0])return;
+  const char *base, *file, *ext;
+  sb_breakup_path(gui_state.patch.path,&base,&file,&ext);
+  char name[SB_FILE_PATH_SIZE];
+  snprintf(name,sizeof(name),"%s.%s",file,ext);
+  size_t patch_size = 0;
+  uint8_t* patch = sb_load_file_data(gui_state.patch.path,&patch_size);
+  if(!patch){
+    gui_state.patch.failed = true;
+    snprintf(gui_state.patch.status,sizeof(gui_state.patch.status),"%s: %s",name,se_localize_and_cache("Could not read the patch"));
+    return;
+  }
+  uint8_t* out = NULL;
+  size_t out_size = 0;
+  const char* error = NULL;
+  if(se_patch_apply(emu_state.rom_data,emu_state.rom_size,patch,patch_size,&out,&out_size,&error)){
+    gui_state.patch.original_size = emu_state.rom_size;
+    gui_state.patch.patched_size = out_size;
+    free(emu_state.rom_data);
+    emu_state.rom_data = out;
+    emu_state.rom_size = out_size;
+    gui_state.patch.applied = true;
+    snprintf(gui_state.patch.status,sizeof(gui_state.patch.status),"%s (%s)",name,se_patch_format_name(se_patch_detect(patch,patch_size)));
+    printf("Applied patch %s\n",gui_state.patch.path);
+  }else{
+    gui_state.patch.failed = true;
+    snprintf(gui_state.patch.status,sizeof(gui_state.patch.status),"%s: %s",name,se_localize_and_cache(error));
+    printf("Patch %s not applied: %s\n",gui_state.patch.path,error);
+  }
+  free(patch);
+}
+// Text appended with printf formatting, for JSON responses
+typedef struct{
+  char* data;
+  size_t size, capacity;
+}se_string_t;
+static void se_string_printf(se_string_t* s, const char* fmt, ...){
+  va_list args, copy;
+  va_start(args,fmt);
+  va_copy(copy,args);
+  int n = vsnprintf(NULL,0,fmt,copy);
+  va_end(copy);
+  if(n>=0&&s->size+n+1>s->capacity){
+    size_t capacity = s->capacity? s->capacity : 256;
+    while(capacity<s->size+n+1)capacity*=2;
+    char* data = (char*)realloc(s->data,capacity);
+    if(data){
+      s->data = data;
+      s->capacity = capacity;
+    }
+  }
+  if(n>=0&&s->size+n+1<=s->capacity){
+    vsnprintf(s->data+s->size,s->capacity-s->size,fmt,args);
+    s->size+=n;
+  }
+  va_end(args);
+}
+// Contents of a JSON string for s (without the quotes). Valid until it has been called 8 more times.
+static const char* se_json_escaped(const char* s){
+  static char buffers[8][SB_FILE_PATH_SIZE*2];
+  static int next = 0;
+  char* out = buffers[next];
+  next = (next+1)%8;
+  size_t o = 0;
+  for(;s&&*s&&o+7<sizeof(buffers[0]);++s){
+    unsigned char c = (unsigned char)*s;
+    if(c=='"'||c=='\\'){out[o++]='\\'; out[o++]=c;}
+    else if(c=='\n'){out[o++]='\\'; out[o++]='n';}
+    else if(c<0x20)o+=snprintf(out+o,sizeof(buffers[0])-o,"\\u%04x",c);
+    else out[o++]=c;
+  }
+  out[o] = 0;
+  return out;
+}
+
+////////////////////
+// Cheat finder   //
+////////////////////
+#define SE_CHEAT_FINDER_PAGE 12
+static struct{
+  se_cheat_search_t search;
+  int size_index;          // 0: 8 bit, 1: 16 bit, 2: 32 bit
+  bool is_signed;
+  int compare;             // se_search_compare_t
+  char value[24];          // Value typed for the comparison
+  char code_value[24];     // Value written by new codes, the current value when empty
+  uint32_t first_result;   // First result shown in the menu
+  char message[160];
+  bool message_is_error;
+}se_cheat_finder;
+// The menu, the HTTP server thread and host apps all use the search, the public functions lock this
+static mutex_t se_cheat_finder_mutex;
+static void se_cheat_finder_lock(void){if(se_cheat_finder_mutex)mutex_lock(se_cheat_finder_mutex);}
+static void se_cheat_finder_unlock(void){if(se_cheat_finder_mutex)mutex_unlock(se_cheat_finder_mutex);}
+
+static const char* se_cheat_compare_names[SE_SEARCH_NUM_COMPARES] = {
+  "equal","not_equal","greater","less","changed","unchanged","increased","decreased","increased_by","decreased_by"
+};
+// Cheats and the cheat finder are not allowed in Hardcore Mode
+static bool se_cheats_allowed(void){return !(gui_state.settings.hardcore_mode&&gui_state.ra_logged_in);}
+static bool se_cheat_finder_supported(void){
+  return emu_state.rom_loaded&&(emu_state.system==SYSTEM_GB||emu_state.system==SYSTEM_GBA||emu_state.system==SYSTEM_NDS);
+}
+static se_cheat_system_t se_cheat_finder_system(void){
+  if(emu_state.system==SYSTEM_GBA)return SE_CHEAT_SYSTEM_GBA;
+  if(emu_state.system==SYSTEM_NDS)return SE_CHEAT_SYSTEM_NDS;
+  return SE_CHEAT_SYSTEM_GB;
+}
+// The RAM that is searched, the memory cheat codes can write
+static int se_cheat_finder_regions(se_search_region_t* regions){
+  int n = 0;
+  if(emu_state.system==SYSTEM_GBA){
+    regions[n++] = (se_search_region_t){0x02000000,sizeof(core.gba.mem.wram0)};
+    regions[n++] = (se_search_region_t){0x03000000,sizeof(core.gba.mem.wram1)};
+  }else if(emu_state.system==SYSTEM_NDS){
+    regions[n++] = (se_search_region_t){0x02000000,sizeof(core.nds.mem.ram)};
+  }else if(emu_state.system==SYSTEM_GB){
+    sb_gb_t* gb = &core.gb;
+    // Cartridge RAM (bank in bits 16-23 of the address) when it is mapped, then work RAM
+    bool rtc = gb->rtc.has_rtc&&gb->cart.mbc_type==SB_MBC_MBC3&&gb->cart.mapped_ram_bank>=0x08;
+    if(gb->cart.ram_size>0&&gb->cart.ram_write_enable&&!rtc){
+      uint32_t size = gb->cart.ram_size<0x2000? gb->cart.ram_size : 0x2000;
+      regions[n++] = (se_search_region_t){((uint32_t)(gb->cart.mapped_ram_bank&0xff)<<16)|0xA000,size};
+    }
+    regions[n++] = (se_search_region_t){0xC000,0x2000};
+  }
+  return n;
+}
+static uint8_t se_cheat_finder_read_byte(uint32_t address){
+  if(emu_state.system==SYSTEM_GBA){
+    if(address>=0x02000000&&address<0x02000000+sizeof(core.gba.mem.wram0))return core.gba.mem.wram0[address-0x02000000];
+    if(address>=0x03000000&&address<0x03000000+sizeof(core.gba.mem.wram1))return core.gba.mem.wram1[address-0x03000000];
+    return 0;
+  }
+  if(emu_state.system==SYSTEM_NDS){
+    if(address>=0x02000000&&address<0x02000000+sizeof(core.nds.mem.ram))return core.nds.mem.ram[address-0x02000000];
+    return 0;
+  }
+  if(emu_state.system==SYSTEM_GB)return sb_read8_direct(&core.gb,address&0xffff);
+  return 0;
+}
+static uint32_t se_cheat_finder_read_value(uint32_t address, int size){
+  uint32_t value = 0;
+  for(int i=0;i<size;++i)value|=(uint32_t)se_cheat_finder_read_byte(address+i)<<(8*i);
+  return value;
+}
+// Copy of the searched memory, laid out as the regions
+static uint8_t* se_cheat_finder_read_memory(const se_search_region_t* regions, int num_regions){
+  uint32_t total = 0;
+  for(int r=0;r<num_regions;++r)total+=regions[r].size;
+  uint8_t* memory = (uint8_t*)malloc(total? total : 1);
+  if(!memory)return NULL;
+  uint32_t off = 0;
+  for(int r=0;r<num_regions;++r){
+    uint32_t address = regions[r].address, size = regions[r].size;
+    if(emu_state.system==SYSTEM_GBA&&address==0x02000000)memcpy(memory+off,core.gba.mem.wram0,size);
+    else if(emu_state.system==SYSTEM_GBA&&address==0x03000000)memcpy(memory+off,core.gba.mem.wram1,size);
+    else if(emu_state.system==SYSTEM_NDS&&address==0x02000000)memcpy(memory+off,core.nds.mem.ram,size);
+    else for(uint32_t i=0;i<size;++i)memory[off+i] = se_cheat_finder_read_byte(address+i);
+    off+=size;
+  }
+  return memory;
+}
+static void se_cheat_finder_format_address(uint32_t address, char* out, size_t size){
+  if(emu_state.system==SYSTEM_GB){
+    // Cartridge RAM addresses show their bank
+    if((address&0xffff)<0xC000)snprintf(out,size,"%02X:%04X",(address>>16)&0xff,address&0xffff);
+    else snprintf(out,size,"%04X",address&0xffff);
+  }else snprintf(out,size,"%08X",address);
+}
+static void se_cheat_finder_format_value(uint32_t value, char* out, size_t size){
+  int value_size = se_cheat_finder.search.value_size? se_cheat_finder.search.value_size : 1;
+  if(se_cheat_finder.search.is_signed){
+    int32_t v = value_size==1? (int8_t)value : value_size==2? (int16_t)value : (int32_t)value;
+    snprintf(out,size,"%d",v);
+  }else snprintf(out,size,"%u",value);
+}
+// Parses a decimal or 0x hexadecimal number, negative numbers are allowed
+static bool se_cheat_parse_value(const char* text, uint32_t* value){
+  while(*text==' ')text++;
+  if(!*text)return false;
+  char* end = NULL;
+  long long v = strtoll(text,&end,0);
+  while(end&&*end==' ')end++;
+  if(!end||*end)return false;
+  if(v<-2147483648LL||v>4294967295LL)return false;
+  *value = (uint32_t)v;
+  return true;
+}
+static void se_cheat_finder_message(bool error, const char* fmt, ...){
+  va_list args;
+  va_start(args,fmt);
+  vsnprintf(se_cheat_finder.message,sizeof(se_cheat_finder.message),se_localize_and_cache(fmt),args);
+  va_end(args);
+  se_cheat_finder.message_is_error = error;
+}
+static bool se_cheat_finder_start(int value_size, int is_signed){
+  if(!se_cheats_allowed()||!se_cheat_finder_supported())return false;
+  se_search_region_t regions[SE_SEARCH_MAX_REGIONS];
+  int num_regions = se_cheat_finder_regions(regions);
+  uint8_t* memory = se_cheat_finder_read_memory(regions,num_regions);
+  if(!memory)return false;
+  // ARM consoles keep 16 and 32 bit values aligned, the Game Boy does not
+  int alignment = emu_state.system==SYSTEM_GB? 1 : value_size;
+  bool started = se_search_start(&se_cheat_finder.search,regions,num_regions,memory,value_size,alignment,is_signed);
+  free(memory);
+  se_cheat_finder.first_result = 0;
+  se_cheat_finder.message[0] = 0;
+  if(started){
+    se_cheat_finder.size_index = value_size==4? 2 : value_size==2? 1 : 0;
+    se_cheat_finder.is_signed = is_signed;
+  }
+  return started;
+}
+SKYEMU_API bool se_cheat_search_start(int value_size, int is_signed){
+  se_cheat_finder_lock();
+  bool started = se_cheat_finder_start(value_size,is_signed);
+  se_cheat_finder_unlock();
+  return started;
+}
+static uint32_t se_cheat_finder_filter(int compare, uint32_t value){
+  se_cheat_search_t* search = &se_cheat_finder.search;
+  if(!se_cheats_allowed()||!se_cheat_finder_supported()||!se_search_active(search))return 0;
+  if(compare<0||compare>=SE_SEARCH_NUM_COMPARES)return search->num_candidates;
+  uint8_t* memory = se_cheat_finder_read_memory(search->regions,search->num_regions);
+  if(!memory)return search->num_candidates;
+  uint32_t count = se_search_filter(search,memory,(se_search_compare_t)compare,value);
+  free(memory);
+  // The menu shows the last search, also when it came from the HTTP server or the API
+  se_cheat_finder.first_result = 0;
+  se_cheat_finder.compare = compare;
+  if(se_search_compare_uses_value((se_search_compare_t)compare)){
+    char text[24];
+    se_cheat_finder_format_value(value,text,sizeof(text));
+    snprintf(se_cheat_finder.value,sizeof(se_cheat_finder.value),"%s",text);
+  }
+  if(count==1)se_cheat_finder_message(false,"Found it! Add a code for it below.");
+  else se_cheat_finder.message[0] = 0;
+  return count;
+}
+SKYEMU_API uint32_t se_cheat_search_filter(int compare, uint32_t value){
+  se_cheat_finder_lock();
+  uint32_t count = se_cheat_finder_filter(compare,value);
+  se_cheat_finder_unlock();
+  return count;
+}
+static void se_cheat_finder_reset(void){
+  se_search_reset(&se_cheat_finder.search);
+  se_cheat_finder.first_result = 0;
+  se_cheat_finder.message[0] = 0;
+}
+SKYEMU_API void se_cheat_search_reset(void){
+  se_cheat_finder_lock();
+  se_cheat_finder_reset();
+  se_cheat_finder_unlock();
+}
+SKYEMU_API uint32_t se_cheat_search_count(void){
+  se_cheat_finder_lock();
+  uint32_t count = se_search_active(&se_cheat_finder.search)? se_cheat_finder.search.num_candidates : 0;
+  se_cheat_finder_unlock();
+  return count;
+}
+SKYEMU_API bool se_cheat_search_get_result(uint32_t index, uint32_t* address, uint32_t* value){
+  se_cheat_search_t* search = &se_cheat_finder.search;
+  uint32_t offset = 0;
+  bool found = false;
+  se_cheat_finder_lock();
+  if(se_cheats_allowed()&&se_cheat_finder_supported()&&se_search_results(search,index,&offset,1)){
+    uint32_t a = se_search_address(search,offset);
+    if(address)*address = a;
+    if(value)*value = se_cheat_finder_read_value(a,search->value_size);
+    found = true;
+  }
+  se_cheat_finder_unlock();
+  return found;
+}
+static void se_save_cheats_if_loaded(void){
+  if(gui_state.cheat_path[0])se_save_cheats(gui_state.cheat_path);
+}
+static int se_free_cheat_index(void){
+  for(int i=0;i<SE_NUM_CHEATS;++i)if(cheats[i].state==-1)return i;
+  return -1;
+}
+// Adds an active code that keeps value_size bytes at address set to value. Returns its index or -1.
+SKYEMU_API int se_make_cheat(uint32_t address, uint32_t value, int value_size, const char* name){
+  if(!se_cheats_allowed()||!se_cheat_finder_supported())return -1;
+  uint32_t words[8];
+  int num_words = se_cheat_make_code(se_cheat_finder_system(),address,value,value_size,words,8);
+  int index = se_free_cheat_index();
+  if(!num_words||index<0)return -1;
+  se_cheat_t* cheat = cheats+index;
+  memset(cheat,0,sizeof(*cheat));
+  if(name&&name[0])snprintf(cheat->name,sizeof(cheat->name),"%s",name);
+  else{
+    char addr[16];
+    se_cheat_finder_format_address(address,addr,sizeof(addr));
+    snprintf(cheat->name,sizeof(cheat->name),"%s = %u",addr,value_size==4? value : value&((1u<<(8*value_size))-1));
+  }
+  memcpy(cheat->buffer,words,num_words*sizeof(uint32_t));
+  cheat->size = num_words;
+  cheat->state = 1;
+  se_save_cheats_if_loaded();
+  return index;
+}
+static int se_cheat_finder_value_size(void){
+  se_cheat_finder_lock();
+  int value_size = se_cheat_finder.search.value_size? se_cheat_finder.search.value_size : 1;
+  se_cheat_finder_unlock();
+  return value_size;
+}
+SKYEMU_API int se_cheat_search_add_code(uint32_t address, uint32_t value, const char* name){
+  return se_make_cheat(address,value,se_cheat_finder_value_size(),name);
+}
+// Adds a cheat from its code text (Action Replay or GameShark hex digits). Returns its index or -1.
+SKYEMU_API int se_add_cheat(const char* name, const char* code, int enabled){
+  if(!se_cheats_allowed()||!emu_state.rom_loaded||!code)return -1;
+  int index = se_free_cheat_index();
+  if(index<0)return -1;
+  se_cheat_t* cheat = cheats+index;
+  memset(cheat,0,sizeof(*cheat));
+  snprintf(cheat->name,sizeof(cheat->name),"%s",name&&name[0]? name : "Untitled Code");
+  se_convert_cheat_code(code,index);
+  cheat->state = enabled? 1 : 0;
+  se_save_cheats_if_loaded();
+  return index;
+}
+SKYEMU_API bool se_remove_cheat(int index){
+  if(index<0||index>=SE_NUM_CHEATS||cheats[index].state==-1)return false;
+  if(gui_state.editing_cheat_index==index)gui_state.editing_cheat_index = -1;
+  cheats[index].state = -1;
+  se_save_cheats_if_loaded();
+  return true;
+}
+SKYEMU_API bool se_set_cheat_enabled(int index, int enabled){
+  if(!se_cheats_allowed()||index<0||index>=SE_NUM_CHEATS||cheats[index].state==-1)return false;
+  cheats[index].state = enabled? 1 : 0;
+  se_save_cheats_if_loaded();
+  return true;
+}
+static void se_cheats_json(se_string_t* out){
+  se_string_printf(out,"[");
+  bool first = true;
+  for(int i=0;i<SE_NUM_CHEATS;++i){
+    if(cheats[i].state==-1)continue;
+    se_string_printf(out,"%s\n  {\"id\": %d, \"name\": \"%s\", \"enabled\": %s, \"code\": \"",first? "" : ",",
+                     i,se_json_escaped(cheats[i].name),cheats[i].state==1? "true" : "false");
+    for(uint32_t w=0;w<cheats[i].size;++w)se_string_printf(out,"%s%08X",w? " " : "",cheats[i].buffer[w]);
+    se_string_printf(out,"\"}");
+    first = false;
+  }
+  se_string_printf(out,first? "]" : "\n]");
+}
+static void se_cheat_search_json(se_string_t* out, uint32_t first_result, uint32_t max_results){
+  se_cheat_search_t* search = &se_cheat_finder.search;
+  bool active = se_search_active(search)&&se_cheat_finder_supported();
+  se_string_printf(out,"{\"active\": %s",active? "true" : "false");
+  if(active){
+    se_string_printf(out,", \"value_size\": %d, \"signed\": %s, \"searches\": %d, \"count\": %u, \"first\": %u, \"results\": [",
+                     search->value_size,search->is_signed? "true" : "false",search->searches,search->num_candidates,first_result);
+    uint32_t offsets[256];
+    if(max_results>256)max_results = 256;
+    uint32_t n = se_search_results(search,first_result,offsets,max_results);
+    for(uint32_t i=0;i<n;++i){
+      uint32_t address = se_search_address(search,offsets[i]);
+      char value[16], previous[16];
+      se_cheat_finder_format_value(se_cheat_finder_read_value(address,search->value_size),value,sizeof(value));
+      se_cheat_finder_format_value(se_search_read(search->previous,offsets[i],search->value_size),previous,sizeof(previous));
+      se_string_printf(out,"%s{\"address\": \"0x%08X\", \"value\": %s, \"previous\": %s}",i? ", " : "",address,value,previous);
+    }
+    se_string_printf(out,"]");
+  }
+  se_string_printf(out,"}");
+}
+// Replaces the text kept for a getter, so the returned pointer stays valid until its next call
+static const char* se_keep_json(se_string_t* kept, se_string_t* json){
+  free(kept->data);
+  *kept = *json;
+  return kept->data? kept->data : "";
+}
+SKYEMU_API const char* se_get_cheats_json(void){
+  static se_string_t kept;
+  se_string_t json = {0};
+  se_cheats_json(&json);
+  return se_keep_json(&kept,&json);
+}
+SKYEMU_API const char* se_get_cheat_search_json(uint32_t first_result, uint32_t max_results){
+  static se_string_t kept;
+  se_string_t json = {0};
+  se_cheat_finder_lock();
+  se_cheat_search_json(&json,first_result,max_results);
+  const char* result = se_keep_json(&kept,&json);
+  se_cheat_finder_unlock();
+  return result;
+}
+static void se_draw_cheat_finder_locked(float win_w){
+  se_cheat_search_t* search = &se_cheat_finder.search;
+  se_section(ICON_FK_SEARCH " Cheat Finder");
+  ImU32 ok_color = 0xff00c000, error_color = 0xff0000ff;
+  if(gui_state.design_active){
+    ok_color = se_design_u32(gui_state.design.accent_text);
+    error_color = se_design_u32(gui_state.design.error);
+  }
+  if(!se_search_active(search)){
+    se_text_disabled("Finds where the game keeps a value, like lives or money, and makes a code that sets it.");
+    se_field_label("Value Size");igSameLine(SE_FIELD_INDENT,0);
+    igPushItemWidth(-1);
+    se_combo_str("##CheatValueSize",&se_cheat_finder.size_index,"8-bit (0 to 255)\0""16-bit (0 to 65535)\0""32-bit\0",0);
+    igPopItemWidth();
+    se_checkbox("Signed Values (can be negative)",&se_cheat_finder.is_signed);
+    if(se_button(ICON_FK_SEARCH " Start Search",(ImVec2){0,0})){
+      static const int sizes[3] = {1,2,4};
+      if(se_cheat_finder_start(sizes[se_cheat_finder.size_index%3],se_cheat_finder.is_signed)){
+        se_cheat_finder_message(false,"Now change the value in the game, then search for it.");
+      }else se_cheat_finder_message(true,"Could not start the search");
+    }
+  }else{
+    if(search->num_candidates==0){
+      igPushStyleColorU32(ImGuiCol_Text,error_color);
+      se_text(ICON_FK_EXCLAMATION_TRIANGLE " %s",se_localize_and_cache("No address matches. Start a new search."));
+      igPopStyleColor(1);
+    }else if(search->num_candidates==1)se_text("%s",se_localize_and_cache("1 possible address"));
+    else se_text(se_localize_and_cache("%u possible addresses"),search->num_candidates);
+    se_field_label("Compare");igSameLine(SE_FIELD_INDENT,0);
+    igPushItemWidth(-1);
+    se_combo_str("##CheatCompare",&se_cheat_finder.compare,
+                 "Equal to\0Not equal to\0Greater than\0Less than\0Changed\0Unchanged\0"
+                 "Increased\0Decreased\0Increased by\0Decreased by\0",0);
+    igPopItemWidth();
+    bool uses_value = se_search_compare_uses_value((se_search_compare_t)se_cheat_finder.compare);
+    bool enter = false;
+    if(uses_value){
+      se_field_label("Value");igSameLine(SE_FIELD_INDENT,0);
+      igPushItemWidth(-1);
+      enter = igInputTextWithHint("##CheatValue",se_localize_and_cache("e.g. 99 or 0x63"),se_cheat_finder.value,
+                                  sizeof(se_cheat_finder.value),ImGuiInputTextFlags_EnterReturnsTrue,NULL,NULL);
+      igPopItemWidth();
+    }
+    bool can_search = search->num_candidates>0;
+    if(!can_search)se_push_disabled();
+    bool clicked = se_button(ICON_FK_SEARCH " Search",(ImVec2){0,0});
+    if(!can_search)se_pop_disabled();
+    if((clicked||enter)&&can_search){
+      uint32_t value = 0;
+      if(uses_value&&!se_cheat_parse_value(se_cheat_finder.value,&value)){
+        se_cheat_finder_message(true,"Type a number to compare with");
+      }else{
+        se_cheat_finder_filter(se_cheat_finder.compare,value);
+      }
+    }
+    igSameLine(0,4);
+    if(se_button(ICON_FK_REFRESH " New Search",(ImVec2){0,0}))se_cheat_finder_reset();
+  }
+  if(se_cheat_finder.message[0]){
+    igPushStyleColorU32(ImGuiCol_Text,se_cheat_finder.message_is_error? error_color : ok_color);
+    se_text("%s",se_cheat_finder.message);
+    igPopStyleColor(1);
+  }
+  if(!se_search_active(search)||search->num_candidates==0)return;
+
+  // Results, a page at a time
+  if(se_cheat_finder.first_result>=search->num_candidates)se_cheat_finder.first_result = 0;
+  uint32_t offsets[SE_CHEAT_FINDER_PAGE];
+  uint32_t n = se_search_results(search,se_cheat_finder.first_result,offsets,SE_CHEAT_FINDER_PAGE);
+  float value_x = win_w*0.40f, previous_x = win_w*0.66f;
+  se_text_disabled("Address");igSameLine(value_x,0);
+  se_text_disabled("Now");igSameLine(previous_x,0);
+  se_text_disabled("Last Search");
+  for(uint32_t i=0;i<n;++i){
+    uint32_t address = se_search_address(search,offsets[i]);
+    uint32_t current = se_cheat_finder_read_value(address,search->value_size);
+    char addr[16], now[16], previous[16];
+    se_cheat_finder_format_address(address,addr,sizeof(addr));
+    se_cheat_finder_format_value(current,now,sizeof(now));
+    se_cheat_finder_format_value(se_search_read(search->previous,offsets[i],search->value_size),previous,sizeof(previous));
+    igPushIDInt((int)offsets[i]);
+    igAlignTextToFramePadding();
+    igPushFont(gui_state.mono_font);
+    se_text("%s",addr);
+    igSameLine(value_x,0);
+    se_text("%s",now);
+    igSameLine(previous_x,0);
+    se_text_disabled("%s",previous);
+    igPopFont();
+    igSameLine(win_w-15,0);
+    if(se_button(ICON_FK_PLUS,(ImVec2){-1,0})){
+      uint32_t value = current;
+      if(se_cheat_finder.code_value[0]&&!se_cheat_parse_value(se_cheat_finder.code_value,&value)){
+        se_cheat_finder_message(true,"Type a number for the code value, or leave it empty");
+      }else{
+        int index = se_make_cheat(address,value,search->value_size,NULL);
+        if(index<0)se_cheat_finder_message(true,"Could not add a code for %s",addr);
+        else se_cheat_finder_message(false,"Added \"%s\" to the codes above",cheats[index].name);
+      }
+    }
+    if(igIsItemHovered(ImGuiHoveredFlags_None))igSetTooltip("%s",se_localize_and_cache("Add a code that keeps this value"));
+    igPopID();
+  }
+  if(search->num_candidates>SE_CHEAT_FINDER_PAGE){
+    bool first_page = se_cheat_finder.first_result==0;
+    bool last_page = se_cheat_finder.first_result+SE_CHEAT_FINDER_PAGE>=search->num_candidates;
+    if(first_page)se_push_disabled();
+    if(se_button(ICON_FK_CHEVRON_LEFT "##CheatPrev",(ImVec2){0,0})&&!first_page)se_cheat_finder.first_result-=SE_CHEAT_FINDER_PAGE;
+    if(first_page)se_pop_disabled();
+    igSameLine(0,4);
+    if(last_page)se_push_disabled();
+    if(se_button(ICON_FK_CHEVRON_RIGHT "##CheatNext",(ImVec2){0,0})&&!last_page)se_cheat_finder.first_result+=SE_CHEAT_FINDER_PAGE;
+    if(last_page)se_pop_disabled();
+    igSameLine(0,8);
+    igAlignTextToFramePadding();
+    se_text_disabled("%u-%u of %u",se_cheat_finder.first_result+1,se_cheat_finder.first_result+n,search->num_candidates);
+  }
+  se_field_label("Code Value");igSameLine(SE_FIELD_INDENT,0);
+  igPushItemWidth(-1);
+  igInputTextWithHint("##CheatCodeValue",se_localize_and_cache("Keep the current value"),se_cheat_finder.code_value,
+                      sizeof(se_cheat_finder.code_value),ImGuiInputTextFlags_None,NULL,NULL);
+  igPopItemWidth();
+}
+static void se_draw_cheat_finder(float win_w){
+  se_cheat_finder_lock();
+  se_draw_cheat_finder_locked(win_w);
+  se_cheat_finder_unlock();
+}
 void se_load_rom_from_emu_state(sb_emu_state_t*emu){
   if(!emu->rom_data)return;
   printf("Loading: %s\n",emu_state.rom_path);
@@ -2820,11 +3424,89 @@ SKYEMU_API void se_load_html(const char *filename){
 
     free(data);
 }
+// Adds an IPS, UPS or BPS patch to the loaded game: it is copied next to the save file under the
+// ROM's name, so it is found whenever the game is loaded, and the game is reloaded with it
+SKYEMU_API bool se_load_patch(const char* patch_path){
+  const char *base, *file, *ext;
+  sb_breakup_path(patch_path,&base,&file,&ext);
+  char name[SB_FILE_PATH_SIZE];
+  snprintf(name,sizeof(name),"%s.%s",file,ext);
+  char* add_error = gui_state.patch.add_error;
+  if(!emu_state.rom_loaded||!gui_state.patch.rom_file[0]){
+    snprintf(add_error,sizeof(gui_state.patch.add_error),"%s: %s",name,se_localize_and_cache("Load a game before adding a patch"));
+    return false;
+  }
+  size_t size = 0;
+  uint8_t* data = sb_load_file_data(patch_path,&size);
+  se_patch_format_t format = se_patch_detect(data,size);
+  if(format==SE_PATCH_UNKNOWN){
+    snprintf(add_error,sizeof(gui_state.patch.add_error),"%s: %s",name,se_localize_and_cache(data? "Unknown patch format" : "Could not read the patch"));
+    free(data);
+    return false;
+  }
+  char dest[SB_FILE_PATH_SIZE];
+  snprintf(dest,sizeof(dest),"%s%s",emu_state.save_data_base_path,se_patch_extensions[format-SE_PATCH_IPS]);
+  bool copied = strcmp(dest,patch_path)!=0;
+  // A patch already stored under that name is kept in memory and restored if the new one fails
+  size_t previous_size = 0;
+  uint8_t* previous = copied&&sb_file_exists(dest)? sb_load_file_data(dest,&previous_size) : NULL;
+  double previous_time = previous? se_file_modification_time(dest) : 0;
+  if(copied){
+    sb_save_file_data(dest,data,size);
+    se_emscripten_flush_fs();
+  }
+  free(data);
+  snprintf(se_added_patch,sizeof(se_added_patch),"%s",dest);
+  char rom_file[SB_FILE_PATH_SIZE];
+  snprintf(rom_file,sizeof(rom_file),"%s",gui_state.patch.rom_file);
+  bool was_off = gui_state.settings.soft_patching_off;
+  gui_state.settings.soft_patching_off = false;
+  se_load_rom(rom_file);
+  if(gui_state.patch.applied&&strcmp(gui_state.patch.path,dest)==0){
+    add_error[0] = 0;
+    free(previous);
+    return true;
+  }
+  // Refused (for example made for a different ROM): undo the copy and load the game as before.
+  // The status names the copy, the error names the file that was added.
+  const char* reason = strstr(gui_state.patch.status,": ");
+  snprintf(add_error,sizeof(gui_state.patch.add_error),"%s%s",name,reason? reason : "");
+  if(copied){
+    if(previous){
+      sb_save_file_data(dest,previous,previous_size);
+      // Keeps its place in the newest-first order of se_find_patch()
+      if(previous_time)se_set_file_modification_time(dest,previous_time);
+    }else remove(dest);
+    se_emscripten_flush_fs();
+  }
+  free(previous);
+  gui_state.settings.soft_patching_off = was_off;
+  se_load_rom(rom_file);
+  return false;
+}
+SKYEMU_API const char* se_get_patch_status(void){
+  return gui_state.patch.status;
+}
+SKYEMU_API void se_set_soft_patching(int enabled){
+  gui_state.settings.soft_patching_off = !enabled;
+}
+SKYEMU_API int se_get_soft_patching(void){
+  return !gui_state.settings.soft_patching_off;
+}
+static void se_load_patch_from_browser(const char* path){se_load_patch(path);}
 SKYEMU_API void se_load_rom(const char *filename){
+  // A patch opened or dropped like a ROM is added to the game that is running
+  for(int i=0;i<SE_PATCH_NUM_EXTENSIONS;++i){
+    if(sb_path_has_file_ext(filename,se_patch_extensions[i])){
+      se_load_patch(filename);
+      return;
+    }
+  }
   se_reset_rewind_buffer(&rewind_buffer);
   se_reset_save_states();
   se_reset_cheats();
   gui_state.editing_cheat_index = -1;
+  se_cheat_search_reset();
   se_reset_bios_info();
   emu_state.force_dmg_mode=gui_state.settings.force_dmg_mode;
   //Compute Save File Path
@@ -2875,6 +3557,10 @@ SKYEMU_API void se_load_rom(const char *filename){
     }
     se_load_cheats(cheat_path);
   }
+  // Patch for this ROM, applied once the ROM data has been read
+  if(filename!=gui_state.patch.rom_file)snprintf(gui_state.patch.rom_file,SB_FILE_PATH_SIZE,"%s",filename);
+  gui_state.patch.path[0] = 0;
+  se_find_patch(filename,gui_state.patch.path);
   strncpy(emu_state.rom_path, filename, sizeof(emu_state.rom_path));
 
   if(emu_state.rom_loaded){
@@ -2918,7 +3604,10 @@ SKYEMU_API void se_load_rom(const char *filename){
               emu_state.rom_data = file_data;
           }
         }
-        if(success)se_load_rom_from_emu_state(&emu_state);
+        if(success){
+          se_soft_patch_rom();
+          se_load_rom_from_emu_state(&emu_state);
+        }
         if(emu_state.rom_loaded)break;
       }
       mz_zip_reader_end(&zip);
@@ -2926,6 +3615,7 @@ SKYEMU_API void se_load_rom(const char *filename){
 
   }else{
     emu_state.rom_data = sb_load_file_data(emu_state.rom_path, &emu_state.rom_size);
+    se_soft_patch_rom();
     se_load_rom_from_emu_state(&emu_state);
   }
   if(emu_state.rom_loaded==false){
@@ -3189,6 +3879,7 @@ SKYEMU_API float se_get_custom_font_scale(void) {
 
 SKYEMU_API void se_set_hardcore_mode(uint32_t value) {
     gui_state.settings.hardcore_mode = value;
+    gui_state.ra_apply_options = true;
 }
 SKYEMU_API uint32_t se_get_hardcore_mode(void) {
     return gui_state.settings.hardcore_mode;
@@ -3234,6 +3925,112 @@ SKYEMU_API void se_set_only_one_notification(uint32_t value) {
 }
 SKYEMU_API uint32_t se_get_only_one_notification(void) {
     return gui_state.settings.only_one_notification;
+}
+
+// RetroAchievements account and options, see skyemu_dll.h
+SKYEMU_API void se_set_ra_unofficial(int enabled){
+  gui_state.settings.ra_unofficial = enabled!=0;
+  gui_state.ra_apply_options = true;
+}
+SKYEMU_API int se_get_ra_unofficial(void){return gui_state.settings.ra_unofficial;}
+SKYEMU_API void se_set_ra_spectator(int enabled){
+  gui_state.settings.ra_spectator = enabled!=0;
+  gui_state.ra_apply_options = true;
+}
+SKYEMU_API int se_get_ra_spectator(void){return gui_state.settings.ra_spectator;}
+SKYEMU_API void se_ra_login(const char* username, const char* password){
+#ifdef ENABLE_RETRO_ACHIEVEMENTS
+  if(!username||!password||retro_achievements_is_pending_login())return;
+  // Like the login in the menu: Hardcore Mode is turned on again by the player
+  gui_state.ra_needs_reload = true;
+  gui_state.settings.hardcore_mode = false;
+  retro_achievements_login(username,password);
+#endif
+}
+SKYEMU_API void se_ra_logout(void){
+#ifdef ENABLE_RETRO_ACHIEVEMENTS
+  char buffer[SB_FILE_PATH_SIZE];
+  snprintf(buffer, SB_FILE_PATH_SIZE, "%sra_token.txt", se_get_pref_path());
+  remove(buffer);
+  rc_client_logout(retro_achievements_get_client());
+#endif
+}
+SKYEMU_API int se_ra_get_login_state(void){
+#ifdef ENABLE_RETRO_ACHIEVEMENTS
+  if(rc_client_get_user_info(retro_achievements_get_client()))return 2;
+  if(retro_achievements_is_pending_login())return 1;
+#endif
+  return 0;
+}
+SKYEMU_API const char* se_ra_get_login_error(void){
+#ifdef ENABLE_RETRO_ACHIEVEMENTS
+  const char* error = retro_achievements_get_login_error();
+  return error? error : "";
+#else
+  return "RetroAchievements is not available in this build";
+#endif
+}
+static void se_achievements_json(se_string_t* out){
+#ifdef ENABLE_RETRO_ACHIEVEMENTS
+  rc_client_t* client = retro_achievements_get_client();
+  const rc_client_user_t* user = rc_client_get_user_info(client);
+  se_string_printf(out,"{\n  \"available\": true,\n  \"logged_in\": %s",user? "true" : "false");
+  if(!user){
+    const char* error = retro_achievements_get_login_error();
+    se_string_printf(out,",\n  \"pending_login\": %s",retro_achievements_is_pending_login()? "true" : "false");
+    if(error)se_string_printf(out,",\n  \"login_error\": \"%s\"",se_json_escaped(error));
+    se_string_printf(out,"\n}");
+    return;
+  }
+  se_string_printf(out,",\n  \"user\": {\"username\": \"%s\", \"display_name\": \"%s\", \"score\": %u, \"score_softcore\": %u}",
+                   se_json_escaped(user->username),se_json_escaped(user->display_name),user->score,user->score_softcore);
+  se_string_printf(out,",\n  \"hardcore\": %s, \"encore\": %s, \"unofficial\": %s, \"spectator\": %s",
+                   rc_client_get_hardcore_enabled(client)? "true" : "false",rc_client_get_encore_mode_enabled(client)? "true" : "false",
+                   rc_client_get_unofficial_enabled(client)? "true" : "false",rc_client_get_spectator_mode_enabled(client)? "true" : "false");
+  const rc_client_game_t* game = rc_client_get_game_info(client);
+  if(game){
+    char rich_presence[256] = "";
+    if(rc_client_has_rich_presence(client))rc_client_get_rich_presence_message(client,rich_presence,sizeof(rich_presence));
+    se_string_printf(out,",\n  \"game\": {\"id\": %u, \"title\": \"%s\", \"hash\": \"%s\", \"rich_presence\": \"%s\"}",
+                     game->id,se_json_escaped(game->title),se_json_escaped(game->hash),se_json_escaped(rich_presence));
+    rc_client_user_game_summary_t summary;
+    rc_client_get_user_game_summary(client,&summary);
+    se_string_printf(out,",\n  \"summary\": {\"achievements\": %u, \"unlocked\": %u, \"unofficial\": %u, \"unsupported\": %u, \"points\": %u, \"points_unlocked\": %u}",
+                     summary.num_core_achievements,summary.num_unlocked_achievements,summary.num_unofficial_achievements,
+                     summary.num_unsupported_achievements,summary.points_core,summary.points_unlocked);
+    int category = rc_client_get_unofficial_enabled(client)? RC_CLIENT_ACHIEVEMENT_CATEGORY_CORE_AND_UNOFFICIAL : RC_CLIENT_ACHIEVEMENT_CATEGORY_CORE;
+    rc_client_achievement_list_t* list = rc_client_create_achievement_list(client,category,RC_CLIENT_ACHIEVEMENT_LIST_GROUPING_LOCK_STATE);
+    se_string_printf(out,",\n  \"achievements\": [");
+    bool first = true;
+    for(uint32_t b=0;list&&b<list->num_buckets;++b){
+      for(uint32_t i=0;i<list->buckets[b].num_achievements;++i){
+        const rc_client_achievement_t* a = list->buckets[b].achievements[i];
+        char badge[256] = "";
+        rc_client_achievement_get_image_url(a,a->state,badge,sizeof(badge));
+        se_string_printf(out,"%s\n    {\"id\": %u, \"title\": \"%s\", \"description\": \"%s\", \"points\": %u, \"unlocked\": %s, "
+                         "\"unlocked_hardcore\": %s, \"unlock_time\": %lld, \"unofficial\": %s, \"bucket\": \"%s\", \"progress\": \"%s\", "
+                         "\"percent\": %.1f, \"rarity\": %.2f, \"rarity_hardcore\": %.2f, \"badge_url\": \"%s\"}",
+                         first? "" : ",",a->id,se_json_escaped(a->title),se_json_escaped(a->description),a->points,
+                         a->state==RC_CLIENT_ACHIEVEMENT_STATE_UNLOCKED? "true" : "false",
+                         (a->unlocked&RC_CLIENT_ACHIEVEMENT_UNLOCKED_HARDCORE)? "true" : "false",(long long)a->unlock_time,
+                         a->category==RC_CLIENT_ACHIEVEMENT_CATEGORY_UNOFFICIAL? "true" : "false",se_json_escaped(list->buckets[b].label),
+                         se_json_escaped(a->measured_progress),a->measured_percent,a->rarity,a->rarity_hardcore,se_json_escaped(badge));
+        first = false;
+      }
+    }
+    if(list)rc_client_destroy_achievement_list(list);
+    se_string_printf(out,first? "]" : "\n  ]");
+  }
+  se_string_printf(out,"\n}");
+#else
+  se_string_printf(out,"{\"available\": false}");
+#endif
+}
+SKYEMU_API const char* se_get_achievements_json(void){
+  static se_string_t kept;
+  se_string_t json = {0};
+  se_achievements_json(&json);
+  return se_keep_json(&kept,&json);
 }
 
 SKYEMU_API void se_set_enable_download_cache(uint32_t value) {
@@ -6585,6 +7382,18 @@ void se_update_frame() {
   }
   hcs_suspend_callbacks();
   #endif
+#ifdef ENABLE_RETRO_ACHIEVEMENTS
+  // Options changed by the API or the HTTP server thread are applied on the main thread, which
+  // also draws the achievements panel
+  if(gui_state.ra_apply_options){
+    gui_state.ra_apply_options = false;
+    rc_client_t* client = retro_achievements_get_client();
+    if((rc_client_get_hardcore_enabled(client)!=0)!=(gui_state.settings.hardcore_mode!=0)){
+      rc_client_set_hardcore_enabled(client,gui_state.settings.hardcore_mode!=0);
+    }
+    if(retro_achievements_set_options(gui_state.settings.ra_unofficial,gui_state.settings.ra_spectator))gui_state.ra_needs_reload = true;
+  }
+#endif
   se_update_key_turbo(&emu_state);
   se_update_solar_sensor(&emu_state);
 
@@ -7534,6 +8343,52 @@ static void se_draw_touch_layout_editor_toolbar(float top){
   if(se_button(ICON_FK_CHECK " Done",(ImVec2){bw,0}))se_close_touch_layout_editor();
   igEnd();
 }
+// ROM patches of the loaded game (ROM hacks, translations, fixes)
+static void se_draw_patch_settings(void){
+  se_section(ICON_FK_PUZZLE_PIECE " ROM Patches");
+  bool apply = !gui_state.settings.soft_patching_off;
+  if(se_checkbox("Apply Patches",&apply)){
+    gui_state.settings.soft_patching_off = !apply;
+    char rom_file[SB_FILE_PATH_SIZE];
+    snprintf(rom_file,sizeof(rom_file),"%s",gui_state.patch.rom_file);
+    if(rom_file[0])se_load_rom(rom_file);
+  }
+  ImU32 ok_color = 0xff00c000, error_color = 0xff0000ff;
+  if(gui_state.design_active){
+    ok_color = se_design_u32(gui_state.design.accent_text);
+    error_color = se_design_u32(gui_state.design.error);
+  }
+  if(gui_state.patch.applied){
+    igPushStyleColorU32(ImGuiCol_Text,ok_color);
+    se_text(ICON_FK_CHECK_CIRCLE " %s",gui_state.patch.status);
+    igPopStyleColor(1);
+    if(gui_state.patch.original_size!=gui_state.patch.patched_size){
+      se_text_disabled(se_localize_and_cache("ROM size changed from %zu KB to %zu KB"),
+                       gui_state.patch.original_size/1024,gui_state.patch.patched_size/1024);
+    }
+  }else if(gui_state.patch.failed){
+    igPushStyleColorU32(ImGuiCol_Text,error_color);
+    se_text(ICON_FK_EXCLAMATION_TRIANGLE " %s",gui_state.patch.status);
+    igPopStyleColor(1);
+    se_text_disabled("The game was loaded without it.");
+  }else if(gui_state.patch.path[0]&&gui_state.settings.soft_patching_off){
+    se_text_disabled("%s",se_localize_and_cache("A patch was found but patches are turned off"));
+  }else{
+    se_text_disabled("No patch for this game. Add an IPS, UPS or BPS patch below, or drop one on the window.");
+  }
+  if(gui_state.patch.add_error[0]){
+    igPushStyleColorU32(ImGuiCol_Text,error_color);
+    se_text(ICON_FK_EXCLAMATION_TRIANGLE " %s",gui_state.patch.add_error);
+    igPopStyleColor(1);
+  }
+  bool clicked = se_button(ICON_FK_FOLDER_OPEN " Add Patch",(ImVec2){0,0});
+  if(igIsItemVisible()){
+    ImVec2 min, max;
+    igGetItemRectMin(&min);
+    igGetItemRectMax(&max);
+    se_open_file_browser(clicked,min.x,min.y,max.x-min.x,max.y-min.y,se_load_patch_from_browser,valid_patch_file_types,NULL);
+  }
+}
 void se_draw_touch_controls_settings(){
 
   se_section(ICON_FK_HAND_O_RIGHT " Touch Control Settings");
@@ -7931,9 +8786,11 @@ void se_draw_menu_panel(){
           strcpy(cheat->name,"Untitled Code");
           memset(cheat->buffer,0,sizeof(cheat->buffer));
         }
-      }
+      }else se_text_disabled(se_localize_and_cache("All %d code slots are used"),SE_NUM_CHEATS);
+      se_draw_cheat_finder(win_w);
     }
   }
+  if(emu_state.rom_loaded)se_draw_patch_settings();
   #ifdef ENABLE_RETRO_ACHIEVEMENTS
   se_section(ICON_FK_TROPHY " RetroAchievements");
   const rc_client_user_t* user = rc_client_get_user_info(retro_achievements_get_client());
@@ -8024,12 +8881,7 @@ void se_draw_menu_panel(){
         igSameLine(0,5);
         igBeginGroup();
         se_text(se_localize_and_cache("%s (Points: %d)"), user->display_name,hardcore ? user->score : user->score_softcore);
-        if (se_button(ICON_FK_SIGN_OUT " Logout",(ImVec2){0,0})){
-          char buffer[SB_FILE_PATH_SIZE];
-          snprintf(buffer, SB_FILE_PATH_SIZE, "%sra_token.txt", se_get_pref_path());
-          remove(buffer);
-          rc_client_logout(retro_achievements_get_client());
-        }
+        if (se_button(ICON_FK_SIGN_OUT " Logout",(ImVec2){0,0}))se_ra_logout();
         igEndGroup();
       }
       bool draw_checkboxes_bool[6] = {
@@ -8052,6 +8904,10 @@ void se_draw_menu_panel(){
       {
         se_reset_core();
       }
+      bool unofficial = gui_state.settings.ra_unofficial, spectator = gui_state.settings.ra_spectator;
+      if (se_checkbox("Unofficial Achievements", &unofficial)) se_set_ra_unofficial(unofficial);
+      if (se_checkbox("Spectator Mode", &spectator)) se_set_ra_spectator(spectator);
+      if (spectator) se_text_disabled("Unlocks are shown but not sent to RetroAchievements.");
 
       se_checkbox("Notifications", &draw_checkboxes_bool[1]);
       if (!gui_state.settings.draw_notifications) se_push_disabled();
@@ -8364,6 +9220,7 @@ void se_draw_menu_panel(){
     se_input_path("Save File/State Path", gui_state.paths.save,ImGuiInputTextFlags_None);
     se_input_path("BIOS/Firmware Path", gui_state.paths.bios,ImGuiInputTextFlags_None);
     se_input_path("Cheat Code Path", gui_state.paths.cheat_codes,ImGuiInputTextFlags_None);
+    se_input_path("Patch Path", gui_state.paths.patches,ImGuiInputTextFlags_None);
     bool save_to_path=gui_state.settings.save_to_path;
     se_checkbox("Create new files in paths",&save_to_path);
     gui_state.settings.save_to_path=save_to_path;
@@ -8526,7 +9383,15 @@ uint8_t* se_hcs_callback(const char* cmd, const char** params, uint64_t* result_
   *mime_type = "text/html";
   printf("Got HCS Cmd: %s\n",cmd);
   const char* str_result = NULL;
-  if(gui_state.settings.hardcore_mode&& gui_state.ra_logged_in){
+  if(strcmp(cmd,"/achievements")==0){
+    // Read only and it does not touch the game, so it also answers in Hardcore Mode
+    *mime_type = "application/json";
+    se_string_t out = {0};
+    se_achievements_json(&out);
+    if(!out.data)return NULL;
+    *result_size = out.size+1;
+    return (uint8_t*)out.data;
+  }else if(gui_state.settings.hardcore_mode&& gui_state.ra_logged_in){
     str_result="Error: The HTTP Control Server is unavailable in Hardcore Mode";
   }
   else if (strcmp(cmd, "/ping") == 0) { 
@@ -8550,6 +9415,14 @@ uint8_t* se_hcs_callback(const char* cmd, const char** params, uint64_t* result_
       params+=2;
     }
     str_result=emu_state.rom_loaded?"ok":"Failed to load ROM";
+  }
+  else if(strcmp(cmd,"/load_patch")==0){
+    bool applied = false;
+    while(*params){
+      if(strcmp(params[0],"path")==0)applied = se_load_patch(params[1]);
+      params+=2;
+    }
+    str_result = applied? "ok" : gui_state.patch.add_error[0]? gui_state.patch.add_error : "Failed to load the patch";
   }
   else if(strcmp(cmd, "/external_menu") == 0) {
 #ifdef SE_PLATFORM_ANDROID
@@ -8621,12 +9494,15 @@ uint8_t* se_hcs_callback(const char* cmd, const char** params, uint64_t* result_
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"touch_controller\": %d,\n",!gui_state.settings.touch_controller_off);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"touch_controls_show_speed\": %d,\n",gui_state.settings.touch_controls_show_speed);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"controller_face_layout\": %d,\n",gui_state.settings.controller_face_layout);
+    off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"soft_patching\": %d,\n",!gui_state.settings.soft_patching_off);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"save_to_path\": %d,\n",gui_state.settings.save_to_path);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"force_dmg_mode\": %d,\n",gui_state.settings.force_dmg_mode);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"gba_color_correction_mode\": %d,\n",gui_state.settings.gba_color_correction_mode);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"avoid_overlapping_touchscreen\": %d,\n",gui_state.settings.avoid_overlaping_touchscreen);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"custom_font_scale\": %f,\n",gui_state.settings.custom_font_scale);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"hardcore_mode\": %d,\n",gui_state.settings.hardcore_mode);
+    off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"ra_unofficial\": %d,\n",gui_state.settings.ra_unofficial);
+    off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"ra_spectator\": %d,\n",gui_state.settings.ra_spectator);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"draw_challenge_indicators\": %d,\n",gui_state.settings.draw_challenge_indicators);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"draw_progress_indicators\": %d,\n",gui_state.settings.draw_progress_indicators);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"draw_leaderboard_trackers\": %d,\n",gui_state.settings.draw_leaderboard_trackers);
@@ -8699,6 +9575,7 @@ uint8_t* se_hcs_callback(const char* cmd, const char** params, uint64_t* result_
       else if(strcmp(params[0],"touch_controls_opacity")==0)gui_state.settings.touch_controls_opacity=atof(params[1]);
       else if(strcmp(params[0],"touch_controls_show_turbo")==0)gui_state.settings.touch_controls_show_turbo=atoi(params[1]);
       else if(strcmp(params[0],"touch_controller")==0)gui_state.settings.touch_controller_off=!atoi(params[1]);
+      else if(strcmp(params[0],"soft_patching")==0)gui_state.settings.soft_patching_off=!atoi(params[1]);
       else if(strcmp(params[0],"touch_controls_show_speed")==0)gui_state.settings.touch_controls_show_speed=atoi(params[1]);
       else if(strcmp(params[0],"touch_layout_editor")==0){
         if(atoi(params[1])&&!gui_state.touch_editor_open)se_open_touch_layout_editor();
@@ -8711,7 +9588,9 @@ uint8_t* se_hcs_callback(const char* cmd, const char** params, uint64_t* result_
       else if(strcmp(params[0],"gba_color_correction_mode")==0)gui_state.settings.gba_color_correction_mode=atoi(params[1]);
       else if(strcmp(params[0],"avoid_overlapping_touchscreen")==0)gui_state.settings.avoid_overlaping_touchscreen=atoi(params[1]);
       else if(strcmp(params[0],"custom_font_scale")==0)gui_state.settings.custom_font_scale=atof(params[1]);
-      else if(strcmp(params[0],"hardcore_mode")==0)gui_state.settings.hardcore_mode=atoi(params[1]);
+      else if(strcmp(params[0],"hardcore_mode")==0)se_set_hardcore_mode(atoi(params[1]));
+      else if(strcmp(params[0],"ra_unofficial")==0)se_set_ra_unofficial(atoi(params[1]));
+      else if(strcmp(params[0],"ra_spectator")==0)se_set_ra_spectator(atoi(params[1]));
       else if(strcmp(params[0],"draw_challenge_indicators")==0)gui_state.settings.draw_challenge_indicators=atoi(params[1]);
       else if(strcmp(params[0],"draw_progress_indicators")==0)gui_state.settings.draw_progress_indicators=atoi(params[1]);
       else if(strcmp(params[0],"draw_leaderboard_trackers")==0)gui_state.settings.draw_leaderboard_trackers=atoi(params[1]);
@@ -8863,8 +9742,10 @@ uint8_t* se_hcs_callback(const char* cmd, const char** params, uint64_t* result_
     }
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"rom-loaded\" : %s,\n",emu_state.rom_loaded?"true":"false");
     if(emu_state.rom_loaded){
-      off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"rom-path\": \"%s\",\n",emu_state.rom_path);
-      off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"save-path\": \"%s\",\n",emu_state.save_file_path);
+      off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"rom-path\": \"%s\",\n",se_json_escaped(emu_state.rom_path));
+      off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"save-path\": \"%s\",\n",se_json_escaped(emu_state.save_file_path));
+      off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"patch\": {\"path\": \"%s\", \"applied\": %s, \"status\": \"%s\"},\n",
+                    se_json_escaped(gui_state.patch.path),gui_state.patch.applied?"true":"false",se_json_escaped(gui_state.patch.status));
     }
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"rewind-info\" : {\n");
     off+=snprintf(buffer+off,sizeof(buffer)-off,"    \"entries-used\" : %d,\n",rewind_buffer.size);
@@ -8913,41 +9794,25 @@ uint8_t* se_hcs_callback(const char* cmd, const char** params, uint64_t* result_
     }
     str_result=okay? "ok":"failed";
   }else if(strcmp(cmd,"/cheats")==0){
-    *mime_type = "text/plain";
-    size_t cheat_count = 0;
-    for(int i=0; i<SE_NUM_CHEATS;++i){
-      if(cheats[i].state!=-1) cheat_count++;
-    }
-    if(cheat_count==0){
-      str_result = "No cheats enabled";
+    bool json = false;
+    for(const char** p=params;*p;p+=2)if(strcmp(p[0],"format")==0&&strcmp(p[1],"json")==0)json = true;
+    se_string_t out = {0};
+    if(json){
+      *mime_type = "application/json";
+      se_cheats_json(&out);
     }else{
-      size_t max_size = SE_MAX_CHEAT_CODE_SIZE*cheat_count + SE_MAX_CHEAT_NAME_SIZE*cheat_count + 64*cheat_count;
-      char* max_buffer = (char*)calloc(max_size,sizeof(char));
-      int off = 0;
-
+      *mime_type = "text/plain";
       for(int i=0; i<SE_NUM_CHEATS;++i){
-        if(cheats[i].state!=-1){
-          off+=snprintf(max_buffer+off,max_size-off,"%d - %s:",i,cheats[i].name);
-          for(int j=0;j<cheats[i].size;++j){
-            off+=snprintf(max_buffer+off,max_size-off," %08x",cheats[i].buffer[j]);
-          }
-          if(cheats[i].state==0){
-            off+=snprintf(max_buffer+off,max_size-off," (disabled)");
-          }else{
-            off+=snprintf(max_buffer+off,max_size-off," (enabled)");
-          }
-          off+=snprintf(max_buffer+off,max_size-off,"\n");
-        }
+        if(cheats[i].state==-1)continue;
+        se_string_printf(&out,"%d - %s:",i,cheats[i].name);
+        for(uint32_t j=0;j<cheats[i].size;++j)se_string_printf(&out," %08x",cheats[i].buffer[j]);
+        se_string_printf(&out,"%s\n",cheats[i].state==0? " (disabled)" : " (enabled)");
       }
-
-      size_t actual_size = off+1;
-      char* buffer = (char*)malloc(actual_size);
-      memcpy(buffer,max_buffer,actual_size);
-      buffer[actual_size-1]='\0';
-      free(max_buffer);
-      *result_size = actual_size;
-      return (uint8_t*)buffer;
+      if(!out.size)se_string_printf(&out,"No cheats enabled");
     }
+    if(!out.data)return NULL;
+    *result_size = out.size+1;
+    return (uint8_t*)out.data;
   }else if(strcmp(cmd,"/remove_cheat")==0){
     bool okay=false;
     while(*params){
@@ -8955,7 +9820,9 @@ uint8_t* se_hcs_callback(const char* cmd, const char** params, uint64_t* result_
         int id=-1;
         int result=sscanf(params[1],"%d",&id);
         if(result!=EOF&&id>=0&&id<SE_NUM_CHEATS){
+          if(gui_state.editing_cheat_index==id)gui_state.editing_cheat_index=-1;
           cheats[id].state=-1;
+          se_save_cheats_if_loaded();
           okay=true;
         }else{
           okay=false;
@@ -9013,7 +9880,7 @@ uint8_t* se_hcs_callback(const char* cmd, const char** params, uint64_t* result_
           okay=false;
         }else{
           if(name_changed){
-            strncpy(cheats[editing_id].name,new_name,SE_MAX_CHEAT_NAME_SIZE);
+            snprintf(cheats[editing_id].name,SE_MAX_CHEAT_NAME_SIZE,"%s",new_name);
           }
           if(code_changed){
             se_convert_cheat_code(new_code,editing_id);
@@ -9024,11 +9891,75 @@ uint8_t* se_hcs_callback(const char* cmd, const char** params, uint64_t* result_
           if(cheats[editing_id].state==-1){
             cheats[editing_id].state=1;
           }
+          se_save_cheats_if_loaded();
         }
       }
     }
 
     str_result=okay? "ok":"failed";
+  }else if(strcmp(cmd,"/cheat_search")==0){
+    // Cheat finder: start=1 (size, signed), compare+value, reset=1, then the results from offset
+    bool start = false, reset = false, is_signed = false, error = false;
+    int value_size = 1, compare = -1;
+    uint32_t value = 0, first = 0, count = 50;
+    for(const char** p=params;*p;p+=2){
+      if(strcmp(p[0],"start")==0)start = atoi(p[1]);
+      else if(strcmp(p[0],"reset")==0)reset = atoi(p[1]);
+      else if(strcmp(p[0],"size")==0)value_size = atoi(p[1]);
+      else if(strcmp(p[0],"signed")==0)is_signed = atoi(p[1]);
+      else if(strcmp(p[0],"offset")==0)first = strtoul(p[1],NULL,0);
+      else if(strcmp(p[0],"count")==0)count = strtoul(p[1],NULL,0);
+      else if(strcmp(p[0],"value")==0)error|=!se_cheat_parse_value(p[1],&value);
+      else if(strcmp(p[0],"compare")==0){
+        for(int c=0;c<SE_SEARCH_NUM_COMPARES;++c)if(strcmp(p[1],se_cheat_compare_names[c])==0)compare = c;
+        if(compare<0)error = true;
+      }
+    }
+    *mime_type = "application/json";
+    if(!se_cheat_finder_supported())str_result = "{\"error\": \"No game is loaded\"}";
+    else if(error)str_result = "{\"error\": \"Invalid compare or value\"}";
+    else if(start&&value_size!=1&&value_size!=2&&value_size!=4)str_result = "{\"error\": \"size must be 1, 2 or 4\"}";
+    else{
+      se_string_t out = {0};
+      se_cheat_finder_lock();
+      if(reset)se_cheat_finder_reset();
+      if(start&&!se_cheat_finder_start(value_size,is_signed))str_result = "{\"error\": \"Could not start the search\"}";
+      else if(compare>=0&&!se_search_active(&se_cheat_finder.search))str_result = "{\"error\": \"Start a search first\"}";
+      else{
+        if(compare>=0)se_cheat_finder_filter(compare,value);
+        se_cheat_search_json(&out,first,count);
+      }
+      se_cheat_finder_unlock();
+      if(!str_result){
+        if(!out.data)return NULL;
+        *result_size = out.size+1;
+        return (uint8_t*)out.data;
+      }
+    }
+  }else if(strcmp(cmd,"/make_cheat")==0){
+    // Code that keeps a value at an address: address, value, size (default: the search's), name
+    uint32_t address = 0, value = 0;
+    int value_size = se_cheat_finder_value_size();
+    bool has_address = false, has_value = false;
+    const char* name = NULL;
+    for(const char** p=params;*p;p+=2){
+      if(strcmp(p[0],"address")==0)has_address = se_cheat_parse_value(p[1],&address);
+      else if(strcmp(p[0],"value")==0)has_value = se_cheat_parse_value(p[1],&value);
+      else if(strcmp(p[0],"size")==0)value_size = atoi(p[1]);
+      else if(strcmp(p[0],"name")==0)name = p[1];
+    }
+    *mime_type = "application/json";
+    int index = has_address&&has_value? se_make_cheat(address,value,value_size,name) : -1;
+    if(index<0)str_result = "{\"error\": \"No code can write that address, or all code slots are used\"}";
+    else{
+      se_string_t out = {0};
+      se_string_printf(&out,"{\"id\": %d, \"name\": \"%s\", \"code\": \"",index,se_json_escaped(cheats[index].name));
+      for(uint32_t w=0;w<cheats[index].size;++w)se_string_printf(&out,"%s%08X",w? " " : "",cheats[index].buffer[w]);
+      se_string_printf(&out,"\"}");
+      if(!out.data)return NULL;
+      *result_size = out.size+1;
+      return (uint8_t*)out.data;
+    }
   }
   if(str_result){
     const char * result = strdup(str_result);
@@ -9703,6 +10634,7 @@ void se_load_settings(){
   {
     memset(&cloud_state,0,sizeof(se_cloud_state_t));
     cloud_state.save_states_mutex = mutex_create();
+    se_cheat_finder_mutex = mutex_create();
     char refresh_token_path[SB_FILE_PATH_SIZE];
     snprintf(refresh_token_path,SB_FILE_PATH_SIZE,"%srefresh_token.txt",se_get_pref_path());
     if(sb_file_exists(refresh_token_path)){
@@ -9712,6 +10644,7 @@ void se_load_settings(){
 #ifdef ENABLE_RETRO_ACHIEVEMENTS
   bool is_mobile = gui_state.ui_type == SE_UI_ANDROID || gui_state.ui_type == SE_UI_IOS;
   retro_achievements_initialize(&emu_state,gui_state.settings.hardcore_mode);
+  retro_achievements_set_options(gui_state.settings.ra_unofficial,gui_state.settings.ra_spectator);
 #endif
 }
 static void se_compute_draw_lcd_rect(float *lcd_render_w, float *lcd_render_h, int* nds_layout){
@@ -10951,6 +11884,77 @@ void Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1load_1rom(JNIEnv *e
 }
 void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1load_1rom(JNIEnv *env, jobject thiz, jstring filePath) {
     Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1load_1rom(env, thiz, filePath);
+}
+jboolean Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1load_1patch(JNIEnv *env, jobject thiz, jstring filePath) {
+  const char *nativeFilePath = (*env)->GetStringUTFChars(env, filePath, 0);
+  bool applied = se_load_patch(nativeFilePath);
+  (*env)->ReleaseStringUTFChars(env, filePath, nativeFilePath);
+  return applied? JNI_TRUE : JNI_FALSE;
+}
+jstring Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1patch_1status(JNIEnv *env, jobject thiz) {
+  return (*env)->NewStringUTF(env, se_get_patch_status());
+}
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1soft_1patching(JNIEnv *env, jobject thiz, jint value) { se_set_soft_patching((int) value); }
+jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1soft_1patching(JNIEnv *env, jobject thiz) { return (jint) se_get_soft_patching(); }
+jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1add_1cheat(JNIEnv *env, jobject thiz, jstring name, jstring code, jint enabled) {
+  if(!code)return -1;
+  const char *native_name = name? (*env)->GetStringUTFChars(env, name, 0) : NULL;
+  const char *native_code = (*env)->GetStringUTFChars(env, code, 0);
+  int index = se_add_cheat(native_name, native_code, (int) enabled);
+  if(native_name)(*env)->ReleaseStringUTFChars(env, name, native_name);
+  (*env)->ReleaseStringUTFChars(env, code, native_code);
+  return (jint) index;
+}
+jboolean Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1remove_1cheat(JNIEnv *env, jobject thiz, jint index) {
+  return se_remove_cheat((int) index)? JNI_TRUE : JNI_FALSE;
+}
+jboolean Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1cheat_1enabled(JNIEnv *env, jobject thiz, jint index, jint enabled) {
+  return se_set_cheat_enabled((int) index, (int) enabled)? JNI_TRUE : JNI_FALSE;
+}
+jstring Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1cheats_1json(JNIEnv *env, jobject thiz) {
+  return (*env)->NewStringUTF(env, se_get_cheats_json());
+}
+jboolean Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1cheat_1search_1start(JNIEnv *env, jobject thiz, jint value_size, jint is_signed) {
+  return se_cheat_search_start((int) value_size, (int) is_signed)? JNI_TRUE : JNI_FALSE;
+}
+jlong Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1cheat_1search_1filter(JNIEnv *env, jobject thiz, jint compare, jlong value) {
+  return (jlong) se_cheat_search_filter((int) compare, (uint32_t) value);
+}
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1cheat_1search_1reset(JNIEnv *env, jobject thiz) { se_cheat_search_reset(); }
+jstring Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1cheat_1search_1json(JNIEnv *env, jobject thiz, jint first, jint max) {
+  return (*env)->NewStringUTF(env, se_get_cheat_search_json((uint32_t) first, (uint32_t) max));
+}
+jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1cheat_1search_1add_1code(JNIEnv *env, jobject thiz, jlong address, jlong value, jstring name) {
+  const char *native_name = name? (*env)->GetStringUTFChars(env, name, 0) : NULL;
+  int index = se_cheat_search_add_code((uint32_t) address, (uint32_t) value, native_name);
+  if(native_name)(*env)->ReleaseStringUTFChars(env, name, native_name);
+  return (jint) index;
+}
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1ra_1login(JNIEnv *env, jobject thiz, jstring username, jstring password) {
+  if(!username||!password)return;
+  const char *native_username = (*env)->GetStringUTFChars(env, username, 0);
+  const char *native_password = (*env)->GetStringUTFChars(env, password, 0);
+  se_ra_login(native_username, native_password);
+  (*env)->ReleaseStringUTFChars(env, username, native_username);
+  (*env)->ReleaseStringUTFChars(env, password, native_password);
+}
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1ra_1logout(JNIEnv *env, jobject thiz) { se_ra_logout(); }
+jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1ra_1get_1login_1state(JNIEnv *env, jobject thiz) { return (jint) se_ra_get_login_state(); }
+jstring Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1ra_1get_1login_1error(JNIEnv *env, jobject thiz) {
+  return (*env)->NewStringUTF(env, se_ra_get_login_error());
+}
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1ra_1unofficial(JNIEnv *env, jobject thiz, jint value) { se_set_ra_unofficial((int) value); }
+jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1ra_1unofficial(JNIEnv *env, jobject thiz) { return (jint) se_get_ra_unofficial(); }
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1ra_1spectator(JNIEnv *env, jobject thiz, jint value) { se_set_ra_spectator((int) value); }
+jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1ra_1spectator(JNIEnv *env, jobject thiz) { return (jint) se_get_ra_spectator(); }
+jstring Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1achievements_1json(JNIEnv *env, jobject thiz) {
+  return (*env)->NewStringUTF(env, se_get_achievements_json());
+}
+jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1make_1cheat(JNIEnv *env, jobject thiz, jlong address, jlong value, jint value_size, jstring name) {
+  const char *native_name = name? (*env)->GetStringUTFChars(env, name, 0) : NULL;
+  int index = se_make_cheat((uint32_t) address, (uint32_t) value, (int) value_size, native_name);
+  if(native_name)(*env)->ReleaseStringUTFChars(env, name, native_name);
+  return (jint) index;
 }
 void Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1load_1file(JNIEnv *env, jobject thiz, jstring filePath) {
   const char *nativeFilePath = (*env)->GetStringUTFChars(env, filePath, 0);

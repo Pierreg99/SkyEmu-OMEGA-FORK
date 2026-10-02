@@ -703,7 +703,21 @@ namespace
                 hardcore_str = se_localize_and_cache("Encore mode");
                 hardcore_color = 0xff00ffff;
             }
+            // Unlocks are shown but not sent to RetroAchievements
+            if (rc_client_get_spectator_mode_enabled(ra_state->rc_client))
+                hardcore_str = hardcore_str + ", " + se_localize_and_cache("spectating");
             se_boxed_image_triple_label(title.c_str(), description.c_str(), hardcore_str.c_str(), hardcore_color, ICON_FK_GAMEPAD, game_state->game_image, false);
+            // What the player is doing in the game, as shown on their RetroAchievements profile
+            if (rc_client_has_rich_presence(ra_state->rc_client))
+            {
+                char rich_presence[256];
+                if (rc_client_get_rich_presence_message(ra_state->rc_client, rich_presence, sizeof(rich_presence)))
+                {
+                    igPushStyleColorVec4(ImGuiCol_Text, igGetStyle()->Colors[ImGuiCol_TextDisabled]);
+                    igTextWrapped(ICON_FK_COMMENT " %s", rich_presence);
+                    igPopStyleColor(1);
+                }
+            }
         }
         for (int i = 0; i < game_state->achievement_list.buckets.size(); i++)
         {
@@ -808,8 +822,24 @@ void ra_state_t::rebuild_achievement_list(ra_game_state_ptr game_state)
         game_state,
         rc_client_create_achievement_list(
             rc_client,
-            RC_CLIENT_ACHIEVEMENT_CATEGORY_CORE, // TODO: option for _AND_UNOFFICIAL achievements?
+            rc_client_get_unofficial_enabled(rc_client) ? RC_CLIENT_ACHIEVEMENT_CATEGORY_CORE_AND_UNOFFICIAL
+                                                        : RC_CLIENT_ACHIEVEMENT_CATEGORY_CORE,
             RC_CLIENT_ACHIEVEMENT_LIST_GROUPING_PROGRESS));
+}
+
+bool retro_achievements_set_options(bool unofficial, bool spectator)
+{
+    rc_client_t* client = ra_state->rc_client;
+    if ((bool)rc_client_get_unofficial_enabled(client) == unofficial &&
+        (bool)rc_client_get_spectator_mode_enabled(client) == spectator)
+        return false;
+    // Both are read when a game is loaded, and spectator mode can only be turned off without one
+    bool game_loaded = rc_client_get_game_info(client) != NULL;
+    if (game_loaded)
+        rc_client_unload_game(client);
+    rc_client_set_unofficial_enabled(client, unofficial);
+    rc_client_set_spectator_mode_enabled(client, spectator);
+    return game_loaded;
 }
 
 extern "C" uint32_t retro_achievements_read_memory_callback(uint32_t address, uint8_t* buffer,

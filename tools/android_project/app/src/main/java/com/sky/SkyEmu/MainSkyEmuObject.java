@@ -91,6 +91,34 @@ public class MainSkyEmuObject {
     public native void se_android_reset_touch_layout();
     /* Game controller face buttons: 0 match the labels, 1 match the GBA positions (A on the right) */
     public native void se_android_set_controller_face_layout(int layout);
+    /* ROM patches (IPS, UPS, BPS): adds a patch to the loaded game and reloads it */
+    public native boolean se_android_load_patch(String path);
+    public native String se_android_get_patch_status();
+    public native void se_android_set_soft_patching(int enabled);
+    public native int se_android_get_soft_patching();
+    /* Cheats of the loaded game, see skyemu_dll.h. Addresses and values are unsigned 32 bit numbers. */
+    public native int se_android_add_cheat(String name, String code, int enabled);
+    public native boolean se_android_remove_cheat(int index);
+    public native boolean se_android_set_cheat_enabled(int index, int enabled);
+    public native String se_android_get_cheats_json();
+    /* Cheat finder: compare is 0 equal, 1 not equal, 2 greater, 3 less, 4 changed, 5 unchanged,
+       6 increased, 7 decreased, 8 increased by, 9 decreased by */
+    public native boolean se_android_cheat_search_start(int valueSize, int signed);
+    public native long se_android_cheat_search_filter(int compare, long value);
+    public native void se_android_cheat_search_reset();
+    public native String se_android_get_cheat_search_json(int first, int max);
+    public native int se_android_cheat_search_add_code(long address, long value, String name);
+    public native int se_android_make_cheat(long address, long value, int valueSize, String name);
+    /* RetroAchievements: login state is 0 logged out, 1 logging in, 2 logged in */
+    public native void se_android_ra_login(String username, String password);
+    public native void se_android_ra_logout();
+    public native int se_android_ra_get_login_state();
+    public native String se_android_ra_get_login_error();
+    public native void se_android_set_ra_unofficial(int enabled);
+    public native int se_android_get_ra_unofficial();
+    public native void se_android_set_ra_spectator(int enabled);
+    public native int se_android_get_ra_spectator();
+    public native String se_android_get_achievements_json();
     public native int se_android_get_controller_face_layout();
     public native void se_android_set_avoid_overlapping_touchscreen(int value);
     public native int se_android_get_avoid_overlapping_touchscreen();

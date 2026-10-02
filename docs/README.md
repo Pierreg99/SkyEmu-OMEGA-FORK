@@ -22,14 +22,23 @@
 <tr>
 <td valign="top">
 
-### 🎨 Look and feel
-- [**Design systems**](DESIGN_SYSTEMS.md): Material 3, Fluent and Adwaita, high contrast, and how they follow the OS
-- [**Display and shaders**](GRAPHICS.md): screen shaders (LCD, xBRZ, CRT, scanlines), color correction and screen layout
+### 🎮 Play
+- [**Cheats and ROM patches**](CHEATS_AND_PATCHES.md): cheat codes, the cheat finder, and IPS, UPS and BPS patches for hacks and translations
+- [**RetroAchievements**](RETROACHIEVEMENTS.md): achievements, Hardcore, Encore, unofficial and spectator modes
 - [**Controllers**](CONTROLLERS.md): on-screen controller, layout editor and game controller mapping
-- [**Custom themes**](CUSTOM_THEMES.md): image skins for the classic design
 
 </td>
 <td valign="top">
+
+### 🎨 Look and feel
+- [**Design systems**](DESIGN_SYSTEMS.md): Material 3, Fluent and Adwaita, high contrast, and how they follow the OS
+- [**Display and shaders**](GRAPHICS.md): screen shaders (LCD, xBRZ, CRT, scanlines), color correction and screen layout
+- [**Custom themes**](CUSTOM_THEMES.md): image skins for the classic design
+
+</td>
+</tr>
+<tr>
+<td colspan="2" valign="top">
 
 ### 📖 Reference
 - [**Accuracy**](Accuracy.md): games and test ROMs compared with other GBA emulators
