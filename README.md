@@ -17,7 +17,7 @@
 [![iOS](https://github.com/Pierreg99/SkyEmu-OMEGA-FORK/actions/workflows/deploy_ios.yml/badge.svg)](https://github.com/Pierreg99/SkyEmu-OMEGA-FORK/actions/workflows/deploy_ios.yml)
 [![Web](https://github.com/Pierreg99/SkyEmu-OMEGA-FORK/actions/workflows/deploy_web.yml/badge.svg)](https://github.com/Pierreg99/SkyEmu-OMEGA-FORK/actions/workflows/deploy_web.yml)
 
-[**Get started**](#-get-started) · [**Build**](docs/BUILDING.md) · [**Embed**](docs/EMBEDDING.md) · [**Design systems**](docs/DESIGN_SYSTEMS.md) · [**Shaders**](docs/GRAPHICS.md) · [**All docs**](docs/README.md)
+[**Get started**](#-get-started) · [**Build**](docs/BUILDING.md) · [**Embed**](docs/EMBEDDING.md) · [**Design systems**](docs/DESIGN_SYSTEMS.md) · [**Shaders**](docs/GRAPHICS.md) · [**Controllers**](docs/CONTROLLERS.md) · [**All docs**](docs/README.md)
 
 </div>
 
@@ -92,7 +92,8 @@
 - Fast forward, slow motion and very long rewind
 - 4 save state slots with screenshot previews
 - Action Replay cheat engine
-- Game controllers with rumble and rebindable keys
+- On-screen controller with a drag and drop layout editor
+- Game controllers with rumble, readable button names and rebindable keys
 
 </td>
 <td valign="top">
@@ -125,6 +126,8 @@
 | **System integration** | | Dark mode, high contrast, accent color, UI font and window frame follow the OS |
 | **Accessibility** | | A high contrast style for each design, checked by unit tests for 7:1 text and 3:1 borders |
 | **Screen shaders** | Pixelate, bilinear, LCD, LCD & subpixels, xBRZ | Adds CRT and scanlines |
+| **On-screen controller** | One fixed layout | Layout editor with separate portrait and landscape layouts, Rewind and Fast Forward buttons |
+| **Game controllers** | Xbox style mapping | Choice of label or GBA positions for the face buttons, Xbox / PlayStation / Nintendo button names |
 | **Windows** | Stand-alone app | `SkyEmu.dll` with a C API ([`skyemu_dll.h`](src/skyemu_dll.h)) for host apps |
 | **Android** | Stand-alone app | Android library with a JNI settings and control API |
 | **iOS / macOS** | Stand-alone app | Static libraries for host apps (the macOS app bundle is still available) |
@@ -198,7 +201,9 @@ Dependencies and the steps for Windows, Android, iOS, macOS, the web and libretr
 
 ## 🎹 Controls
 
-Every binding can be changed in **Menu → Keybinds**, and game controllers are mapped automatically.
+Every binding can be changed in **Menu → Keybinds**, and game controllers are mapped automatically. On touch
+screens the on-screen controller appears when you touch the screen, and **Menu → Touch Control Settings →
+Customize Layout** lets you move and resize its buttons. See [docs/CONTROLLERS.md](docs/CONTROLLERS.md).
 
 | Console | Key | | Emulator | Key |
 |---|---|---|---|---|
@@ -247,6 +252,7 @@ The comparison with other emulators is in [docs/Accuracy.md](docs/Accuracy.md).
 | [Embedding](docs/EMBEDDING.md) | Hosting SkyEmu from a Windows, Android or iOS app |
 | [Design systems](docs/DESIGN_SYSTEMS.md) | Material 3, Fluent, Adwaita, high contrast and how they follow the OS |
 | [Display and shaders](docs/GRAPHICS.md) | Screen shaders, color correction, scaling and DS screen layouts |
+| [Controllers](docs/CONTROLLERS.md) | On-screen controller, layout editor and game controller mapping |
 | [HTTP control server](docs/HTTP_CONTROL_SERVER.md) | Scripting and automation over HTTP |
 | [Custom themes](docs/CUSTOM_THEMES.md) | Making image skins for the classic design |
 | [Accuracy](docs/Accuracy.md) | Test ROM and game compatibility comparison |

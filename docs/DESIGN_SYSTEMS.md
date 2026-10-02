@@ -59,9 +59,9 @@ With Material 3, Fluent or Adwaita selected, the same section offers:
 Also restyled in every design: text fields, combo boxes, the menu panel, save state cards, the game list and the
 on-screen touch controls, which become tonal buttons with a rounded d-pad that fill with the accent when pressed.
 
-> [!IMPORTANT]
-> This fork keeps SkyEmu's on-screen touch controller disabled (`touch_controller_active` in
-> `se_draw_emulated_system_screen`), so the touch control styling only shows once it is enabled again.
+The designs also place the game screen themselves instead of following the skin: centered, above the on-screen
+controller in portrait and between its halves in landscape when overlap is prevented. The controller and its
+layout editor are described in [Controllers](CONTROLLERS.md).
 
 The window frame follows the GUI too: a dark title bar and matching caption colors on Windows 11 (DWM), and the
 `_GTK_THEME_VARIANT` window property that GNOME Shell uses to draw light or dark decorations.

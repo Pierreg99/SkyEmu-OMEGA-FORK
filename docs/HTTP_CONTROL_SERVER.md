@@ -238,7 +238,8 @@ http://localhost:8080/remove_cheat?id=0&id=1
 ### `/settings`
 
 Returns every setting as JSON, including `screen_shader`, `design_system`, `color_scheme`, `contrast`,
-`use_custom_accent`, `custom_accent` and `use_bundled_font`.
+`use_custom_accent`, `custom_accent`, `use_bundled_font`, `touch_controller`, `touch_controls_show_speed` and
+`controller_face_layout`.
 
 ```
 http://localhost:8080/settings
@@ -270,6 +271,11 @@ settings are applied either way.
 | `menu`, `menu_bar` | Open the menu, keep the menu bar visible |
 | `ui_type` | `DESKTOP`, `ANDROID`, `IOS` or `WEB` layout |
 | `load_slot`, `capture_slot` | Restore or capture save state slot 0–3 |
+| `touch_controller` | On-screen controller: `1` shown, `0` off ([details](CONTROLLERS.md)) |
+| `touch_controls_show_speed` | `1` shows Rewind and Fast Forward on the on-screen controller |
+| `touch_layout_editor` | `1` opens the on-screen controller layout editor, `0` closes it |
+| `reset_touch_layout` | `1` restores the default portrait and landscape layouts |
+| `controller_face_layout` | Game controller face buttons: `0` match the labels, `1` match the GBA positions |
 
 Touch control, RetroAchievements and other options use their `/settings` names (for example
 `touch_controls_opacity`, `hardcore_mode`, `enable_download_cache`).

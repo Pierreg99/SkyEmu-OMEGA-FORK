@@ -25,6 +25,7 @@
 ### 🎨 Look and feel
 - [**Design systems**](DESIGN_SYSTEMS.md): Material 3, Fluent and Adwaita, high contrast, and how they follow the OS
 - [**Display and shaders**](GRAPHICS.md): screen shaders (LCD, xBRZ, CRT, scanlines), color correction and screen layout
+- [**Controllers**](CONTROLLERS.md): on-screen controller, layout editor and game controller mapping
 - [**Custom themes**](CUSTOM_THEMES.md): image skins for the classic design
 
 </td>

@@ -95,6 +95,16 @@ se_set_system_high_contrast(1);           // and whether it uses high contrast (
 See [Design systems](DESIGN_SYSTEMS.md) for what each value does. The screen shaders and the other display
 options are described in [Display and shaders](GRAPHICS.md).
 
+The on-screen controller appears when the screen is touched. A host that draws its own controls turns it off and
+sends input with `se_send_key()` instead:
+
+```c
+se_set_touch_controller(0);               // 1 to show it again
+se_set_controller_face_layout(1);         // game controllers: A on the right like the GBA (0 = by label)
+```
+
+The layout editor, the controller options and their API are described in [Controllers](CONTROLLERS.md).
+
 ## Windows DLL
 
 The Windows build is a DLL. Load it, register the callbacks you need and call `win_main`, which creates the
