@@ -163,6 +163,22 @@ SKYEMU_API float se_get_touch_controls_scale(void);
 SKYEMU_API void se_set_touch_controls_show_turbo(uint32_t value);
 SKYEMU_API uint32_t se_get_touch_controls_show_turbo(void);
 
+/* On-screen touch controller: 1 = shown (after the screen is touched, or always when
+   "Hide when inactive" is off), 0 = never shown */
+SKYEMU_API void se_set_touch_controller(int shown);
+SKYEMU_API int se_get_touch_controller(void);
+/* Rewind and Fast Forward buttons on the on-screen controller: 0 = hidden, 1 = shown */
+SKYEMU_API void se_set_touch_controls_show_speed(uint32_t value);
+SKYEMU_API uint32_t se_get_touch_controls_show_speed(void);
+/* Restores the default portrait and landscape layouts of the on-screen controller */
+SKYEMU_API void se_reset_touch_layout(void);
+
+/* Face buttons of game controllers: 0 = the controller's A button is A (labels),
+   1 = A is the right face button and B the bottom one (GBA / DS positions).
+   Changing it rebinds the face buttons of the connected controller. */
+SKYEMU_API void se_set_controller_face_layout(uint32_t layout);
+SKYEMU_API uint32_t se_get_controller_face_layout(void);
+
 /* Save game data to ROM path: 0 = off, 1 = on */
 SKYEMU_API void se_set_save_to_path(uint32_t value);
 SKYEMU_API uint32_t se_get_save_to_path(void);

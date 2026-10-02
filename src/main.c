@@ -207,6 +207,25 @@ typedef struct{
 typedef struct{
   char path[SB_FILE_PATH_SIZE];
 }se_game_info_t;
+// Elements of the on-screen controller layout. Each one groups the buttons that the layout
+// editor moves and scales together.
+#define SE_TOUCH_DPAD          0
+#define SE_TOUCH_FACE          1 // A and B (plus X and Y on the DS)
+#define SE_TOUCH_L             2
+#define SE_TOUCH_R             3
+#define SE_TOUCH_START         4
+#define SE_TOUCH_SELECT        5
+#define SE_TOUCH_TURBO         6
+#define SE_TOUCH_HOLD          7
+#define SE_TOUCH_REWIND        8
+#define SE_TOUCH_FAST_FORWARD  9
+#define SE_TOUCH_NUM_ELEMENTS 10
+
+// Values of persistent_settings_t.controller_face_layout (default game controller bindings)
+#define SE_FACE_LAYOUT_LABELS   0 // The controller's A button is A (Xbox style)
+#define SE_FACE_LAYOUT_POSITION 1 // A is the right face button and B the bottom one, like on a GBA or DS
+#define SE_FACE_LAYOUT_COUNT    2
+
 typedef struct{
   // This structure is directly saved out for the user settings. 
   // Be very careful to keep alignment and ordering the same otherwise you will break the settings. 
@@ -251,7 +270,13 @@ typedef struct{
   uint32_t custom_accent;     // 0xRRGGBB
   uint32_t use_bundled_font;  // 0 = use the platform UI font when it is available, 1 = bundled font
   uint32_t contrast;          // SE_CONTRAST_* (0 = follow the system)
-  uint32_t padding[212];
+  uint32_t touch_controller_off;      // 1 = never show the on-screen controller
+  uint32_t touch_controls_show_speed; // Show Rewind and Fast Forward on the on-screen controller
+  uint32_t controller_face_layout;    // SE_FACE_LAYOUT_* used for the default game controller bindings
+  // Custom on-screen controller layout, [0] landscape and [1] portrait. Each element is moved by
+  // {x, y} (fractions of the screen area) and scaled around its center (0 means 1).
+  float touch_layout[2][SE_TOUCH_NUM_ELEMENTS][3];
+  uint32_t padding[149];
 }persistent_settings_t; 
 _Static_assert(sizeof(persistent_settings_t)==1024, "persistent_settings_t must be exactly 1024 bytes");
 #define SE_STATS_GRAPH_DATA 256
@@ -538,6 +563,19 @@ typedef struct {
     int host_dark;
     uint32_t host_accent;
     int host_high_contrast; // -1 not reported, see se_set_system_high_contrast()
+    // Area the on-screen controller is laid out in, set before it is drawn
+    struct{float x,y,w,h; bool portrait, editor, record;} touch_canvas;
+    float touch_element_bounds[SE_TOUCH_NUM_ELEMENTS][4]; // Last drawn element rectangles (min x, min y, max x, max y)
+    float touch_element_anchor[SE_TOUCH_NUM_ELEMENTS][2]; // Element centers before the custom layout is applied
+    // On-screen controller layout editor
+    bool touch_editor_open;
+    int touch_editor_selected;     // SE_TOUCH_* or -1
+    bool touch_editor_dragging;
+    float touch_editor_drag[2];    // Drag in progress, in fractions of the screen area
+    bool touch_editor_reopen_menu;
+    bool touch_editor_portrait;    // Orientation being edited
+    float touch_editor_canvas[4];  // Screen area being edited (x, y, w, h)
+    int touch_editor_prev_run_mode;
     int loaded_skin_key;  // Skin variant loaded by se_reload_theme() (-1 = layout only skin of the design systems)
     int font_design_key;  // Design/font combination the font atlas was built for
     char system_font_path[SB_FILE_PATH_SIZE]; // Platform UI font in use, empty when the bundled font is used
@@ -642,6 +680,12 @@ void se_draw_lcd(uint8_t *data, int im_width, int im_height,int x, int y, int re
 void se_load_rom_overlay(bool visible);
 void se_draw_onscreen_controller(sb_emu_state_t*state, int mode, float win_x, float win_y, float win_w, float win_h, bool preview, bool center);
 static float se_compute_touchscreen_controls_min_dim(float w, float h, bool *portrait);
+static void se_touch_layout_editor_canvas(float x, float y, float w, float h, bool portrait);
+static bool se_touch_controller_shown();
+#ifdef USE_SDL
+static const char* se_sdl_key_bind_name(SDL_GameController* gc, int key);
+static const char* se_sdl_axis_bind_name(SDL_GameController* gc, int axis);
+#endif
 void se_reset_save_states();
 void se_set_new_controller(se_controller_state_t* cont, int index);
 bool se_run_ar_cheat(const uint32_t* buffer, uint32_t size);
@@ -3078,6 +3122,21 @@ SKYEMU_API void se_set_touch_controls_show_turbo(uint32_t value) {
 SKYEMU_API uint32_t se_get_touch_controls_show_turbo(void) {
     return gui_state.settings.touch_controls_show_turbo;
 }
+SKYEMU_API void se_set_touch_controller(int shown) {
+    gui_state.settings.touch_controller_off = !shown;
+}
+SKYEMU_API int se_get_touch_controller(void) {
+    return !gui_state.settings.touch_controller_off;
+}
+SKYEMU_API void se_set_touch_controls_show_speed(uint32_t value) {
+    gui_state.settings.touch_controls_show_speed = value!=0;
+}
+SKYEMU_API uint32_t se_get_touch_controls_show_speed(void) {
+    return gui_state.settings.touch_controls_show_speed;
+}
+SKYEMU_API void se_reset_touch_layout(void) {
+    memset(gui_state.settings.touch_layout,0,sizeof(gui_state.settings.touch_layout));
+}
 
 SKYEMU_API void se_set_save_to_path(uint32_t value) {
     gui_state.settings.save_to_path = value;
@@ -3535,6 +3594,41 @@ void se_draw_lcd_defer(uint8_t *data, int im_width, int im_height,int x, int y, 
   call->is_touch=is_touch;
   ImDrawList_AddCallback(igGetWindowDrawList(),se_draw_lcd_callback,call);
 }
+// Places the game screen for the design systems, which do not draw a skin: centered, above the
+// on-screen controller in portrait when there is room, and between its two halves in landscape
+// when overlap is prevented.
+static void se_draw_screen_around_controller(float x, float y, float w, float h, float min_dim, bool portrait, bool controller){
+  float pad = h*0.025f;
+  float ax = x, ay = y, aw = w, ah = h;
+  bool top_aligned = false;
+  // The overlap options follow the orientation of the window, the controller below the screen
+  // (portrait) or beside it is chosen by whichever gives the larger screen
+  bool avoid = gui_state.settings.avoid_overlaping_touchscreen&(w<h? SE_AVOID_OVERLAP_PORTRAIT : SE_AVOID_OVERLAP_LANDSCAPE);
+  if(controller&&min_dim>0){
+    float controller_h = min_dim*0.5f;
+    if(portrait){
+      int nds_layout = gui_state.settings.nds_layout;
+      float nw = w, nh = h;
+      se_compute_draw_lcd_rect(&nw,&nh,&nds_layout);
+      float top_h = h-controller_h-pad;
+      if(top_h>0&&(avoid||nh<=top_h))ah = top_h;
+      else top_aligned = true;
+    }else if(avoid){
+      float side = fminf(w-pad*2,controller_h)*0.5f+pad;
+      if(w-side*2>0){
+        ax = x+side;
+        aw = w-side*2;
+      }
+    }
+  }
+  int nds_layout = gui_state.settings.nds_layout;
+  float lw = aw, lh = ah;
+  se_compute_draw_lcd_rect(&lw,&lh,&nds_layout);
+  float cx = ax+aw*0.5f;
+  float cy = top_aligned? ay+lh*0.5f : ay+ah*0.5f;
+  float dpi_scale = se_dpi_scale();
+  se_draw_lcd_in_rect(ceilf(cx*dpi_scale)/dpi_scale,ceilf(cy*dpi_scale)/dpi_scale,lw,lh,nds_layout);
+}
 static void se_draw_emulated_system_screen(bool preview){
   float scr_w = igGetWindowWidth();
   float scr_h = igGetWindowHeight();
@@ -3549,7 +3643,9 @@ static void se_draw_emulated_system_screen(bool preview){
   float dims[2]={scr_w/se_dpi_scale(),scr_h/se_dpi_scale()};
   bool portrait = false; 
   float min_dim = se_compute_touchscreen_controls_min_dim(scr_w,scr_h, &portrait);
-  bool touch_controller_active = false;
+  bool editing = gui_state.touch_editor_open&&!preview;
+  // The previews in the settings show the layout whenever the controller is enabled
+  bool touch_controller_active = editing? true : preview? !gui_state.settings.touch_controller_off : se_touch_controller_shown();
   if(!touch_controller_active)min_dim = 0;
 
   float native_w = dims[0], native_h = dims[1];
@@ -3559,7 +3655,11 @@ static void se_draw_emulated_system_screen(bool preview){
   igGetWindowPos(&win_pos);
 
   int result =0;
-  if(!gui_state.settings.show_screen_bezel)result = se_draw_theme_region(SE_REGION_NO_BEZEL, win_pos.x,win_pos.y,dims[0],dims[1]);
+  if(gui_state.design_active){
+    se_draw_screen_around_controller(win_pos.x,win_pos.y,dims[0],dims[1],min_dim,portrait,touch_controller_active);
+    result = SE_THEME_DREW_BACKGROUND|SE_THEME_DREW_SCREEN;
+  }
+  if(!result&&!gui_state.settings.show_screen_bezel)result = se_draw_theme_region(SE_REGION_NO_BEZEL, win_pos.x,win_pos.y,dims[0],dims[1]);
 
   if(!result)result =  se_draw_theme_region(portrait?SE_REGION_BEZEL_PORTRAIT:SE_REGION_BEZEL_LANDSCAPE, win_pos.x,win_pos.y,dims[0],dims[1]);
   if(!result)result = se_draw_theme_region(SE_REGION_BEZEL_PORTRAIT, win_pos.x,win_pos.y,dims[0],dims[1]);
@@ -3583,8 +3683,26 @@ static void se_draw_emulated_system_screen(bool preview){
     
     float adj_w = w;
     if(adj_w>min_dim_adj)adj_w=min_dim_adj;
-    se_draw_onscreen_controller(&emu_state, SE_GAMEPAD_LEFT,x,y,adj_w*0.5,h, preview,false);
-    se_draw_onscreen_controller(&emu_state, SE_GAMEPAD_RIGHT,x+w-adj_w*0.5,y,adj_w*0.5,h, preview,false);
+    gui_state.touch_canvas.x = win_pos.x;
+    gui_state.touch_canvas.y = win_pos.y;
+    gui_state.touch_canvas.w = dims[0];
+    gui_state.touch_canvas.h = dims[1];
+    // Custom layouts are kept per window orientation
+    gui_state.touch_canvas.portrait = dims[1]>dims[0];
+    gui_state.touch_canvas.editor = editing;
+    gui_state.touch_canvas.record = !preview;
+    if(!preview){
+      for(int e=0;e<SE_TOUCH_NUM_ELEMENTS;++e){
+        float* r = gui_state.touch_element_bounds[e];
+        r[0] = r[1] = 1e30f;
+        r[2] = r[3] = -1e30f;
+      }
+    }
+    se_draw_onscreen_controller(&emu_state, SE_GAMEPAD_LEFT,x,y,adj_w*0.5,h, preview||editing,false);
+    se_draw_onscreen_controller(&emu_state, SE_GAMEPAD_RIGHT,x+w-adj_w*0.5,y,adj_w*0.5,h, preview||editing,false);
+    gui_state.touch_canvas.editor = false;
+    gui_state.touch_canvas.record = false;
+    if(editing)se_touch_layout_editor_canvas(win_pos.x,win_pos.y,dims[0],dims[1],gui_state.touch_canvas.portrait);
   }
 }
 static uint8_t gba_byte_read(uint64_t address){return gba_read8_debug(&core.gba,address);}
@@ -4573,7 +4691,11 @@ bool se_handle_keybind_settings(int keybind_type, se_keybind_state_t * state){
             bool is_hat = key&SE_HAT_MASK;
             bool is_joy = key&(SE_JOY_NEG_MASK|SE_JOY_POS_MASK);
         #ifdef USE_SDL
-            if(is_hat){
+            // Use the name printed on the controller when the binding is a known button
+            const char* friendly = se_sdl_key_bind_name(gui_state.controller.sdl_gc,key);
+            if(friendly){
+              snprintf(buff,sizeof(buff),"%s",se_localize_and_cache(friendly));
+            }else if(is_hat){
               int hat_id = SB_BFE(key,8,8);
               int hat_val = SB_BFE(key,0,8);
               const char * dir = "";
@@ -4605,7 +4727,14 @@ bool se_handle_keybind_settings(int keybind_type, se_keybind_state_t * state){
           button_label=buff;
           break;
         case SE_BIND_ANALOG: 
-          snprintf(buff, sizeof(buff),se_localize("Analog %d (%0.2f)"), state->bound_id[k],state->value[k]);button_label=buff;
+          {
+        #ifdef USE_SDL
+            const char* friendly = se_sdl_axis_bind_name(gui_state.controller.sdl_gc,state->bound_id[k]);
+            if(friendly)snprintf(buff,sizeof(buff),"%s (%0.2f)",se_localize_and_cache(friendly),state->value[k]);
+            else
+        #endif
+            snprintf(buff, sizeof(buff),se_localize("Analog %d (%0.2f)"), state->bound_id[k],state->value[k]);
+          }
           button_label=buff;
           break;
         #endif
@@ -4729,14 +4858,52 @@ static const char* se_design_touch_label_for(int input_id, int hold_id, int turb
     case SE_KEY_R: return "R";
     case SE_KEY_START: return "START";
     case SE_KEY_SELECT: return "SELECT";
+    case SE_KEY_EMU_REWIND: return ICON_FK_BACKWARD;
+    case SE_KEY_EMU_FF_2X: return ICON_FK_FORWARD;
   }
   return NULL;
+}
+// The on-screen controller is shown after the screen is touched, or all the time when
+// "Hide when inactive" is off, unless the user turned it off.
+static bool se_touch_controller_shown(){
+  if(gui_state.settings.touch_controller_off)return false;
+  return gui_state.last_touch_time>=0||gui_state.settings.auto_hide_touch_controls==false;
+}
+static const char* se_touch_element_name(int element){
+  switch(element){
+    case SE_TOUCH_DPAD: return "D-Pad";
+    case SE_TOUCH_FACE: return "Face Buttons";
+    case SE_TOUCH_L: return "L";
+    case SE_TOUCH_R: return "R";
+    case SE_TOUCH_START: return "Start";
+    case SE_TOUCH_SELECT: return "Select";
+    case SE_TOUCH_TURBO: return "Turbo";
+    case SE_TOUCH_HOLD: return "Hold";
+    case SE_TOUCH_REWIND: return "Rewind";
+    case SE_TOUCH_FAST_FORWARD: return "Fast Forward";
+  }
+  return "";
+}
+// Offset (fractions of the screen area) and scale of an element in the current orientation,
+// including a drag in progress in the layout editor
+static void se_touch_element_transform(int element, float* dx, float* dy, float* scale){
+  const float* t = gui_state.settings.touch_layout[gui_state.touch_canvas.portrait? 1:0][element];
+  *dx = t[0]; *dy = t[1];
+  *scale = t[2]>0? t[2] : 1.f;
+  if(gui_state.touch_canvas.editor&&gui_state.touch_editor_dragging&&gui_state.touch_editor_selected==element){
+    *dx += gui_state.touch_editor_drag[0];
+    *dy += gui_state.touch_editor_drag[1];
+  }
 }
 void se_draw_onscreen_controller(sb_emu_state_t*state, int mode, float win_x, float win_y, float win_w, float win_h, bool preview, bool center){  
   if (!show_ui)
     return;
-  if(state->run_mode!=SB_MODE_RUN&&preview==false)return;
-  if(gui_state.block_touchscreen && !preview)return; 
+  // The layout editor shows the controller while the game is paused and never presses buttons
+  bool editor = gui_state.touch_canvas.editor;
+  // Also drawn while rewinding, so a held Rewind button keeps rewinding
+  bool running = state->run_mode==SB_MODE_RUN||state->run_mode==SB_MODE_REWIND;
+  if(!running&&preview==false&&!editor)return;
+  if(gui_state.block_touchscreen && !preview && !editor)return;
 
   //Split the region in half if this is a both LEFT/RIGHT command
   float right_x_off = 0; 
@@ -4762,6 +4929,7 @@ void se_draw_onscreen_controller(sb_emu_state_t*state, int mode, float win_x, fl
   if(!gui_state.settings.auto_hide_touch_controls)opacity=1;   
   if(opacity<=0){opacity=0;}
   opacity*=gui_state.settings.touch_controls_opacity;
+  if(editor)opacity = fmaxf(opacity,0.6f);
 
   line_color|=(int)(opacity*0xff)<<24;
   line_color2|=(int)(opacity*0xff)<<24;
@@ -4780,22 +4948,28 @@ void se_draw_onscreen_controller(sb_emu_state_t*state, int mode, float win_x, fl
   float points[max_points][2]={0};
 
   int p = 0;
-  //if(IsMouseButtonDown(0))points[p++] = GetMousePosition();
-  for(int i=0; i<SAPP_MAX_TOUCHPOINTS;++i){
+  for(int i=0; i<SAPP_MAX_TOUCHPOINTS&&!editor;++i){
     if(p<max_points&&gui_state.touch_points[i].active&&!gui_state.block_touchscreen){
       points[p][0]=gui_state.touch_points[i].pos[0]/se_dpi_scale();
       points[p][1]=gui_state.touch_points[i].pos[1]/se_dpi_scale();
       ++p;
     }
   }
+  // While the controller is visible a mouse click works like a touch
+  if(!editor&&!preview&&p<max_points&&opacity>0&&gui_state.mouse_button[0]&&igIsWindowHovered(ImGuiHoveredFlags_None)){
+    points[p][0]=gui_state.mouse_pos[0]/se_dpi_scale();
+    points[p][1]=gui_state.mouse_pos[1]/se_dpi_scale();
+    ++p;
+  }
   ImDrawList*dl= igGetWindowDrawList();
 
   enum {ROUND,DPAD,RECT};
-  typedef struct{int input_id; int theme_region; int mode; bool enable; int type; float pos[2]; float size[2];}se_button_info_t;
+  typedef struct{int input_id; int theme_region; int mode; bool enable; int type; float pos[2]; float size[2]; int element;}se_button_info_t;
 
   bool abxy= emu_state.system==SYSTEM_NDS;
   bool lr_en = emu_state.system!=SYSTEM_GB;
   bool ht_en = gui_state.settings.touch_controls_show_turbo;
+  bool sp_en = gui_state.settings.touch_controls_show_speed;
   const int SE_KEY_HOLD = -1; 
   const int SE_KEY_TURBO = -2; 
   float full_h = win_h/win_w;
@@ -4830,26 +5004,91 @@ void se_draw_onscreen_controller(sb_emu_state_t*state, int mode, float win_x, fl
   float hold_turbo_w = 0.3;
   if(hold_turbo_w>full_row_w)hold_turbo_w = full_row_w; 
   if(start_sel_row_w>full_row_w)start_sel_row_w = full_row_w;
+  // Rewind and Fast Forward share the top row with L and R
+  float lr_w = full_row_w, speed_w = full_row_w;
+  if(sp_en&&lr_en&&full_row_w>0.6f){
+    lr_w = full_row_w*0.6f;
+    speed_w = full_row_w-lr_w-0.02f;
+  }
+  float rewind_x = lr_en? lr_w+0.02f : 0.f;
+  float fast_forward_x = lr_en? 1.f-lr_w-0.02f-speed_w : 1.f-speed_w;
   se_button_info_t buttons[]={
-    {SE_KEY_L      ,SE_REGION_KEY_L,      SE_GAMEPAD_LEFT, lr_en,RECT, {0+rect_offset,lr_y}, {full_row_w,row_h}}, 
-    {SE_KEY_UP     ,SE_REGION_DPAD_CENTER,SE_GAMEPAD_LEFT, true, DPAD, {0.5,dpad_y}, {dpad_r,0.8}},
-    {SE_KEY_SELECT ,SE_REGION_KEY_SELECT, SE_GAMEPAD_LEFT,true, RECT, {0+rect_offset,start_sel_row_y}, {start_sel_row_w,row_h}},
-    {SE_KEY_HOLD   ,SE_REGION_KEY_HOLD,   SE_GAMEPAD_LEFT,ht_en,RECT, {0.68+0.3-hold_turbo_w+rect_offset,start_sel_row_y}, {hold_turbo_w,row_h}},
-    {SE_KEY_R      ,SE_REGION_KEY_R,      SE_GAMEPAD_RIGHT,lr_en,RECT, {0.01+0.99-full_row_w-rect_offset,lr_y}, {full_row_w,row_h}},
-    {SE_KEY_A      ,SE_REGION_KEY_A,      SE_GAMEPAD_RIGHT,true, ROUND,{a_pos[0],a_pos[1]},{button_r,0.2}},
-    {SE_KEY_B      ,SE_REGION_KEY_B,      SE_GAMEPAD_RIGHT,true, ROUND,{b_pos[0],b_pos[1]},{button_r,0.2}},
-    {SE_KEY_X      ,SE_REGION_KEY_X,      SE_GAMEPAD_RIGHT,abxy, ROUND,{0.5,0.5*full_h-button_r*1.5},{button_r,0.2}},
-    {SE_KEY_Y      ,SE_REGION_KEY_Y,      SE_GAMEPAD_RIGHT,abxy, ROUND,{0.5-button_r*1.5,0.5*full_h},{button_r,0.2}},
-    {SE_KEY_START  ,SE_REGION_KEY_START,  SE_GAMEPAD_RIGHT, true, RECT, {(ht_en?0.33:0.00)+(ht_en?0.67:1.01)-start_sel_row_w-rect_offset,start_sel_row_y}, {start_sel_row_w,row_h}},
-    {SE_KEY_TURBO  ,SE_REGION_KEY_TURBO,  SE_GAMEPAD_RIGHT, ht_en,RECT, {0.01-rect_offset,start_sel_row_y}, {hold_turbo_w,row_h}},
+    {SE_KEY_L      ,SE_REGION_KEY_L,      SE_GAMEPAD_LEFT, lr_en,RECT, {0+rect_offset,lr_y}, {lr_w,row_h}, SE_TOUCH_L},
+    {SE_KEY_EMU_REWIND,SE_REGION_KEY_RECT_BLANK,SE_GAMEPAD_LEFT,sp_en,RECT,{rewind_x+rect_offset,lr_y},{speed_w,row_h},SE_TOUCH_REWIND},
+    {SE_KEY_UP     ,SE_REGION_DPAD_CENTER,SE_GAMEPAD_LEFT, true, DPAD, {0.5,dpad_y}, {dpad_r,0.8}, SE_TOUCH_DPAD},
+    {SE_KEY_SELECT ,SE_REGION_KEY_SELECT, SE_GAMEPAD_LEFT,true, RECT, {0+rect_offset,start_sel_row_y}, {start_sel_row_w,row_h}, SE_TOUCH_SELECT},
+    {SE_KEY_HOLD   ,SE_REGION_KEY_HOLD,   SE_GAMEPAD_LEFT,ht_en,RECT, {0.68+0.3-hold_turbo_w+rect_offset,start_sel_row_y}, {hold_turbo_w,row_h}, SE_TOUCH_HOLD},
+    {SE_KEY_R      ,SE_REGION_KEY_R,      SE_GAMEPAD_RIGHT,lr_en,RECT, {0.01+0.99-lr_w-rect_offset,lr_y}, {lr_w,row_h}, SE_TOUCH_R},
+    {SE_KEY_EMU_FF_2X,SE_REGION_KEY_RECT_BLANK,SE_GAMEPAD_RIGHT,sp_en,RECT,{fast_forward_x-rect_offset,lr_y},{speed_w,row_h},SE_TOUCH_FAST_FORWARD},
+    {SE_KEY_A      ,SE_REGION_KEY_A,      SE_GAMEPAD_RIGHT,true, ROUND,{a_pos[0],a_pos[1]},{button_r,0.2}, SE_TOUCH_FACE},
+    {SE_KEY_B      ,SE_REGION_KEY_B,      SE_GAMEPAD_RIGHT,true, ROUND,{b_pos[0],b_pos[1]},{button_r,0.2}, SE_TOUCH_FACE},
+    {SE_KEY_X      ,SE_REGION_KEY_X,      SE_GAMEPAD_RIGHT,abxy, ROUND,{0.5,0.5*full_h-button_r*1.5},{button_r,0.2}, SE_TOUCH_FACE},
+    {SE_KEY_Y      ,SE_REGION_KEY_Y,      SE_GAMEPAD_RIGHT,abxy, ROUND,{0.5-button_r*1.5,0.5*full_h},{button_r,0.2}, SE_TOUCH_FACE},
+    {SE_KEY_START  ,SE_REGION_KEY_START,  SE_GAMEPAD_RIGHT, true, RECT, {(ht_en?0.33:0.00)+(ht_en?0.67:1.01)-start_sel_row_w-rect_offset,start_sel_row_y}, {start_sel_row_w,row_h}, SE_TOUCH_START},
+    {SE_KEY_TURBO  ,SE_REGION_KEY_TURBO,  SE_GAMEPAD_RIGHT, ht_en,RECT, {0.01-rect_offset,start_sel_row_y}, {hold_turbo_w,row_h}, SE_TOUCH_TURBO},
   };
+  enum{num_buttons = sizeof(buttons)/sizeof(buttons[0])};
+
+  // Absolute geometry of the buttons as center and half extents
+  float geo[num_buttons][4];
+  float anchors[SE_TOUCH_NUM_ELEMENTS][3];
+  memset(anchors,0,sizeof(anchors));
+  for(int bi=0;bi<num_buttons;++bi){
+    se_button_info_t* b = &buttons[bi];
+    float x_off = (b->mode&SE_GAMEPAD_RIGHT)? right_x_off : 0;
+    float* g = geo[bi];
+    if(b->type==RECT){
+      g[2] = b->size[0]*win_w*0.5f;
+      g[3] = b->size[1]*win_w*0.5f;
+      g[0] = b->pos[0]*win_w+win_x+x_off+g[2];
+      g[1] = b->pos[1]*win_w+win_y+g[3];
+    }else{
+      g[2] = g[3] = b->size[0]*win_w;
+      g[0] = x_off+win_x+b->pos[0]*win_w;
+      g[1] = win_y+b->pos[1]*win_w;
+    }
+    if(!(mode&b->mode)||!b->enable)continue;
+    anchors[b->element][0]+=g[0];
+    anchors[b->element][1]+=g[1];
+    anchors[b->element][2]+=1;
+  }
+  // Custom layout: each element moves and scales around its center, and is kept on screen
+  float cx0 = gui_state.touch_canvas.x, cy0 = gui_state.touch_canvas.y;
+  float cw = gui_state.touch_canvas.w, ch = gui_state.touch_canvas.h;
+  for(int bi=0;bi<num_buttons&&cw>0&&ch>0;++bi){
+    se_button_info_t* b = &buttons[bi];
+    if(!(mode&b->mode)||!b->enable)continue;
+    float* a = anchors[b->element];
+    float ax = a[0]/a[2], ay = a[1]/a[2];
+    float dx,dy,scale;
+    se_touch_element_transform(b->element,&dx,&dy,&scale);
+    float tx = ax+dx*cw, ty = ay+dy*ch;
+    if(tx<cx0)tx = cx0;
+    if(tx>cx0+cw)tx = cx0+cw;
+    if(ty<cy0)ty = cy0;
+    if(ty>cy0+ch)ty = cy0+ch;
+    float* g = geo[bi];
+    g[0] = tx+(g[0]-ax)*scale;
+    g[1] = ty+(g[1]-ay)*scale;
+    g[2]*= scale;
+    g[3]*= scale;
+    if(gui_state.touch_canvas.record){
+      gui_state.touch_element_anchor[b->element][0] = ax;
+      gui_state.touch_element_anchor[b->element][1] = ay;
+      float* r = gui_state.touch_element_bounds[b->element];
+      r[0] = fminf(r[0],g[0]-g[2]); r[1] = fminf(r[1],g[1]-g[3]);
+      r[2] = fmaxf(r[2],g[0]+g[2]); r[3] = fmaxf(r[3],g[1]+g[3]);
+    }
+  }
   bool touch_only_key_pressed[3] = {0};
 
   int button_pressed_mask = 0;
 
-  for(int bi =0; bi<sizeof(buttons)/sizeof(buttons[0]); ++bi){
+  for(int bi =0; bi<num_buttons; ++bi){
     se_button_info_t * b = &buttons[bi];
     if(!(mode&b->mode)||!b->enable)continue;
+    const float* g = geo[bi];
+    bool speed_button = b->input_id==SE_KEY_EMU_REWIND||b->input_id==SE_KEY_EMU_FF_2X;
 
     ImU32 col = line_color;
     ImU32 pressed_color = col;
@@ -4871,24 +5110,23 @@ void se_draw_onscreen_controller(sb_emu_state_t*state, int mode, float win_x, fl
       col = turbo_color;
       force_pressed= press_turbo;
     }
-    if(b->input_id>=0&&force_pressed){
+    if(b->input_id>=0&&force_pressed&&!editor){
       emu_state.joy.inputs[b->input_id]=1;
     }
-    float x_off = 0;
-    if(b->mode&SE_GAMEPAD_RIGHT)x_off+=right_x_off;
-    bool show_labels = gui_state.settings.touch_screen_show_button_labels;
+    // Rewind and Fast Forward have no artwork in the skins, they always show their icon
+    bool show_labels = gui_state.settings.touch_screen_show_button_labels||speed_button;
     if(b->type ==RECT){
       int region =b->theme_region;
       bool pressed = b->input_id>=0 && emu_state.prev_frame_joy.inputs[b->input_id]>0.1;
       
-      float x = b->pos[0]*win_w+win_x+x_off;
-      float y = b->pos[1]*win_w+win_y;
-      float w = b->size[0]*win_w;
-      float h = b->size[1]*win_w;
+      float x = g[0]-g[2];
+      float y = g[1]-g[3];
+      float w = g[2]*2;
+      float h = g[3]*2;
       for(int i = 0;i<p;++i){
         int dx = points[i][0]-x;
         int dy = points[i][1]-y;
-        if(dx>=-w*0.05 && dx<=w*1.05 && dy>=h*0.05 && dy<=h*1.05 ){
+        if(dx>=-w*0.05 && dx<=w*1.05 && dy>=-h*0.05 && dy<=h*1.05 ){
           col = pressed_color;
           if(b->input_id>=0){
             button_pressed_mask|=1<<bi;
@@ -4921,16 +5159,16 @@ void se_draw_onscreen_controller(sb_emu_state_t*state, int mode, float win_x, fl
           ImDrawList_AddRectFilled(dl,(ImVec2){x,y},(ImVec2){x+w,y+h},sel_color,0,ImDrawCornerFlags_None);  
         }
       }
+      if(speed_button&&!gui_state.design_active){
+        se_design_draw_touch_label(dl,x+w*0.5f,y+h*0.5f,h*0.5f,w*0.8f,line_color,se_design_touch_label_for(b->input_id,SE_KEY_HOLD,SE_KEY_TURBO));
+      }
     }else if(b->type==ROUND){
       ImU32 col = SB_BFE(gui_state.touch_controls.hold_toggle,bi,1)?hold_color: SB_BFE(gui_state.touch_controls.turbo_toggle,bi,1)? turbo_color: line_color;
       bool pressed = b->input_id>=0 && emu_state.prev_frame_joy.inputs[b->input_id]>0.1;
       int region = b->theme_region; 
       
-      float pos[2] ={
-        x_off+win_x+b->pos[0]*win_w,
-        win_y+b->pos[1]*win_w
-      };
-      float r = win_w*b->size[0];
+      float pos[2] ={g[0],g[1]};
+      float r = g[2];
       
       for(int i = 0;i<p;++i){
         int dx = points[i][0]-pos[0];
@@ -4995,11 +5233,8 @@ void se_draw_onscreen_controller(sb_emu_state_t*state, int mode, float win_x, fl
       }
 
     }else if(b->type==DPAD){
-      float dpad_pos[2]={
-        x_off+win_x+b->pos[0]*win_w,
-        win_y+b->pos[1]*win_w
-      };
-      float dpad_sz1 = b->size[0]*win_w;
+      float dpad_pos[2]={g[0],g[1]};
+      float dpad_sz1 = g[2];
       float dpad_sz0 = dpad_sz1*0.29;
       bool up = false, down= false, left = false, right = false; 
       for(int i = 0;i<p;++i){
@@ -5066,7 +5301,7 @@ void se_draw_onscreen_controller(sb_emu_state_t*state, int mode, float win_x, fl
         if((draw_dpad_code%3)==2)ImDrawList_AddRectFilled(dl,(ImVec2){dpad_pos[0]+dpad_sz0,dpad_pos[1]-dpad_sz0},(ImVec2){dpad_pos[0]+dpad_sz1,dpad_pos[1]+dpad_sz0},sel_color,0,ImDrawCornerFlags_None);
         }
       }
-      if(dpad_code!=4){
+      if(dpad_code!=4&&!editor){
         if((dpad_code%3)==0)state->joy.inputs[SE_KEY_LEFT]+=1.0;
         if((dpad_code%3)==2)state->joy.inputs[SE_KEY_RIGHT]+=1.0;
         if(dpad_code<3)state->joy.inputs[SE_KEY_UP]+=1.0;
@@ -6810,13 +7045,18 @@ void se_imgui_theme()
   });
 #endif
 #ifdef SE_PLATFORM_ANDROID
+// Binds the face buttons for the chosen layout. Android reports A as the bottom face button.
+static void se_set_controller_face_binds(se_controller_state_t* cont){
+  bool position = gui_state.settings.controller_face_layout==SE_FACE_LAYOUT_POSITION;
+  cont->key.bound_id[SE_KEY_A]= position? AKEYCODE_BUTTON_B : AKEYCODE_BUTTON_A;
+  cont->key.bound_id[SE_KEY_B]= position? AKEYCODE_BUTTON_A : AKEYCODE_BUTTON_B;
+  cont->key.bound_id[SE_KEY_X]= position? AKEYCODE_BUTTON_Y : AKEYCODE_BUTTON_X;
+  cont->key.bound_id[SE_KEY_Y]= position? AKEYCODE_BUTTON_X : AKEYCODE_BUTTON_Y;
+}
 void se_set_default_controller_binds(se_controller_state_t* cont){
   if(!cont)return;
   for(int i=0;i<SE_NUM_KEYBINDS;++i)cont->key.bound_id[i]=-1;
-  cont->key.bound_id[SE_KEY_A]= AKEYCODE_BUTTON_A;
-  cont->key.bound_id[SE_KEY_B]= AKEYCODE_BUTTON_B;
-  cont->key.bound_id[SE_KEY_X]= AKEYCODE_BUTTON_X;
-  cont->key.bound_id[SE_KEY_Y]= AKEYCODE_BUTTON_Y;
+  se_set_controller_face_binds(cont);
   cont->key.bound_id[SE_KEY_L]= AKEYCODE_BUTTON_L1;
   cont->key.bound_id[SE_KEY_R]= AKEYCODE_BUTTON_R1;
   cont->key.bound_id[SE_KEY_UP]= AKEYCODE_DPAD_UP;
@@ -6897,15 +7137,114 @@ int se_get_sdl_axis_bind(SDL_GameController* gc, int button){
   if(bind.bindType!=SDL_CONTROLLER_BINDTYPE_AXIS)return -1;
   else return bind.value.axis;
 }
+static bool se_sdl_is_playstation(SDL_GameControllerType type){
+  return type==SDL_CONTROLLER_TYPE_PS3||type==SDL_CONTROLLER_TYPE_PS4||type==SDL_CONTROLLER_TYPE_PS5;
+}
+static bool se_sdl_is_nintendo(SDL_GameControllerType type){
+  return type==SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_PRO;
+}
+static const char* se_sdl_controller_type_name(SDL_GameControllerType type){
+  switch(type){
+    case SDL_CONTROLLER_TYPE_XBOX360: return "Xbox 360 Controller";
+    case SDL_CONTROLLER_TYPE_XBOXONE: return "Xbox Controller";
+    case SDL_CONTROLLER_TYPE_PS3: return "PlayStation 3 Controller";
+    case SDL_CONTROLLER_TYPE_PS4: return "PlayStation 4 Controller";
+    case SDL_CONTROLLER_TYPE_PS5: return "PlayStation 5 Controller";
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_PRO: return "Nintendo Switch Controller";
+    case SDL_CONTROLLER_TYPE_AMAZON_LUNA: return "Amazon Luna Controller";
+    case SDL_CONTROLLER_TYPE_GOOGLE_STADIA: return "Stadia Controller";
+    default: return NULL;
+  }
+}
+// Names of the controller's buttons as printed on it
+static const char* se_sdl_button_name(SDL_GameControllerType type, int button){
+  bool ps = se_sdl_is_playstation(type), nin = se_sdl_is_nintendo(type);
+  bool xbox_one = type==SDL_CONTROLLER_TYPE_XBOXONE;
+  switch(button){
+    case SDL_CONTROLLER_BUTTON_A: return ps? "Cross" : "A";
+    case SDL_CONTROLLER_BUTTON_B: return ps? "Circle" : "B";
+    case SDL_CONTROLLER_BUTTON_X: return ps? "Square" : "X";
+    case SDL_CONTROLLER_BUTTON_Y: return ps? "Triangle" : "Y";
+    case SDL_CONTROLLER_BUTTON_BACK:
+      if(ps)return type==SDL_CONTROLLER_TYPE_PS5? "Create" : type==SDL_CONTROLLER_TYPE_PS4? "Share" : "Select";
+      return nin? "Minus" : xbox_one? "View" : "Back";
+    case SDL_CONTROLLER_BUTTON_GUIDE: return ps? "PS" : nin? "Home" : "Guide";
+    case SDL_CONTROLLER_BUTTON_START:
+      if(ps)return type==SDL_CONTROLLER_TYPE_PS3? "Start" : "Options";
+      return nin? "Plus" : xbox_one? "Menu" : "Start";
+    case SDL_CONTROLLER_BUTTON_LEFTSTICK: return ps? "L3" : "Left Stick";
+    case SDL_CONTROLLER_BUTTON_RIGHTSTICK: return ps? "R3" : "Right Stick";
+    case SDL_CONTROLLER_BUTTON_LEFTSHOULDER: return ps? "L1" : nin? "L" : "LB";
+    case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: return ps? "R1" : nin? "R" : "RB";
+    case SDL_CONTROLLER_BUTTON_DPAD_UP: return "D-Pad Up";
+    case SDL_CONTROLLER_BUTTON_DPAD_DOWN: return "D-Pad Down";
+    case SDL_CONTROLLER_BUTTON_DPAD_LEFT: return "D-Pad Left";
+    case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: return "D-Pad Right";
+    case SDL_CONTROLLER_BUTTON_MISC1: return ps? "Mute" : nin? "Capture" : "Share";
+    case SDL_CONTROLLER_BUTTON_PADDLE1: return "Paddle 1";
+    case SDL_CONTROLLER_BUTTON_PADDLE2: return "Paddle 2";
+    case SDL_CONTROLLER_BUTTON_PADDLE3: return "Paddle 3";
+    case SDL_CONTROLLER_BUTTON_PADDLE4: return "Paddle 4";
+    case SDL_CONTROLLER_BUTTON_TOUCHPAD: return "Touchpad";
+  }
+  return NULL;
+}
+static const char* se_sdl_axis_name(SDL_GameControllerType type, int axis, int direction){
+  bool ps = se_sdl_is_playstation(type), nin = se_sdl_is_nintendo(type);
+  switch(axis){
+    case SDL_CONTROLLER_AXIS_LEFTX: return direction<0? "Left Stick Left" : direction>0? "Left Stick Right" : "Left Stick X";
+    case SDL_CONTROLLER_AXIS_LEFTY: return direction<0? "Left Stick Up" : direction>0? "Left Stick Down" : "Left Stick Y";
+    case SDL_CONTROLLER_AXIS_RIGHTX: return direction<0? "Right Stick Left" : direction>0? "Right Stick Right" : "Right Stick X";
+    case SDL_CONTROLLER_AXIS_RIGHTY: return direction<0? "Right Stick Up" : direction>0? "Right Stick Down" : "Right Stick Y";
+    case SDL_CONTROLLER_AXIS_TRIGGERLEFT: return ps? "L2" : nin? "ZL" : "LT";
+    case SDL_CONTROLLER_AXIS_TRIGGERRIGHT: return ps? "R2" : nin? "ZR" : "RT";
+  }
+  return NULL;
+}
+// Name of a key binding (joystick button, hat or axis direction) as the controller labels it
+static const char* se_sdl_key_bind_name(SDL_GameController* gc, int key){
+  if(!gc||key<0)return NULL;
+  SDL_GameControllerType type = SDL_GameControllerGetType(gc);
+  if(key&(SE_JOY_POS_MASK|SE_JOY_NEG_MASK)){
+    int axis = SB_BFE(key,0,16);
+    for(int a=0;a<SDL_CONTROLLER_AXIS_MAX;++a){
+      if(se_get_sdl_axis_bind(gc,a)==axis)return se_sdl_axis_name(type,a,(key&SE_JOY_NEG_MASK)? -1 : 1);
+    }
+    return NULL;
+  }
+  // Only buttons and hat directions, a button mapped to half an axis has no unique name
+  for(int b=0;b<SDL_CONTROLLER_BUTTON_MAX;++b){
+    SDL_GameControllerButtonBind bind = SDL_GameControllerGetBindForButton(gc,(SDL_GameControllerButton)b);
+    if(bind.bindType!=SDL_CONTROLLER_BINDTYPE_BUTTON&&bind.bindType!=SDL_CONTROLLER_BINDTYPE_HAT)continue;
+    if(se_get_sdl_key_bind(gc,b,0)==key)return se_sdl_button_name(type,b);
+  }
+  return NULL;
+}
+static const char* se_sdl_axis_bind_name(SDL_GameController* gc, int axis){
+  if(!gc||axis<0)return NULL;
+  SDL_GameControllerType type = SDL_GameControllerGetType(gc);
+  for(int a=0;a<SDL_CONTROLLER_AXIS_MAX;++a){
+    if(se_get_sdl_axis_bind(gc,a)==axis)return se_sdl_axis_name(type,a,0);
+  }
+  return NULL;
+}
+// Binds the face buttons for the chosen layout. SDL reports Nintendo controllers by their
+// labels, where A already is the right button like on the GBA and DS.
+static void se_set_controller_face_binds(se_controller_state_t* cont){
+  SDL_GameController * gc = cont->sdl_gc;
+  if(!gc)return;
+  bool swap = gui_state.settings.controller_face_layout==SE_FACE_LAYOUT_POSITION&&!se_sdl_is_nintendo(SDL_GameControllerGetType(gc));
+  cont->key.bound_id[SE_KEY_A]= se_get_sdl_key_bind(gc,swap? SDL_CONTROLLER_BUTTON_B : SDL_CONTROLLER_BUTTON_A,SE_JOY_POS_MASK);
+  cont->key.bound_id[SE_KEY_B]= se_get_sdl_key_bind(gc,swap? SDL_CONTROLLER_BUTTON_A : SDL_CONTROLLER_BUTTON_B,SE_JOY_POS_MASK);
+  cont->key.bound_id[SE_KEY_X]= se_get_sdl_key_bind(gc,swap? SDL_CONTROLLER_BUTTON_Y : SDL_CONTROLLER_BUTTON_X,SE_JOY_POS_MASK);
+  cont->key.bound_id[SE_KEY_Y]= se_get_sdl_key_bind(gc,swap? SDL_CONTROLLER_BUTTON_X : SDL_CONTROLLER_BUTTON_Y,SE_JOY_POS_MASK);
+}
 void se_set_default_controller_binds(se_controller_state_t* cont){
   if(!cont ||!cont->sdl_gc)return;
   SDL_GameController * gc = cont->sdl_gc;
   SDL_GameControllerUpdate();
   for(int i=0;i<SE_NUM_KEYBINDS;++i)cont->key.bound_id[i]=-1;
-  cont->key.bound_id[SE_KEY_A]= se_get_sdl_key_bind(gc,SDL_CONTROLLER_BUTTON_A,SE_JOY_POS_MASK);
-  cont->key.bound_id[SE_KEY_B]= se_get_sdl_key_bind(gc,SDL_CONTROLLER_BUTTON_B,SE_JOY_POS_MASK);
-  cont->key.bound_id[SE_KEY_X]= se_get_sdl_key_bind(gc,SDL_CONTROLLER_BUTTON_X,SE_JOY_POS_MASK);
-  cont->key.bound_id[SE_KEY_Y]= se_get_sdl_key_bind(gc,SDL_CONTROLLER_BUTTON_Y,SE_JOY_POS_MASK);
+  se_set_controller_face_binds(cont);
   cont->key.bound_id[SE_KEY_L]= se_get_sdl_key_bind(gc,SDL_CONTROLLER_BUTTON_LEFTSHOULDER,SE_JOY_POS_MASK);
   cont->key.bound_id[SE_KEY_R]= se_get_sdl_key_bind(gc,SDL_CONTROLLER_BUTTON_RIGHTSHOULDER,SE_JOY_POS_MASK);
   cont->key.bound_id[SE_KEY_UP]= se_get_sdl_key_bind(gc,SDL_CONTROLLER_BUTTON_DPAD_UP,SE_JOY_POS_MASK);
@@ -6943,10 +7282,48 @@ void se_set_new_controller(se_controller_state_t* cont, int index){
 }
 #endif
 
+static void se_save_controller_bindings(se_controller_state_t* cont, const char* name){
+  int32_t bind_map[SE_NUM_BINDS_ALLOC*2];
+  for(int i=0;i<SE_NUM_BINDS_ALLOC;++i){
+    bind_map[i]= cont->key.bound_id[i];
+    bind_map[i+SE_NUM_BINDS_ALLOC]= cont->analog.bound_id[i];
+  }
+  char settings_path[SB_FILE_PATH_SIZE];
+  snprintf(settings_path,SB_FILE_PATH_SIZE,"%s%s-bindings.bin",se_get_pref_path(),name);
+  sb_save_file_data(settings_path,(uint8_t*)bind_map,sizeof(bind_map));
+  se_emscripten_flush_fs();
+}
+// Changes which button of a game controller is A and rebinds the face buttons of the
+// connected controller
+SKYEMU_API void se_set_controller_face_layout(uint32_t layout){
+  if(layout>=SE_FACE_LAYOUT_COUNT||layout==gui_state.settings.controller_face_layout)return;
+  gui_state.settings.controller_face_layout = layout;
+  se_controller_state_t* cont = &gui_state.controller;
+#if defined(USE_SDL)
+  if(!cont->sdl_gc||!cont->sdl_joystick)return;
+  se_set_controller_face_binds(cont);
+  se_save_controller_bindings(cont,SDL_JoystickName(cont->sdl_joystick));
+#elif defined(SE_PLATFORM_ANDROID)
+  se_set_controller_face_binds(cont);
+  se_save_controller_bindings(cont,SE_ANDROID_CONTROLLER_NAME);
+#else
+  (void)cont;
+#endif
+}
+SKYEMU_API uint32_t se_get_controller_face_layout(void){
+  return gui_state.settings.controller_face_layout;
+}
 void se_draw_controller_config(gui_state_t* gui){
   se_section(ICON_FK_GAMEPAD " Controllers");
   ImGuiStyle* style = igGetStyle();
   se_controller_state_t *cont = &gui->controller;
+  // Can be chosen before a controller is connected, it is used for its default bindings
+  int face_layout = gui_state.settings.controller_face_layout;
+  se_field_label("Face Buttons");igSameLine(SE_FIELD_INDENT,0);
+  igPushItemWidth(-1);
+  se_combo_str("##FaceButtons",&face_layout,"Match the Labels\0Match GBA Positions\0",0);
+  igPopItemWidth();
+  se_set_controller_face_layout(face_layout);
 #if USE_SDL
   const char* cont_name = "No Controller";
   if(cont->sdl_joystick){
@@ -6982,6 +7359,10 @@ void se_draw_controller_config(gui_state_t* gui){
 #else
   const char* cont_name = SE_ANDROID_CONTROLLER_NAME;
 #endif
+#ifdef USE_SDL
+  const char* type_name = cont->sdl_gc? se_sdl_controller_type_name(SDL_GameControllerGetType(cont->sdl_gc)) : NULL;
+  if(type_name)se_text_disabled("%s",se_localize_and_cache(type_name));
+#endif
   bool modified = se_handle_keybind_settings(SE_BIND_KEY,&(cont->key));
   modified |= se_handle_keybind_settings(SE_BIND_ANALOG,&(cont->analog));
   if(se_button("Reset Default Controller Bindings",(ImVec2){0,0})){
@@ -6990,17 +7371,7 @@ void se_draw_controller_config(gui_state_t* gui){
 #endif // TARGET_OS_MACCATALYST
     modified=true;
   }
-  if(modified){
-    int32_t bind_map[SE_NUM_BINDS_ALLOC*2];
-    for(int i=0;i<SE_NUM_BINDS_ALLOC;++i){
-      bind_map[i]= cont->key.bound_id[i];
-      bind_map[i+SE_NUM_BINDS_ALLOC]= cont->analog.bound_id[i];
-    }
-    char settings_path[SB_FILE_PATH_SIZE];
-    snprintf(settings_path,SB_FILE_PATH_SIZE,"%s%s-bindings.bin",se_get_pref_path(),cont_name);
-    sb_save_file_data(settings_path,(uint8_t*)bind_map,sizeof(bind_map));
-    se_emscripten_flush_fs();
-  }
+  if(modified)se_save_controller_bindings(cont,cont_name);
 #ifdef USE_SDL
   if(SDL_JoystickHasRumble(cont->sdl_joystick)){se_text("Rumble Supported");
   }else se_text("Rumble Not Supported");
@@ -7034,6 +7405,135 @@ void se_pop_disabled(){
    else igPopStyleColor(1);
    igPopItemFlag();
 }
+static float* se_touch_layout_element(bool portrait, int element){
+  return gui_state.settings.touch_layout[portrait? 1:0][element];
+}
+// Moves the dragged element by the drag in progress, keeping its center on screen
+static void se_touch_layout_commit_drag(){
+  if(!gui_state.touch_editor_dragging)return;
+  int e = gui_state.touch_editor_selected;
+  const float* c = gui_state.touch_editor_canvas;
+  if(e>=0&&c[2]>0&&c[3]>0){
+    float* t = se_touch_layout_element(gui_state.touch_editor_portrait,e);
+    float ax = gui_state.touch_element_anchor[e][0], ay = gui_state.touch_element_anchor[e][1];
+    float x = ax+(t[0]+gui_state.touch_editor_drag[0])*c[2];
+    float y = ay+(t[1]+gui_state.touch_editor_drag[1])*c[3];
+    x = fminf(fmaxf(x,c[0]),c[0]+c[2]);
+    y = fminf(fmaxf(y,c[1]),c[1]+c[3]);
+    t[0] = (x-ax)/c[2];
+    t[1] = (y-ay)/c[3];
+  }
+  gui_state.touch_editor_dragging = false;
+  gui_state.touch_editor_drag[0] = gui_state.touch_editor_drag[1] = 0;
+}
+static void se_open_touch_layout_editor(){
+  gui_state.touch_editor_open = true;
+  gui_state.touch_editor_selected = -1;
+  gui_state.touch_editor_dragging = false;
+  gui_state.touch_editor_reopen_menu = gui_state.sidebar_open;
+  gui_state.sidebar_open = false;
+  gui_state.touch_editor_prev_run_mode = emu_state.run_mode;
+  if(emu_state.run_mode==SB_MODE_RUN||emu_state.run_mode==SB_MODE_REWIND)emu_state.run_mode = SB_MODE_PAUSE;
+}
+static void se_close_touch_layout_editor(){
+  se_touch_layout_commit_drag();
+  gui_state.touch_editor_open = false;
+  if(gui_state.touch_editor_reopen_menu)gui_state.sidebar_open = true;
+  int prev = gui_state.touch_editor_prev_run_mode;
+  if((prev==SB_MODE_RUN||prev==SB_MODE_REWIND)&&emu_state.run_mode==SB_MODE_PAUSE&&emu_state.rom_loaded){
+    emu_state.run_mode = SB_MODE_RUN;
+    emu_state.step_frames = 1;
+  }
+}
+// Layout editor input over the screen: press an element to select it, drag to move it and
+// use the mouse wheel to resize it
+static void se_touch_layout_editor_canvas(float x, float y, float w, float h, bool portrait){
+  ImDrawList* dl = igGetWindowDrawList();
+  ImGuiIO* io = igGetIO();
+  gui_state.touch_editor_portrait = portrait;
+  gui_state.touch_editor_canvas[0] = x; gui_state.touch_editor_canvas[1] = y;
+  gui_state.touch_editor_canvas[2] = w; gui_state.touch_editor_canvas[3] = h;
+  ImU32 accent = gui_state.design_active? se_design_u32(gui_state.design.primary) : 0xff00a0ff;
+  for(int e=0;e<SE_TOUCH_NUM_ELEMENTS;++e){
+    const float* r = gui_state.touch_element_bounds[e];
+    if(r[0]>r[2])continue;
+    bool selected = e==gui_state.touch_editor_selected;
+    ImDrawList_AddRect(dl,(ImVec2){r[0]-4,r[1]-4},(ImVec2){r[2]+4,r[3]+4},selected? accent : 0x90ffffff,8,ImDrawCornerFlags_All,selected? 3.f:1.f);
+  }
+  igSetCursorScreenPos((ImVec2){x,y});
+  igInvisibleButton("##touch-layout-editor",(ImVec2){w,h},ImGuiButtonFlags_None);
+  if(igIsItemActivated()){
+    // The smallest element under the pointer wins, so small buttons stay reachable
+    int best = -1;
+    float best_area = 1e30f;
+    for(int e=0;e<SE_TOUCH_NUM_ELEMENTS;++e){
+      const float* r = gui_state.touch_element_bounds[e];
+      if(r[0]>r[2])continue;
+      if(io->MousePos.x<r[0]-8||io->MousePos.x>r[2]+8||io->MousePos.y<r[1]-8||io->MousePos.y>r[3]+8)continue;
+      float area = (r[2]-r[0])*(r[3]-r[1]);
+      if(area<best_area){best_area = area; best = e;}
+    }
+    gui_state.touch_editor_selected = best;
+    gui_state.touch_editor_dragging = best>=0;
+    gui_state.touch_editor_drag[0] = gui_state.touch_editor_drag[1] = 0;
+  }
+  if(gui_state.touch_editor_dragging){
+    if(igIsItemActive()&&w>0&&h>0){
+      gui_state.touch_editor_drag[0]+=io->MouseDelta.x/w;
+      gui_state.touch_editor_drag[1]+=io->MouseDelta.y/h;
+    }else se_touch_layout_commit_drag();
+  }
+  int sel = gui_state.touch_editor_selected;
+  if(sel>=0&&igIsItemHovered(ImGuiHoveredFlags_None)&&io->MouseWheel!=0){
+    float* t = se_touch_layout_element(portrait,sel);
+    float scale = t[2]>0? t[2] : 1.f;
+    scale*= 1.f+io->MouseWheel*0.08f;
+    t[2] = fminf(fmaxf(scale,0.5f),2.5f);
+  }
+}
+// Toolbar of the layout editor, shown at the top of the screen while editing
+static void se_draw_touch_layout_editor_toolbar(float top){
+  if(!gui_state.touch_editor_open)return;
+  // Opening the menu leaves the editor
+  if(gui_state.sidebar_open){
+    gui_state.touch_editor_reopen_menu = false;
+    se_close_touch_layout_editor();
+    return;
+  }
+  ImGuiIO* io = igGetIO();
+  float w = fminf(440.f,io->DisplaySize.x-16.f);
+  igSetNextWindowPos((ImVec2){io->DisplaySize.x*0.5f,top+8.f},ImGuiCond_Always,(ImVec2){0.5f,0.f});
+  igSetNextWindowSize((ImVec2){w,0},ImGuiCond_Always);
+  igBegin("##TouchLayoutEditor",NULL,ImGuiWindowFlags_NoDecoration|ImGuiWindowFlags_NoSavedSettings|ImGuiWindowFlags_NoMove);
+  bool portrait = gui_state.touch_editor_portrait;
+  se_text(portrait? ICON_FK_ARROWS " Customize the Portrait Layout" : ICON_FK_ARROWS " Customize the Landscape Layout");
+  int sel = gui_state.touch_editor_selected;
+  if(sel<0){
+    se_text_disabled("Drag a button to move it, then change its size here. Portrait and landscape layouts are saved separately.");
+  }else{
+    float* t = se_touch_layout_element(portrait,sel);
+    if(t[2]<=0)t[2] = 1.f;
+    se_field_label("%s",se_localize_and_cache(se_touch_element_name(sel)));
+    igSameLine(SE_FIELD_INDENT,0);
+    igPushItemWidth(-1);
+    se_slider_float("##TouchElementSize",&t[2],0.5f,2.5f,"Size: %.2fx");
+    igPopItemWidth();
+  }
+  float bw = (igGetWindowContentRegionWidth()-igGetStyle()->ItemSpacing.x*2)/3.f;
+  if(sel<0)se_push_disabled();
+  if(se_button("Reset Button",(ImVec2){bw,0})&&sel>=0){
+    float* t = se_touch_layout_element(portrait,sel);
+    t[0] = t[1] = t[2] = 0;
+  }
+  if(sel<0)se_pop_disabled();
+  igSameLine(0,-1);
+  if(se_button("Reset Layout",(ImVec2){bw,0})){
+    memset(gui_state.settings.touch_layout[portrait? 1:0],0,sizeof(gui_state.settings.touch_layout[0]));
+  }
+  igSameLine(0,-1);
+  if(se_button(ICON_FK_CHECK " Done",(ImVec2){bw,0}))se_close_touch_layout_editor();
+  igEnd();
+}
 void se_draw_touch_controls_settings(){
 
   se_section(ICON_FK_HAND_O_RIGHT " Touch Control Settings");
@@ -7053,6 +7553,18 @@ void se_draw_touch_controls_settings(){
   igEndChildFrame();
   igDummy((ImVec2){0,(igGetWindowContentRegionWidth()*0.5-2-scale)*0.5});
 
+  bool shown = !gui_state.settings.touch_controller_off;
+  se_checkbox("Show On-screen Controller",&shown);
+  gui_state.settings.touch_controller_off = !shown;
+  if(!shown)se_push_disabled();
+
+  float half_w = (igGetWindowContentRegionWidth()-igGetStyle()->ItemSpacing.x)*0.5f;
+  if(se_button(ICON_FK_ARROWS " Customize Layout",(ImVec2){half_w,0}))se_open_touch_layout_editor();
+  igSameLine(0,-1);
+  if(se_button(ICON_FK_REPEAT " Reset Layouts",(ImVec2){half_w,0})){
+    memset(gui_state.settings.touch_layout,0,sizeof(gui_state.settings.touch_layout));
+  }
+
   se_field_label("Scale");igSameLine(SE_FIELD_INDENT,0);
   igPushItemWidth(-1);
   se_slider_float("##TouchControlsScale",&gui_state.settings.touch_controls_scale,0.3,1.2,"Scale: %.2f");
@@ -7066,6 +7578,10 @@ void se_draw_touch_controls_settings(){
   bool show_turbo = gui_state.settings.touch_controls_show_turbo;
   se_checkbox("Enable Turbo and Hold Button Modifiers",&show_turbo);
   gui_state.settings.touch_controls_show_turbo = show_turbo;
+
+  bool show_speed = gui_state.settings.touch_controls_show_speed;
+  se_checkbox("Show Rewind and Fast Forward Buttons",&show_speed);
+  gui_state.settings.touch_controls_show_speed = show_speed;
   
   bool avoid_portrait = gui_state.settings.avoid_overlaping_touchscreen & SE_AVOID_OVERLAP_PORTRAIT;
   bool avoid_landscape = gui_state.settings.avoid_overlaping_touchscreen & SE_AVOID_OVERLAP_LANDSCAPE;
@@ -7083,6 +7599,7 @@ void se_draw_touch_controls_settings(){
   se_checkbox("Button Labels",&button_labels);
   gui_state.settings.touch_screen_show_button_labels = button_labels;
   igPopItemWidth();
+  if(!shown)se_pop_disabled();
 }
 void se_draw_save_states(bool cloud){
   ImGuiStyle *style = igGetStyle();
@@ -8101,6 +8618,9 @@ uint8_t* se_hcs_callback(const char* cmd, const char** params, uint64_t* result_
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"language\": %d,\n",gui_state.settings.language);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"touch_controls_scale\": %f,\n",gui_state.settings.touch_controls_scale);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"touch_controls_show_turbo\": %d,\n",gui_state.settings.touch_controls_show_turbo);
+    off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"touch_controller\": %d,\n",!gui_state.settings.touch_controller_off);
+    off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"touch_controls_show_speed\": %d,\n",gui_state.settings.touch_controls_show_speed);
+    off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"controller_face_layout\": %d,\n",gui_state.settings.controller_face_layout);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"save_to_path\": %d,\n",gui_state.settings.save_to_path);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"force_dmg_mode\": %d,\n",gui_state.settings.force_dmg_mode);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"gba_color_correction_mode\": %d,\n",gui_state.settings.gba_color_correction_mode);
@@ -8178,6 +8698,14 @@ uint8_t* se_hcs_callback(const char* cmd, const char** params, uint64_t* result_
       else if(strcmp(params[0],"auto_hide_touch_controls")==0)gui_state.settings.auto_hide_touch_controls=atoi(params[1]);
       else if(strcmp(params[0],"touch_controls_opacity")==0)gui_state.settings.touch_controls_opacity=atof(params[1]);
       else if(strcmp(params[0],"touch_controls_show_turbo")==0)gui_state.settings.touch_controls_show_turbo=atoi(params[1]);
+      else if(strcmp(params[0],"touch_controller")==0)gui_state.settings.touch_controller_off=!atoi(params[1]);
+      else if(strcmp(params[0],"touch_controls_show_speed")==0)gui_state.settings.touch_controls_show_speed=atoi(params[1]);
+      else if(strcmp(params[0],"touch_layout_editor")==0){
+        if(atoi(params[1])&&!gui_state.touch_editor_open)se_open_touch_layout_editor();
+        else if(!atoi(params[1])&&gui_state.touch_editor_open)se_close_touch_layout_editor();
+      }
+      else if(strcmp(params[0],"reset_touch_layout")==0)memset(gui_state.settings.touch_layout,0,sizeof(gui_state.settings.touch_layout));
+      else if(strcmp(params[0],"controller_face_layout")==0)se_set_controller_face_layout(atoi(params[1]));
       else if(strcmp(params[0],"save_to_path")==0)gui_state.settings.save_to_path=atoi(params[1]);
       else if(strcmp(params[0],"force_dmg_mode")==0)gui_state.settings.force_dmg_mode=atoi(params[1]);
       else if(strcmp(params[0],"gba_color_correction_mode")==0)gui_state.settings.gba_color_correction_mode=atoi(params[1]);
@@ -8854,8 +9382,9 @@ static void frame(void) {
       screen_width = width;
       igPopStyleColor(1);
     }
-    bool draw_click_region = emu_state.run_mode!=SB_MODE_RUN&&emu_state.run_mode!=SB_MODE_REWIND && !draw_sidebars_over_screen&& (gui_state.overlay_open||!emu_state.rom_loaded);
-    gui_state.block_touchscreen = draw_sidebars_over_screen;
+    bool draw_click_region = emu_state.run_mode!=SB_MODE_RUN&&emu_state.run_mode!=SB_MODE_REWIND && !draw_sidebars_over_screen&& (gui_state.overlay_open||!emu_state.rom_loaded)
+                             && !gui_state.touch_editor_open;
+    gui_state.block_touchscreen = draw_sidebars_over_screen||gui_state.touch_editor_open;
     // The menubar shouldn't resize the screen when it autohides as it re-layouts the controls. 
     if(gui_state.settings.always_show_menubar==false&&screen_width==width&&draw_sidebars_over_screen==false&&draw_click_region==false)menu_height=0;
     igSetNextWindowPos((ImVec2){screen_x,menu_height}, ImGuiCond_Always, (ImVec2){0,0});
@@ -8898,6 +9427,7 @@ static void frame(void) {
     igPopStyleVar(2);
     igPopStyleColor(1);
     igEnd();
+    se_draw_touch_layout_editor_toolbar(menu_height);
     if(draw_click_region){
       igSetNextWindowPos((ImVec2){screen_x,menu_height}, ImGuiCond_Always, (ImVec2){0,0});
       igSetNextWindowSize((ImVec2){screen_width, height-menu_height*se_dpi_scale()}, ImGuiCond_Always);
@@ -9191,7 +9721,7 @@ static void se_compute_draw_lcd_rect(float *lcd_render_w, float *lcd_render_h, i
     float scr_h = *lcd_render_h;
     float native_w = SB_LCD_W;
     float native_h = SB_LCD_H;
-    bool touch_controller_active = gui_state.last_touch_time>=0||gui_state.settings.auto_hide_touch_controls==false;
+    bool touch_controller_active = se_touch_controller_shown()||gui_state.touch_editor_open;
     *nds_layout= gui_state.settings.nds_layout;
     if(emu_state.system==SYSTEM_GBA){native_w = GBA_LCD_W; native_h = GBA_LCD_H;}
     else if(emu_state.system==SYSTEM_NDS){
@@ -9503,7 +10033,7 @@ static int se_draw_theme_region_tint_partial(int region, float x, float y, float
     SE_RPT2 non_fixed_pixels[r]      = dims[r]-fixed_pixels[r]-lcd_dims[r];
     SE_RPT2 non_fixed_pixels_scale[r]= (non_fixed_pixels[r])/(rdims[r]*uniform_scale_factor-fixed_pixels[r]-screen_pixels[r]);
 
-    bool touch_controller_active = gui_state.last_touch_time>=0||gui_state.settings.auto_hide_touch_controls==false;
+    bool touch_controller_active = se_touch_controller_shown()||gui_state.touch_editor_open;
     if(!touch_controller_active)min_dim = 0;
     float adj[2]={0,0};
     //Shrink screen to fit gamepad
@@ -10735,6 +11265,16 @@ jint Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1get_1accent_1color(
 jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1accent_1color(JNIEnv *env, jobject thiz) {
   return Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1get_1accent_1color(env, thiz);
 }
+
+/* On-screen controller: shown (1) or off (0), Rewind / Fast Forward buttons, layout reset.
+   Game controller face buttons: 0 match the labels, 1 match the GBA positions. */
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1touch_1controller(JNIEnv *env, jobject thiz, jint value) { se_set_touch_controller((int) value); }
+jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1touch_1controller(JNIEnv *env, jobject thiz) { return (jint) se_get_touch_controller(); }
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1touch_1controls_1show_1speed(JNIEnv *env, jobject thiz, jint value) { se_set_touch_controls_show_speed((uint32_t) value); }
+jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1touch_1controls_1show_1speed(JNIEnv *env, jobject thiz) { return (jint) se_get_touch_controls_show_speed(); }
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1reset_1touch_1layout(JNIEnv *env, jobject thiz) { se_reset_touch_layout(); }
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1controller_1face_1layout(JNIEnv *env, jobject thiz, jint value) { se_set_controller_face_layout((uint32_t) value); }
+jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1controller_1face_1layout(JNIEnv *env, jobject thiz) { return (jint) se_get_controller_face_layout(); }
 
 /* Contrast: 0 follow the system, 1 standard, 2 high */
 void Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1set_1contrast(JNIEnv *env, jobject thiz, jint value) {

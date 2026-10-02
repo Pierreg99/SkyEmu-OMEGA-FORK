@@ -81,6 +81,17 @@ public class MainSkyEmuObject {
     public native float se_android_get_touch_controls_scale();
     public native void se_android_set_touch_controls_show_turbo(int value);
     public native int se_android_get_touch_controls_show_turbo();
+    /* On-screen controller: 1 shown, 0 off */
+    public native void se_android_set_touch_controller(int shown);
+    public native int se_android_get_touch_controller();
+    /* Rewind and Fast Forward buttons on the on-screen controller */
+    public native void se_android_set_touch_controls_show_speed(int value);
+    public native int se_android_get_touch_controls_show_speed();
+    /* Restores the default on-screen controller layouts */
+    public native void se_android_reset_touch_layout();
+    /* Game controller face buttons: 0 match the labels, 1 match the GBA positions (A on the right) */
+    public native void se_android_set_controller_face_layout(int layout);
+    public native int se_android_get_controller_face_layout();
     public native void se_android_set_avoid_overlapping_touchscreen(int value);
     public native int se_android_get_avoid_overlapping_touchscreen();
     public native void se_android_set_touch_screen_show_button_labels(int value);
