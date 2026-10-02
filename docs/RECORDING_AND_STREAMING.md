@@ -152,7 +152,7 @@ hotkeys **Screenshot**, **Record Video** and **Save Replay** with [`se_send_key(
 ## For developers
 
 The AVI, WAV and replay code ([`src/se_record.c`](../src/se_record.c)) has unit tests that read every file back and
-compare each frame and sample, run by the Linux workflow:
+compare each frame and sample, run by the *Unit tests* workflow:
 
 ```sh
 cc -O2 -Isrc tools/se_record_test.c src/se_record.c src/stb.c -lm -o se_record_test && ./se_record_test

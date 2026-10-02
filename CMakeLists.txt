@@ -282,11 +282,8 @@ if(NOT RETRO_CORE_ONLY)
       add_library(sokol STATIC src/sokol/sokol.m ${SOKOL_HEADERS})
       if(MACOS AND (NOT IOS))
           add_definitions(-DSE_PLATFORM_MACOS)
-          if(NOT USE_SDL)
-              add_definitions(-DSOKOL_METAL=1)
-          else()
-              add_definitions(-DSOKOL_GLCORE33=1)
-          endif()
+          # sokol.m is the Metal backend, also when SDL handles input and sound
+          add_definitions(-DSOKOL_METAL=1)
           target_link_libraries(sokol PUBLIC
               "-framework QuartzCore"
               "-framework Cocoa"
@@ -451,6 +448,8 @@ if(NOT RETRO_CORE_ONLY)
   if(IOS)
       set(SKYEMU_SRC ${SKYEMU_SRC} src/ios_support.m)
       add_definitions(-DSE_PLATFORM_IOS)
+  elseif(MACOS)
+      set(SKYEMU_SRC ${SKYEMU_SRC} src/macos_support.m)
   endif()
 
   # ---------------------------------------------------------------------
@@ -486,30 +485,8 @@ if(NOT RETRO_CORE_ONLY)
       if(MSVC)
         target_link_options(SkyEmuLauncher PRIVATE /INCREMENTAL:NO)
       endif()
-    elseif(MACOS)
-      if(BUILD_MACOS_STATIC_LIB)
-        add_library(${PROJECT_NAME} STATIC ${SKYEMU_SRC})
-      else()
-            set(MACOSX_BUNDLE_GUI_IDENTIFIER "SkyEmu")
-            set(MACOSX_BUNDLE_SHORT_VERSION_STRING ${GIT_COMMIT_HASH})
-            set(MACOSX_BUNDLE_LONG_VERSION_STRING ${GIT_COMMIT_HASH})
-            set(MACOSX_BUNDLE_BUNDLE_VERSION ${GIT_COMMIT_HASH})
-            set(CMAKE_OSX_DEPLOYMENT_TARGET "10.13" CACHE STRING "Minimum OS X deployment version" FORCE)
-      
-            set(MACOSX_BUNDLE_ICON_FILE AppIcon.icns)
-            set(APP_ICON src/resources/icons/AppIcon.icns)
-            set_source_files_properties(${APP_ICON} PROPERTIES MACOSX_PACKAGE_LOCATION "Resources")
-            add_executable(${PROJECT_NAME} ${SKYEMU_SRC} ${APP_ICON})
-            set_property(TARGET ${PROJECT_NAME} PROPERTY XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "SkyEmu")
-            set_property(TARGET ${PROJECT_NAME} PROPERTY MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/src/resources/ios-info.plist.in")
-            # Mac Catalyst support
-            set_target_properties(${PROJECT_NAME} PROPERTIES
-              XCODE_ATTRIBUTE_SUPPORTED_PLATFORMS "macosx iphonesimulator maccatalyst"
-              XCODE_ATTRIBUTE_MACOSX_DEPLOYMENT_TARGET "10.15"
-              XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2"
-            )
-      endif()
     elseif(IOS)
+      # Checked before MACOS, which is also set for iOS (IOS is only defined after project())
       if(BUILD_IOS_STATIC_LIB)
         # Build a static library for iOS
         add_library(${PROJECT_NAME} STATIC ${SKYEMU_SRC})
@@ -527,10 +504,35 @@ if(NOT RETRO_CORE_ONLY)
         set(MACOSX_BUNDLE_ICON_FILE AppIcon.icns)
         set(APP_ICON src/resources/icons/AppIcon.icns)
         set_source_files_properties(${APP_ICON} PROPERTIES MACOSX_PACKAGE_LOCATION "Resources")
-        add_executable(${PROJECT_NAME} ${SKYEMU_SRC} ${APP_ICON})
+        # sokol's entry point is main_ios(), src/apple_launcher.c has main()
+        add_executable(${PROJECT_NAME} ${SKYEMU_SRC} src/apple_launcher.c ${APP_ICON})
         set_property(TARGET ${PROJECT_NAME} PROPERTY XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "SkyEmu")
         set_property(TARGET ${PROJECT_NAME} PROPERTY MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/src/resources/ios-info.plist.in")
         set_target_properties(${PROJECT_NAME} PROPERTIES XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2")
+      endif()
+    elseif(MACOS)
+      if(BUILD_MACOS_STATIC_LIB)
+        add_library(${PROJECT_NAME} STATIC ${SKYEMU_SRC})
+      else()
+            set(MACOSX_BUNDLE_GUI_IDENTIFIER "SkyEmu")
+            set(MACOSX_BUNDLE_SHORT_VERSION_STRING ${GIT_COMMIT_HASH})
+            set(MACOSX_BUNDLE_LONG_VERSION_STRING ${GIT_COMMIT_HASH})
+            set(MACOSX_BUNDLE_BUNDLE_VERSION ${GIT_COMMIT_HASH})
+            set(CMAKE_OSX_DEPLOYMENT_TARGET "10.13" CACHE STRING "Minimum OS X deployment version" FORCE)
+      
+            set(MACOSX_BUNDLE_ICON_FILE AppIcon.icns)
+            set(APP_ICON src/resources/icons/AppIcon.icns)
+            set_source_files_properties(${APP_ICON} PROPERTIES MACOSX_PACKAGE_LOCATION "Resources")
+            # sokol's entry point is main_macos(), src/apple_launcher.c has main()
+            add_executable(${PROJECT_NAME} ${SKYEMU_SRC} src/apple_launcher.c ${APP_ICON})
+            set_property(TARGET ${PROJECT_NAME} PROPERTY XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "SkyEmu")
+            set_property(TARGET ${PROJECT_NAME} PROPERTY MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/src/resources/ios-info.plist.in")
+            # Mac Catalyst support
+            set_target_properties(${PROJECT_NAME} PROPERTIES
+              XCODE_ATTRIBUTE_SUPPORTED_PLATFORMS "macosx iphonesimulator maccatalyst"
+              XCODE_ATTRIBUTE_MACOSX_DEPLOYMENT_TARGET "10.15"
+              XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2"
+            )
       endif()
     elseif(ANDROID)
       add_library(${PROJECT_NAME} SHARED ${SKYEMU_SRC})

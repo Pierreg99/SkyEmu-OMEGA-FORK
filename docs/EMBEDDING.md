@@ -272,16 +272,20 @@ and [`App/ios_support.h`](../App/ios_support.h) declares the platform hooks the 
 area insets, and the remote input, ping and external menu notifications), implemented in `App/ios_support.m`. Build steps are in
 [Building › iOS](BUILDING.md#ios).
 
-On iOS the library does not define `main()`. sokol's entry point is renamed `main_ios()`, which starts the UIKit
-app and does not return, so the host app's `main` hands over to it:
+The libraries do not define `main()`. sokol's entry points are renamed `main_ios()` and `main_macos()`, which
+start the app and do not return, so the host app's `main` hands over to them, as the SkyEmu app bundles do in
+[`src/apple_launcher.c`](../src/apple_launcher.c):
 
 ```objc
-int main_ios(int argc, char* argv[]);
+int main_ios(int argc, char* argv[]);       // main_macos() on macOS
 
 int main(int argc, char* argv[]) {
     return main_ios(argc, argv);
 }
 ```
+
+The remote input, ping and external menu notifications reach the app delegate on the main thread as
+`handleRemoteKeycodeWithData1:data2:`, `handlePing` and `handleOpenExternalMenu`, on iOS and on macOS.
 
 ## HTTP control server
 

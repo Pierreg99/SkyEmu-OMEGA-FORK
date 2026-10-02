@@ -1,36 +1,27 @@
 name: Build iOS
-on: [push,pull_request]
+on: [push, pull_request]
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   build-and-deploy:
     runs-on: macos-latest
     steps:
       - name: Checkout 🛎️
-        uses: actions/checkout@v2.3.1 
-      - name: Configure & Build 🔧 
+        uses: actions/checkout@v7
+      - name: Configure & Build 🔧
+        # The app bundle; host apps use the static library (the default, BUILD_IOS_STATIC_LIB=ON)
         run: |
-          mkdir build
+          cmake -B build -GXcode -DSOKOL_BACKEND=SOKOL_METAL -DCMAKE_SYSTEM_NAME=iOS -DBUILD_IOS_STATIC_LIB=OFF
+          cmake --build build --config Release -- -quiet
+      - name: Package (unsigned) 📦
+        run: |
           cd build
-          cmake -GXcode -DSOKOL_BACKEND=SOKOL_METAL -DCMAKE_SYSTEM_NAME=iOS ../
-          cmake --build . --config Release
           mkdir Payload
           cp -R bin/Release/SkyEmu.app Payload/SkyEmu.app
-          zip -r SkyEmu.ipa Payload
-      - name: GH Release 🚀
-        # You may pin to the exact commit or the version.
-        uses: actions/upload-artifact@v4
+          zip -qr SkyEmu.ipa Payload
+      - name: Upload 🚀
+        uses: actions/upload-artifact@v7
         with:
-           name: iOSRelease
-           path: build/SkyEmu.ipa
-        #uses: softprops/action-gh-release@v0.1.5
-        #with:
-        #  # Note-worthy description of changes in release
-        #  # body: # optional
-        #  # Path to load note-worthy description of changes in release from
-        #  # body_path: # optional
-        #  # Gives the release a custom name. Defaults to tag name
-        #  name: LinuxRelease
-        #  # Identify the release as a prerelease. Defaults to false
-        #  prerelease: True
-        #  # Newline-delimited list of path globs for asset files to upload
-        #  files: build/bin/*
- 
+          name: iOSRelease
+          path: build/SkyEmu.ipa

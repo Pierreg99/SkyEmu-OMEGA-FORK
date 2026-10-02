@@ -1,13 +1,16 @@
 name: Build Android
-on: [push,pull_request]
+on: [push, pull_request]
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout 🛎️
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Setup Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: 'temurin'
           java-version: '17'
@@ -24,12 +27,12 @@ jobs:
           ./gradlew :standalone:assembleRelease :app:assembleRelease --no-daemon
           ls standalone/build/outputs/apk/release/ app/build/outputs/aar/
       - name: Upload the app 🚀
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
            name: AndroidRelease
            path: tools/android_project/standalone/build/outputs/apk/release/SkyEmu-v*-release.apk
       - name: Upload the library 📚
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
            name: AndroidLibrary
            path: tools/android_project/app/build/outputs/aar/app-release.aar

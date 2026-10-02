@@ -8,10 +8,10 @@ Xcode projects and the Emscripten web build.
 | Platform | Output | Jump to |
 |---|---|---|
 | Linux, FreeBSD | `build/bin/SkyEmu` | [Linux](#linux) · [FreeBSD](#freebsd) |
-| Windows | `build/bin/<Config>/SkyEmu.dll` | [Windows](#windows) |
+| Windows | `build/bin/<Config>/SkyEmu.exe` and `SkyEmu.dll` | [Windows](#windows) |
 | macOS | `build/bin/SkyEmu.app` or a static library | [macOS](#macos) |
-| iOS | Static library | [iOS](#ios) |
-| Android | `libSkyEmu.so` inside an Android library | [Android](#android) |
+| iOS | Static library, or `SkyEmu.app` | [iOS](#ios) |
+| Android | An APK, and `libSkyEmu.so` inside an Android library (AAR) | [Android](#android) |
 | Web | `SkyEmu.html` + WebAssembly | [Web](#web) |
 | libretro | `skyemu_libretro` core | [libretro](#libretro-core) |
 
@@ -75,10 +75,13 @@ together; the `WindowsRelease` artifact of the *Build Windows* workflow contains
 ## macOS
 
 ```sh
-cmake -B build && cmake --build build          # build/bin/SkyEmu.app
+cmake -B build && cmake --build build --parallel     # build/bin/SkyEmu.app
+open build/bin/SkyEmu.app
 ```
 
-Pass `-DBUILD_MACOS_STATIC_LIB=ON` to get a static library for a host app instead. `gen_macos.sh` generates an
+The app draws with Metal and uses SDL for game controllers. Pass `-DBUILD_MACOS_STATIC_LIB=ON` to get a static
+library for a host app instead; the app bundle adds only [`src/apple_launcher.c`](../src/apple_launcher.c), whose
+`main()` calls the library's `main_macos()`. The *Build macOS* workflow packages the app as `SkyEmu.dmg`. `gen_macos.sh` generates an
 Xcode project (run it from an empty build directory); the checked-in `host_app_macos/` project was generated
 the same way.
 
@@ -103,9 +106,14 @@ mkdir build-ios && cd build-ios
 The library has no `main()`: in this fork sokol's iOS entry point is renamed `main_ios()`, and the host app calls
 it (see [Embedding › iOS and macOS](EMBEDDING.md#ios-and-macos)).
 
-> [!WARNING]
-> `-DBUILD_IOS_STATIC_LIB=OFF` generates an app bundle target, but it does not link on its own (undefined
-> `_main`) for the same reason. This is also why the *Build iOS* workflow fails.
+`-DBUILD_IOS_STATIC_LIB=OFF` builds the SkyEmu app instead, with [`src/apple_launcher.c`](../src/apple_launcher.c)
+as its `main()`. The *Build iOS* workflow does this and uploads an unsigned `SkyEmu.ipa`, to sign with your own
+certificate (or sideload with a tool that signs it):
+
+```sh
+cmake -B build-ios -GXcode -DCMAKE_SYSTEM_NAME=iOS -DBUILD_IOS_STATIC_LIB=OFF
+cmake --build build-ios --config Release      # build-ios/bin/Release/SkyEmu.app
+```
 
 ## Android
 
@@ -164,7 +172,7 @@ nix run             # build and start SkyEmu
 ## Tests
 
 The design token engine, the ROM patch engine, the cheat finder, the recorder and the DS screen layouts have
-stand-alone unit tests, also run by the Linux workflow:
+stand-alone unit tests, run by the *Unit tests* workflow on every push:
 
 ```sh
 cc -O2 -Isrc tools/se_design_test.c src/se_design.c -lm -o se_design_test && ./se_design_test

@@ -16,6 +16,7 @@
 [![Android](https://github.com/Pierreg99/SkyEmu-OMEGA-FORK/actions/workflows/deploy_android.yml/badge.svg)](https://github.com/Pierreg99/SkyEmu-OMEGA-FORK/actions/workflows/deploy_android.yml)
 [![iOS](https://github.com/Pierreg99/SkyEmu-OMEGA-FORK/actions/workflows/deploy_ios.yml/badge.svg)](https://github.com/Pierreg99/SkyEmu-OMEGA-FORK/actions/workflows/deploy_ios.yml)
 [![Web](https://github.com/Pierreg99/SkyEmu-OMEGA-FORK/actions/workflows/deploy_web.yml/badge.svg)](https://github.com/Pierreg99/SkyEmu-OMEGA-FORK/actions/workflows/deploy_web.yml)
+[![Unit tests](https://github.com/Pierreg99/SkyEmu-OMEGA-FORK/actions/workflows/tests.yml/badge.svg)](https://github.com/Pierreg99/SkyEmu-OMEGA-FORK/actions/workflows/tests.yml)
 
 [**Get started**](#-get-started) · [**Build**](docs/BUILDING.md) · [**Embed**](docs/EMBEDDING.md) · [**Design systems**](docs/DESIGN_SYSTEMS.md) · [**Shaders**](docs/GRAPHICS.md) · [**Controllers**](docs/CONTROLLERS.md) · [**Cheats & patches**](docs/CHEATS_AND_PATCHES.md) · [**Recording**](docs/RECORDING_AND_STREAMING.md) · [**All docs**](docs/README.md)
 
@@ -164,8 +165,8 @@ layouts are in [docs/GRAPHICS.md](docs/GRAPHICS.md).
 | **Linux** | `SkyEmu` executable | Adwaita | X11 or XWayland, ALSA audio |
 | **FreeBSD** | `SkyEmu` executable | Adwaita | |
 | **Android** 7.0+ | `SkyEmu-v32-release.apk`, and an Android library (AAR) | Material 3 | Material You colors on Android 12+ |
-| **macOS** | `SkyEmu.app`, or a static library | SkyEmu Classic | |
-| **iOS** 15+ | Static library | SkyEmu Classic | The host app provides `main()` and calls `main_ios()` |
+| **macOS** | `SkyEmu.app` (in `SkyEmu.dmg`), or a static library | SkyEmu Classic | Metal |
+| **iOS** 15+ | `SkyEmu.ipa` (unsigned), or a static library | SkyEmu Classic | Host apps call `main_ios()` from their `main()` |
 | **Web** | WebAssembly progressive web app | Material 3 | Follows the browser's color scheme |
 | **libretro** | `skyemu_libretro` core | Frontend UI | For RetroArch and other frontends |
 
@@ -175,7 +176,8 @@ layouts are in [docs/GRAPHICS.md](docs/GRAPHICS.md).
 
 Every push builds all platforms on GitHub Actions. Open a workflow run under
 [**Actions**](https://github.com/Pierreg99/SkyEmu-OMEGA-FORK/actions) and download its artifact
-(`LinuxRelease`, `WindowsRelease`, `AndroidRelease` with the APK, `AndroidLibrary` with the AAR, ...).
+(`LinuxRelease`, `WindowsRelease`, `MacOSRelease` with the DMG, `AndroidRelease` with the APK, `iOSRelease` with an
+unsigned IPA, `AndroidLibrary` with the AAR, ...).
 
 Stand-alone releases of upstream SkyEmu, including a version that runs in the browser, are at
 [github.com/skylersaleh/SkyEmu/releases](https://github.com/skylersaleh/SkyEmu/releases) and

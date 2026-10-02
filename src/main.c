@@ -74,10 +74,7 @@
 #ifdef SE_PLATFORM_ANDROID
   #include <android/log.h>
 #endif
-#ifdef SE_PLATFORM_IOS
-#include "ios_support.h"
-#endif
-#ifdef TARGET_OS_MACCATALYST
+#if defined(SE_PLATFORM_IOS) || defined(SE_PLATFORM_MACOS) || defined(TARGET_OS_MACCATALYST)
 #include "ios_support.h"
 #endif
 #ifdef USE_SDL

@@ -1,0 +1,35 @@
+name: Unit tests
+on: [push, pull_request]
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout 🛎️
+        uses: actions/checkout@v7
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev
+      - name: Design tokens 🎨
+        run: |
+          cc -O2 -Wall -Wextra -DSE_PLATFORM_LINUX -Isrc tools/se_design_test.c src/se_design.c -lm -lX11 -o se_design_test
+          ./se_design_test
+      - name: ROM patches 🩹
+        run: |
+          cc -O2 -Wall -Wextra -Isrc tools/se_patch_test.c src/se_patch.c -o se_patch_test
+          ./se_patch_test
+      - name: Cheat finder 🔎
+        run: |
+          cc -O2 -Wall -Wextra -Isrc tools/se_cheat_finder_test.c src/se_cheat_finder.c -o se_cheat_finder_test
+          ./se_cheat_finder_test
+      - name: Recorder 🎬
+        run: |
+          cc -O2 -Wall -Wextra -Isrc tools/se_record_test.c src/se_record.c src/stb.c -lm -o se_record_test
+          ./se_record_test
+      - name: Screen layouts 🖥️
+        run: |
+          cc -O2 -Wall -Wextra -Isrc tools/se_screen_layout_test.c src/se_screen_layout.c -lm -o se_screen_layout_test
+          ./se_screen_layout_test

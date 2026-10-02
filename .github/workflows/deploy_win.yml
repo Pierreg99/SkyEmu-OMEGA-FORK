@@ -1,38 +1,23 @@
 name: Build Windows
-on: [push,pull_request]
+on: [push, pull_request]
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   build-and-deploy:
     runs-on: windows-2022
     steps:
       - name: Checkout 🛎️
-        uses: actions/checkout@v2.3.1 
+        uses: actions/checkout@v7
       - name: Get latest CMake and ninja
-        # Using 'latest' branch, the most recent CMake and ninja are installed.
         uses: lukka/get-cmake@latest
-     
-      - name: Build 🔧 
+      - name: Build 🔧
+        # SkyEmu.exe and SkyEmu.dll
         run: |
-          mkdir build
-          cd build
-          cmake -G "Visual Studio 17 2022" -A x64 -DCMAKE_SYSTEM_VERSION=10.0.19041.0 ..
-          cmake --build . --config RelWithDebInfo
-          
-      - name: GH Release 🚀
-        # You may pin to the exact commit or the version.
-        uses: actions/upload-artifact@v4
+          cmake -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_SYSTEM_VERSION=10.0.19041.0
+          cmake --build build --config RelWithDebInfo --parallel
+      - name: Upload 🚀
+        uses: actions/upload-artifact@v7
         with:
-           name: WindowsRelease
-           path: build/bin/RelWithDebInfo
-        #uses: softprops/action-gh-release@v0.1.5
-        #with:
-        #  # Note-worthy description of changes in release
-        #  # body: # optional
-        #  # Path to load note-worthy description of changes in release from
-        #  # body_path: # optional
-        #  # Gives the release a custom name. Defaults to tag name
-        #  name: LinuxRelease
-        #  # Identify the release as a prerelease. Defaults to false
-        #  prerelease: True
-        #  # Newline-delimited list of path globs for asset files to upload
-        #  files: build/bin/*
- 
+          name: WindowsRelease
+          path: build/bin/RelWithDebInfo
