@@ -10,7 +10,7 @@ void se_push_disabled();
 void se_pop_disabled();
 void se_boxed_image_triple_label(const char* first_label, const char* second_label, const char* third_label, uint32_t third_label_color, const char* box, atlas_tile_t* atlas, bool glow);
 
-void se_section(const char* label,...);
+bool se_section(const char* label,...);
 const char* se_localize_and_cache(const char* input_str);
 ImFont* se_get_mono_font();
 void se_emscripten_flush_fs();

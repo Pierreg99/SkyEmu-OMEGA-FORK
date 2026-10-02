@@ -5,8 +5,9 @@
 SkyEmu contains a small web server with a REST-like API, so other programs and scripts can drive the emulator:
 load games, read the screen, read and write memory, step frames, press buttons and change settings.
 
-It is available in all native builds (not in the web build). Enable it in **Menu → Advanced → Enable HTTP
-Control Server** (or **Menu → Streaming**) and pick the port (8080 by default). While you play in RetroAchievements
+It is available in all native builds (not in the web build). Turn it on or off in **Menu → Advanced → Enable HTTP
+Control Server** (or **Menu → Streaming**) and pick the port (8080 by default). It is on in new installations, and
+every device on your network can reach it; turn it off on networks you don't trust. While you play in RetroAchievements
 Hardcore Mode it only answers the commands that don't change the game: [`/achievements`](#achievements), the
 [recording](#record--recording) commands, the [streams](#streammjpg--streamwav), the [pages](#remote--overlay) and
 [`/input_state`](#input_state). Try it from a browser:

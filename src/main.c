@@ -304,7 +304,8 @@ typedef struct{
   uint32_t nds_screen_gap;            // Space between the DS screens in DS pixels, 0-96
   uint32_t nds_small_screen;          // Size of the small DS screen in percent, 25-100, 0 = 50
   uint32_t nds_swap_screens;          // 1 = the bottom screen goes where the top screen would
-  uint32_t padding[136];
+  uint32_t menu_collapsed[24];        // Hashes of the collapsed menu sections, 0 = unused
+  uint32_t padding[112];
 }persistent_settings_t; 
 _Static_assert(sizeof(persistent_settings_t)==1024, "persistent_settings_t must be exactly 1024 bytes");
 #define SE_STATS_GRAPH_DATA 256
@@ -611,6 +612,11 @@ typedef struct {
     int font_design_key;  // Design/font combination the font atlas was built for
     char system_font_path[SB_FILE_PATH_SIZE]; // Platform UI font in use, empty when the bundled font is used
     int section_text_vtx_start; // First vertex of the text drawn by the last se_section() call
+    bool menu_sections;         // se_section() starts a collapsible, searchable section of the menu
+    char menu_search[64];       // Text of the menu's search field
+    int menu_sections_shown;    // Sections that matched the search in the last frame
+    uint32_t menu_section_ids[32];
+    int menu_section_count;
 } gui_state_t;
 
 #define SE_REWIND_BUFFER_SIZE (1024*1024)
@@ -1095,37 +1101,148 @@ static bool se_input_int32(const char* label,int32_t* v,int step,int step_fast,I
   *v = val;
   return ret;
 }
-void se_section(const char* label,...){
+// Menu sections can be collapsed and are found by the menu's search field by their title or by the
+// options they contain (their labels in English and in the GUI language).
+static const struct{const char* section; const char* keywords;} se_menu_keywords[]={
+  {ICON_FK_FLOPPY_O " Save States","Save Slot\0Capture\0Restore\0Local\0Cloud\0"},
+  {ICON_FK_VIDEO_CAMERA " Recording","Record Video\0Screenshot\0Record Audio\0Replay Buffer\0Save Replay\0Video Size\0Video Quality\0Record Sound in Videos\0Screenshot Size\0"},
+  {ICON_FK_PODCAST " Streaming","Streaming and Remote Play\0Remote Play\0OBS Overlay\0Stream Size\0Frame Rate\0HTTP\0"},
+  {ICON_FK_CLOUD " Google Drive","Login\0Logout\0"},
+  {ICON_FK_KEY " Action Replay Codes","Cheats\0GameShark\0New\0"},
+  {ICON_FK_SEARCH " Cheat Finder","Cheats\0Search\0Memory\0"},
+  {ICON_FK_PUZZLE_PIECE " ROM Patches","Apply Patches\0IPS\0UPS\0BPS\0"},
+  {ICON_FK_TROPHY " RetroAchievements","Username\0Password\0Login\0Register\0Hardcore Mode\0Encore Mode\0Unofficial Achievements\0Spectator Mode\0Notifications\0Progress Indicators\0Leaderboard Trackers\0Challenge Indicators\0"},
+  {ICON_FK_CROSSHAIRS " Located Files","Save File\0BIOS\0Firmware\0"},
+  {ICON_FK_TEXT_HEIGHT " GUI","Language\0Design\0Color Scheme\0Contrast\0Custom Accent Color\0Use System Font\0Theme\0Custom Font\0GUI Scale\0Always Show Menu/Nav Bar\0Full Screen\0"},
+  {ICON_FK_DESKTOP " Display Settings","Screen Shader\0Screen Rotation\0Color Correction\0GBA Color Correction Type\0Screen Ghosting\0Force Integer Scaling\0Stretch Screen to Fit\0Show Screen Bezel\0NDS Screen Layout\0Swap Screens\0Screen Gap\0Small Screen Size\0Game Boy Color Palette\0"},
+  {ICON_FK_HAND_O_RIGHT " Touch Control Settings","Show On-screen Controller\0Customize Layout\0Scale\0Opacity\0Hide when inactive\0Enable Turbo and Hold Button Modifiers\0Show Rewind and Fast Forward Buttons\0Prevent Overlap in Portrait\0Prevent Overlap in Landscape\0Button Labels\0"},
+  {ICON_FK_KEYBOARD_O " Keybinds","Reset Default Keybinds\0Hotkeys\0"},
+  {ICON_FK_GAMEPAD " Controllers","Face Buttons\0Reset Default Controller Bindings\0Rumble\0Gamepad\0"},
+  {ICON_FK_CODE_FORK " Additional Search Paths","Save File/State Path\0BIOS/Firmware Path\0Cheat Code Path\0Patch Path\0Recording Path\0Create new files in paths\0"},
+  {ICON_FK_WRENCH " Advanced","Solar Sensor\0Force GB games to run in DMG mode\0Show Debug Tools\0Enable HTTP Control Server\0Server Port\0Enable Download Cache\0Clear Download Cache\0"},
+};
+static uint32_t se_hash_string(const char* s){
+  uint32_t h = 2166136261u;
+  while(*s){h ^= (uint8_t)*s++; h *= 16777619u;}
+  return h? h : 1;
+}
+// Case insensitive for ASCII, other UTF-8 text is compared as it is
+static bool se_contains_text(const char* text, const char* query){
+  if(!query[0])return true;
+  for(;*text;++text){
+    const char* t = text, *q = query;
+    while(*t&&*q&&tolower((unsigned char)*t)==tolower((unsigned char)*q)){++t;++q;}
+    if(!*q)return true;
+  }
+  return false;
+}
+static const char* se_menu_search_query(void){
+  const char* q = gui_state.menu_search;
+  while(*q==' ')++q;
+  return q;
+}
+static bool se_menu_section_matches(const char* label, const char* title){
+  const char* q = se_menu_search_query();
+  if(!q[0]||se_contains_text(title,q)||se_contains_text(label,q))return true;
+  for(size_t i=0;i<sizeof(se_menu_keywords)/sizeof(se_menu_keywords[0]);++i){
+    if(strcmp(se_menu_keywords[i].section,label))continue;
+    for(const char* k=se_menu_keywords[i].keywords;*k;k+=strlen(k)+1){
+      if(se_contains_text(k,q)||se_contains_text(se_localize_and_cache(k),q))return true;
+    }
+  }
+  // The keybind names are options of both binding sections
+  if(strstr(label," Keybinds")||strstr(label," Controllers")){
+    for(int i=0;i<SE_NUM_KEYBINDS;++i){
+      if(se_contains_text(se_keybind_names[i],q)||se_contains_text(se_localize_and_cache(se_keybind_names[i]),q))return true;
+    }
+  }
+  return false;
+}
+#define SE_MENU_MAX_COLLAPSED 24
+static bool se_menu_section_collapsed(uint32_t id){
+  for(int i=0;i<SE_MENU_MAX_COLLAPSED;++i)if(gui_state.settings.menu_collapsed[i]==id)return true;
+  return false;
+}
+static void se_menu_section_set_collapsed(uint32_t id, bool collapsed){
+  for(int i=0;i<SE_MENU_MAX_COLLAPSED;++i)if(gui_state.settings.menu_collapsed[i]==id)gui_state.settings.menu_collapsed[i]=0;
+  if(!collapsed)return;
+  for(int i=0;i<SE_MENU_MAX_COLLAPSED;++i)if(gui_state.settings.menu_collapsed[i]==0){gui_state.settings.menu_collapsed[i]=id; return;}
+}
+// Draws a section title. In the menu it returns whether the section's contents should be drawn: false
+// when it is collapsed or does not match the search, and then nothing is drawn. Elsewhere it is true.
+bool se_section(const char* label,...){
   ImGuiStyle * style = igGetStyle();
   ImDrawList*dl= igGetWindowDrawList();
   ImVec2 b_min,b_sz,b_max,b_cursor;
-
-  igGetWindowPos(&b_min);
-  igGetWindowSize(&b_sz);
-  igGetCursorPos(&b_cursor);
-  
-  b_min.x+=b_cursor.x-style->FramePadding.x;
-  b_min.y+=b_cursor.y-style->FramePadding.y;
-  b_min.y-=igGetScrollY();
-  b_max.x = b_min.x+b_sz.x-b_cursor.x; 
 
   char buffer[256]="";
   va_list args;
   va_start(args, label);
   vsnprintf(buffer,sizeof(buffer),se_localize_and_cache(label),args);
   va_end(args);
+
+  bool menu = gui_state.menu_sections;
+  bool searching = menu&&se_menu_search_query()[0];
+  uint32_t id = 0;
+  if(menu){
+    if(!se_menu_section_matches(label,buffer))return false;
+    id = se_hash_string(label);
+    gui_state.menu_sections_shown++;
+    if(gui_state.menu_section_count<32)gui_state.menu_section_ids[gui_state.menu_section_count++]=id;
+  }
+  bool collapsed = menu&&!searching&&se_menu_section_collapsed(id);
+
   if(gui_state.design_active){
     se_design_section(buffer);
-    return;
-  }
-  ImVec2 text_size; 
-  igCalcTextSize(&text_size,buffer,NULL,false,b_max.x-b_min.x);
+  }else{
+    igGetWindowPos(&b_min);
+    igGetWindowSize(&b_sz);
+    igGetCursorPos(&b_cursor);
 
-  b_max.y = b_min.y+text_size.y+style->FramePadding.y * 2.0f; 
-  
-  ImDrawList_AddRectFilled(dl,b_min,b_max,igGetColorU32Col(ImGuiCol_TitleBg,1.0),0,ImDrawCornerFlags_None);
-  gui_state.section_text_vtx_start = dl->VtxBuffer.Size;
-  igTextWrapped("%s",buffer);
+    b_min.x+=b_cursor.x-style->FramePadding.x;
+    b_min.y+=b_cursor.y-style->FramePadding.y;
+    b_min.y-=igGetScrollY();
+    b_max.x = b_min.x+b_sz.x-b_cursor.x;
+    ImVec2 text_size;
+    igCalcTextSize(&text_size,buffer,NULL,false,b_max.x-b_min.x);
+
+    b_max.y = b_min.y+text_size.y+style->FramePadding.y * 2.0f;
+
+    ImDrawList_AddRectFilled(dl,b_min,b_max,igGetColorU32Col(ImGuiCol_TitleBg,1.0),0,ImDrawCornerFlags_None);
+    gui_state.section_text_vtx_start = dl->VtxBuffer.Size;
+    igTextWrapped("%s",buffer);
+  }
+  if(!menu)return true;
+
+  // The whole title row toggles the section, with a chevron at its end
+  ImVec2 t_min, t_max, w_pos, c_min, c_max, after;
+  igGetItemRectMin(&t_min);
+  igGetItemRectMax(&t_max);
+  igGetWindowPos(&w_pos);
+  igGetWindowContentRegionMin(&c_min);
+  igGetWindowContentRegionMax(&c_max);
+  igGetCursorScreenPos(&after);
+  float x0 = w_pos.x+c_min.x, x1 = w_pos.x+c_max.x;
+  float pad = style->FramePadding.y;
+  if(!searching){
+    const char* chevron = collapsed? ICON_FK_CHEVRON_RIGHT : ICON_FK_CHEVRON_DOWN;
+    ImVec2 cs;
+    igCalcTextSize(&cs,chevron,NULL,false,-1);
+    float scale = 0.75f;
+    ImVec2 cp = {x1-cs.x*scale-2,(t_min.y+t_max.y-cs.y*scale)*0.5f};
+    ImDrawList_AddTextFontPtr(dl,igGetFont(),igGetFontSize()*scale,cp,igGetColorU32Col(ImGuiCol_TextDisabled,1.0),chevron,NULL,0,NULL);
+  }
+  igSetCursorScreenPos((ImVec2){x0,t_min.y-pad});
+  igPushIDInt((int)id);
+  bool pressed = igInvisibleButton("##section",(ImVec2){x1-x0>1? x1-x0 : 1,t_max.y-t_min.y+pad*2},ImGuiButtonFlags_None);
+  if(igIsItemHovered(ImGuiHoveredFlags_None))igSetMouseCursor(ImGuiMouseCursor_Hand);
+  igPopID();
+  igSetCursorScreenPos(after);
+  if(pressed&&!searching){
+    collapsed = !collapsed;
+    se_menu_section_set_collapsed(id,collapsed);
+  }
+  return !collapsed;
 }
 static bool se_button_themed(int region, const char* label, ImVec2 size, bool always_draw_label){
   label=se_localize_and_cache(label);
@@ -3265,7 +3382,7 @@ SKYEMU_API const char* se_get_cheat_search_json(uint32_t first_result, uint32_t 
 }
 static void se_draw_cheat_finder_locked(float win_w){
   se_cheat_search_t* search = &se_cheat_finder.search;
-  se_section(ICON_FK_SEARCH " Cheat Finder");
+  if(!se_section(ICON_FK_SEARCH " Cheat Finder"))return;
   ImU32 ok_color = 0xff00c000, error_color = 0xff0000ff;
   if(gui_state.design_active){
     ok_color = se_design_u32(gui_state.design.accent_text);
@@ -4822,7 +4939,7 @@ SKYEMU_API const char* se_get_recording_json(void){
   return se_keep_json(&kept,&json);
 }
 static void se_draw_recording_settings(float win_w){
-  se_section(ICON_FK_VIDEO_CAMERA " Recording");
+  if(!se_section(ICON_FK_VIDEO_CAMERA " Recording"))return;
   se_rec_lock();
   char time[32], size[32];
   // Video
@@ -4999,7 +5116,7 @@ static void se_input_state_json(se_string_t* out){
   se_string_printf(out,"}}");
 }
 static void se_draw_streaming_settings(float win_w){
-  se_section(ICON_FK_PODCAST " Streaming");
+  if(!se_section(ICON_FK_PODCAST " Streaming"))return;
   bool enabled = gui_state.settings.http_control_server_enable;
   if(se_checkbox("Streaming and Remote Play",&enabled))gui_state.settings.http_control_server_enable = enabled;
   if(!enabled){
@@ -8960,7 +9077,7 @@ SKYEMU_API uint32_t se_get_controller_face_layout(void){
   return gui_state.settings.controller_face_layout;
 }
 void se_draw_controller_config(gui_state_t* gui){
-  se_section(ICON_FK_GAMEPAD " Controllers");
+  if(!se_section(ICON_FK_GAMEPAD " Controllers"))return;
   ImGuiStyle* style = igGetStyle();
   se_controller_state_t *cont = &gui->controller;
   // Can be chosen before a controller is connected, it is used for its default bindings
@@ -9182,7 +9299,7 @@ static void se_draw_touch_layout_editor_toolbar(float top){
 }
 // ROM patches of the loaded game (ROM hacks, translations, fixes)
 static void se_draw_patch_settings(void){
-  se_section(ICON_FK_PUZZLE_PIECE " ROM Patches");
+  if(!se_section(ICON_FK_PUZZLE_PIECE " ROM Patches"))return;
   bool apply = !gui_state.settings.soft_patching_off;
   if(se_checkbox("Apply Patches",&apply)){
     gui_state.settings.soft_patching_off = !apply;
@@ -9227,8 +9344,7 @@ static void se_draw_patch_settings(void){
   }
 }
 void se_draw_touch_controls_settings(){
-
-  se_section(ICON_FK_HAND_O_RIGHT " Touch Control Settings");
+  if(!se_section(ICON_FK_HAND_O_RIGHT " Touch Control Settings"))return;
   float aspect_ratio = gui_state.screen_width/(float)gui_state.screen_height;
   float scale = (igGetWindowContentRegionWidth()-2)/(aspect_ratio+1.0/aspect_ratio);
 
@@ -9490,35 +9606,64 @@ static void se_draw_design_settings(){
     }else se_text_disabled("Not found, using the bundled font");
   }
 }
+// Search field of the menu, with a button that clears it or collapses / expands every section
+static void se_draw_menu_search(void){
+  ImGuiStyle* style = igGetStyle();
+  ImVec2 avail;
+  igGetContentRegionAvail(&avail);
+  float bw = igGetFrameHeight();
+  char hint[96];
+  snprintf(hint,sizeof(hint),ICON_FK_SEARCH " %s",se_localize_and_cache("Search settings"));
+  igSetNextItemWidth(avail.x-bw-style->ItemSpacing.x);
+  igInputTextWithHint("##MenuSearch",hint,gui_state.menu_search,sizeof(gui_state.menu_search),ImGuiInputTextFlags_AutoSelectAll,NULL,NULL);
+  igSameLine(0,style->ItemSpacing.x);
+  if(se_menu_search_query()[0]){
+    if(se_button(ICON_FK_TIMES "##ClearMenuSearch",(ImVec2){bw,bw}))gui_state.menu_search[0]=0;
+    se_tooltip("Clear the search");
+    return;
+  }
+  // Sections drawn in the last frame
+  bool any_open = false;
+  for(int i=0;i<gui_state.menu_section_count;++i)any_open|=!se_menu_section_collapsed(gui_state.menu_section_ids[i]);
+  if(se_button(any_open? ICON_FK_COMPRESS "##CollapseMenu" : ICON_FK_EXPAND "##CollapseMenu",(ImVec2){bw,bw})){
+    for(int i=0;i<gui_state.menu_section_count;++i)se_menu_section_set_collapsed(gui_state.menu_section_ids[i],any_open);
+  }
+  se_tooltip(any_open? "Collapse all sections" : "Expand all sections");
+}
 void se_draw_menu_panel(){
     if (!show_ui)
         return;
   ImGuiStyle *style = igGetStyle();
   int win_w = igGetWindowContentRegionWidth();
-  se_section(ICON_FK_FLOPPY_O " Save States");
-  if(gui_state.settings.hardcore_mode&&gui_state.ra_logged_in)se_text("Disabled in Hardcore Mode");
-  else{
-    if (cloud_state.drive){
-      if (igBeginTabBar("Saves",ImGuiTabBarFlags_None)){
-        if (igBeginTabItem("Local",NULL,ImGuiTabItemFlags_None)){
-          se_draw_save_states(false);
-          igEndTabItem();
+  se_draw_menu_search();
+  gui_state.menu_sections = true;
+  gui_state.menu_sections_shown = 0;
+  gui_state.menu_section_count = 0;
+  if(se_section(ICON_FK_FLOPPY_O " Save States")){
+    if(gui_state.settings.hardcore_mode&&gui_state.ra_logged_in)se_text("Disabled in Hardcore Mode");
+    else{
+      if (cloud_state.drive){
+        if (igBeginTabBar("Saves",ImGuiTabBarFlags_None)){
+          if (igBeginTabItem("Local",NULL,ImGuiTabItemFlags_None)){
+            se_draw_save_states(false);
+            igEndTabItem();
+          }
+          if (igBeginTabItem("Cloud",NULL,ImGuiTabItemFlags_None)){
+            se_draw_save_states(true);
+            igEndTabItem();
+          }
+          igEndTabBar();
         }
-        if (igBeginTabItem("Cloud",NULL,ImGuiTabItemFlags_None)){
-          se_draw_save_states(true);
-          igEndTabItem();
-        }
-        igEndTabBar();
+      }else{
+        se_draw_save_states(false);
       }
-    }else{
-      se_draw_save_states(false);
     }
   }
   if(emu_state.rom_loaded)se_draw_recording_settings(win_w);
 #ifdef ENABLE_HTTP_CONTROL_SERVER
   if(emu_state.rom_loaded)se_draw_streaming_settings(win_w);
 #endif
-  se_section(ICON_FK_CLOUD " Google Drive");
+  if(se_section(ICON_FK_CLOUD " Google Drive")){
   if (!cloud_state.drive){
     bool pending_login = cloud_drive_pending_login();
     if (pending_login) se_push_disabled();
@@ -9565,10 +9710,12 @@ void se_draw_menu_panel(){
     if (pending_logout) se_pop_disabled();
     igEndGroup();
   }
+  }
 
   if(emu_state.system==SYSTEM_NDS || emu_state.system == SYSTEM_GBA || emu_state.system == SYSTEM_GB){
-    se_section(ICON_FK_KEY " Action Replay Codes");
-    if(gui_state.settings.hardcore_mode&&gui_state.ra_logged_in) se_text("Disabled in Hardcore Mode");
+    bool cheats_blocked = gui_state.settings.hardcore_mode&&gui_state.ra_logged_in;
+    if(!se_section(ICON_FK_KEY " Action Replay Codes")){}
+    else if(cheats_blocked) se_text("Disabled in Hardcore Mode");
     else{
       int free_cheat_index = -1; 
       for(int i=0;i<SE_NUM_CHEATS;i++){
@@ -9628,12 +9775,12 @@ void se_draw_menu_panel(){
           memset(cheat->buffer,0,sizeof(cheat->buffer));
         }
       }else se_text_disabled(se_localize_and_cache("All %d code slots are used"),SE_NUM_CHEATS);
-      se_draw_cheat_finder(win_w);
     }
+    if(!cheats_blocked)se_draw_cheat_finder(win_w);
   }
   if(emu_state.rom_loaded)se_draw_patch_settings();
   #ifdef ENABLE_RETRO_ACHIEVEMENTS
-  se_section(ICON_FK_TROPHY " RetroAchievements");
+  if(se_section(ICON_FK_TROPHY " RetroAchievements")){
   const rc_client_user_t* user = rc_client_get_user_info(retro_achievements_get_client());
   igPushIDStr("RetroAchievements");
   if (!user)
@@ -9777,11 +9924,11 @@ void se_draw_menu_panel(){
       }
   }
   igPopID();
+  }
   #endif
   {
     se_bios_info_t * info = &gui_state.bios_info;
-    if(emu_state.rom_loaded){
-      se_section(ICON_FK_CROSSHAIRS " Located Files");
+    if(emu_state.rom_loaded&&se_section(ICON_FK_CROSSHAIRS " Located Files")){
       static const char* wildcard_types[]={NULL};
       if(sb_file_exists(emu_state.save_file_path)){
         igPushStyleColorU32(ImGuiCol_Text,0xff00ff00);
@@ -9820,7 +9967,7 @@ void se_draw_menu_panel(){
       }
     }
   }
-  se_section(ICON_FK_TEXT_HEIGHT " GUI");
+  if(se_section(ICON_FK_TEXT_HEIGHT " GUI")){
   se_field_label("Language");igSameLine(SE_FIELD_INDENT,0);
   igPushItemWidth(-1);
   se_design_push_combo_style();
@@ -9962,8 +10109,9 @@ void se_draw_menu_panel(){
     se_checkbox("Full Screen",&fullscreen);
     if(fullscreen!=sapp_is_fullscreen())sapp_toggle_fullscreen();
   }
-  
-  se_section(ICON_FK_DESKTOP " Display Settings");
+  }
+
+  if(se_section(ICON_FK_DESKTOP " Display Settings")){
   int v = gui_state.settings.screen_shader;
   igPushItemWidth(-1);
   se_field_label("Screen Shader");igSameLine(SE_FIELD_INDENT,0);
@@ -10047,11 +10195,11 @@ void se_draw_menu_panel(){
   }
   igSameLine(0,2);
   if(se_button(ICON_FK_REPEAT,(ImVec2){20,20}))se_reset_default_gb_palette();
+  }
 
   se_draw_touch_controls_settings();
 
-  if(gui_state.ui_type!=SE_UI_ANDROID&&gui_state.ui_type!=SE_UI_IOS){
-    se_section(ICON_FK_KEYBOARD_O " Keybinds");
+  if(gui_state.ui_type!=SE_UI_ANDROID&&gui_state.ui_type!=SE_UI_IOS&&se_section(ICON_FK_KEYBOARD_O " Keybinds")){
     bool value= true; 
     bool modified = se_handle_keybind_settings(SE_BIND_KEYBOARD,&gui_state.key);
     if(se_button("Reset Default Keybinds",(ImVec2){0,0})){
@@ -10070,8 +10218,7 @@ void se_draw_menu_panel(){
   #if defined( USE_SDL) ||defined(SE_PLATFORM_ANDROID)
   se_draw_controller_config(&gui_state);
   #endif
-  if(gui_state.ui_type==SE_UI_DESKTOP){
-    se_section(ICON_FK_CODE_FORK " Additional Search Paths");
+  if(gui_state.ui_type==SE_UI_DESKTOP&&se_section(ICON_FK_CODE_FORK " Additional Search Paths")){
     se_input_path("Save File/State Path", gui_state.paths.save,ImGuiInputTextFlags_None);
     se_input_path("BIOS/Firmware Path", gui_state.paths.bios,ImGuiInputTextFlags_None);
     se_input_path("Cheat Code Path", gui_state.paths.cheat_codes,ImGuiInputTextFlags_None);
@@ -10080,12 +10227,12 @@ void se_draw_menu_panel(){
     bool save_to_path=gui_state.settings.save_to_path;
     se_checkbox("Create new files in paths",&save_to_path);
     gui_state.settings.save_to_path=save_to_path;
-    if(memcmp(&gui_state.last_saved_paths, &gui_state.paths,sizeof(gui_state.paths))){
-      se_save_search_paths();
-      gui_state.last_saved_paths=gui_state.paths;
-    }
   }
-  se_section(ICON_FK_WRENCH " Advanced");
+  if(memcmp(&gui_state.last_saved_paths, &gui_state.paths,sizeof(gui_state.paths))){
+    se_save_search_paths();
+    gui_state.last_saved_paths=gui_state.paths;
+  }
+  if(se_section(ICON_FK_WRENCH " Advanced")){
   se_field_label("Solar Sensor");igSameLine(SE_FIELD_INDENT,0);
   igPushItemWidth(-1);
   se_slider_float("##Solar Sensor",&emu_state.joy.solar_sensor,0.,1.,"Brightness: %.2f");
@@ -10099,7 +10246,7 @@ void se_draw_menu_panel(){
 #ifdef ENABLE_HTTP_CONTROL_SERVER
   bool enable_hcs = gui_state.settings.http_control_server_enable;
   se_checkbox("Enable HTTP Control Server",&enable_hcs);
-  gui_state.settings.http_control_server_enable = true;
+  gui_state.settings.http_control_server_enable = enable_hcs;
   if(enable_hcs){
     int port = gui_state.settings.http_control_server_port;
     se_field_label("Server Port");igSameLine(SE_FIELD_INDENT,0);
@@ -10136,6 +10283,11 @@ void se_draw_menu_panel(){
     https_clear_cache();
   }
   if (!enable_download_cache)se_pop_disabled();
+  }
+  gui_state.menu_sections = false;
+  if(se_menu_search_query()[0]&&!gui_state.menu_sections_shown){
+    se_text_disabled("%s",se_localize_and_cache("No settings match the search"));
+  }
 
   float bottom_padding =0;
   #ifdef SE_PLATFORM_IOS

@@ -18,7 +18,7 @@ jobs:
       - name: Configure & Build 🔧
         run: |
           cmake -B build -DRETRO_CORE_ONLY=ON
-          cmake --build build --target skyemu_libretro --config Release --parallel
+          cmake --build build --target skyemu_libretro --config Release --parallel "$(nproc)"
           cd build && zip skyemu_libretro.zip skyemu_libretro.so ../skyemu_libretro.info
       - name: Upload 🚀
         uses: actions/upload-artifact@v7

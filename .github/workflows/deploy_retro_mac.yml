@@ -12,7 +12,7 @@ jobs:
       - name: Configure & Build 🔧
         run: |
           cmake -B build -DRETRO_CORE_ONLY=ON
-          cmake --build build --target skyemu_libretro --parallel
+          cmake --build build --target skyemu_libretro --parallel "$(sysctl -n hw.ncpu)"
           cd build && zip skyemu_libretro.zip skyemu_libretro.dylib ../skyemu_libretro.info
       - name: Upload 🚀
         uses: actions/upload-artifact@v7

@@ -211,6 +211,10 @@ Dependencies and the steps for Windows, Android, iOS, macOS, the web and libretr
 > Change the look in **Menu → GUI → Design**: *Platform Native*, *Material 3*, *Fluent (Windows 11)*,
 > *Adwaita (GNOME)* or *SkyEmu Classic*. Color scheme, contrast, accent color and font are right below it.
 
+The **Menu** starts with a search field: type part of an option's name, such as *gap* or *shader*, to see only the
+sections that have it. Click a section title to collapse it, or use the button next to the search field to collapse
+or expand every section; SkyEmu remembers which sections are collapsed.
+
 ## 🎹 Controls
 
 Every binding can be changed in **Menu → Keybinds**, and game controllers are mapped automatically. On touch
