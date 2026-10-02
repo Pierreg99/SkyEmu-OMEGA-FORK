@@ -101,7 +101,11 @@
 #define SE_KEY_SOLAR_P  33
 #define SE_KEY_SOLAR_M  34
 #define SE_KEY_TOGGLE_FULLSCREEN 35
-#define SE_NUM_KEYBINDS 36
+#define SE_KEY_SCREENSHOT 36
+#define SE_KEY_RECORD_VIDEO 37
+#define SE_KEY_SAVE_REPLAY 38
+#define SE_KEY_SWAP_SCREENS 39
+#define SE_NUM_KEYBINDS 40
 
 //Should be power of 2 for perf, 8192 samples gives ~85ms maximal latency for 48kHz
 #define SB_AUDIO_RING_BUFFER_SIZE (2048*8)
@@ -148,6 +152,8 @@ typedef struct {
   int frame;
   bool render_frame;
   sb_ring_buffer_t audio_ring_buff;
+  // While set, gets every 48 kHz stereo sample the core makes, also those the ring has no room for
+  void (*audio_tap)(int16_t left, int16_t right);
   float audio_channel_output[16];
   float mix_l_volume, mix_r_volume;
   float master_volume;

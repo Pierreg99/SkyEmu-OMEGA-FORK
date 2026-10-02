@@ -1293,6 +1293,10 @@ SOKOL_APP_API_DECL const void* sapp_d3d11_get_render_target_view(void);
 SOKOL_APP_API_DECL const void* sapp_d3d11_get_depth_stencil_view(void);
 /* Win32: get the HWND window handle */
 SOKOL_APP_API_DECL const void* sapp_win32_get_hwnd(void);
+/* X11: get the Display* connection (SkyEmu addition) */
+SOKOL_APP_API_DECL void* sapp_x11_get_display(void);
+/* X11: get the Window XID (SkyEmu addition) */
+SOKOL_APP_API_DECL unsigned long sapp_x11_get_window(void);
 
 /* WebGPU: get WGPUDevice handle */
 SOKOL_APP_API_DECL const void* sapp_wgpu_get_device(void);
@@ -11121,6 +11125,24 @@ SOKOL_API_IMPL const void* sapp_win32_get_hwnd(void) {
     SOKOL_ASSERT(_sapp.valid);
     #if defined(_SAPP_WIN32)
         return _sapp.win32.hwnd;
+    #else
+        return 0;
+    #endif
+}
+
+SOKOL_API_IMPL void* sapp_x11_get_display(void) {
+    SOKOL_ASSERT(_sapp.valid);
+    #if defined(_SAPP_LINUX)
+        return (void*) _sapp.x11.display;
+    #else
+        return 0;
+    #endif
+}
+
+SOKOL_API_IMPL unsigned long sapp_x11_get_window(void) {
+    SOKOL_ASSERT(_sapp.valid);
+    #if defined(_SAPP_LINUX)
+        return (unsigned long) _sapp.x11.window;
     #else
         return 0;
     #endif

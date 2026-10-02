@@ -1,52 +1,54 @@
-Native Activity
-===============
-Native Activity is an Android sample that initializes a GLES 2.0 context and reads accelerometer data from C code using [Native Activity](http://developer.android.com/reference/android/app/NativeActivity.html).
+<sub>[SkyEmu OMEGA](../../README.md) › [Docs](../../docs/README.md) › Android project</sub>
 
-This sample uses the new [Android Studio CMake plugin](http://tools.android.com/tech-docs/external-c-builds) with C++ support.
+# SkyEmu for Android
 
-Pre-requisites
---------------
-- Android Studio 2.2+ with [NDK](https://developer.android.com/ndk/) bundle.
+This Gradle project builds SkyEmu for Android: the native emulator (`libSkyEmu.so`, compiled from the
+repository's top-level `CMakeLists.txt`) and the Java classes that show and control it. The GUI uses
+[Material 3](../../docs/DESIGN_SYSTEMS.md) by default, with Material You colors on Android 12 and later.
 
-Getting Started
----------------
-1. [Download Android Studio](http://developer.android.com/sdk/index.html)
-1. Launch Android Studio.
-1. Open the sample directory.
-1. Open *File/Project Structure...*
-  - Click *Download* or *Select NDK location*.
-1. Click *Tools/Android/Sync Project with Gradle Files*.
-1. Click *Run/Run 'app'*.
+| Module | What it is | Output |
+|---|---|---|
+| `standalone` | The SkyEmu app, ready to install (application ID `com.sky.SkyEmu`) | `standalone/build/outputs/apk/release/SkyEmu-v32-release.apk` |
+| `app` | The **Android library** with everything else, for the app and for host apps that embed SkyEmu | `app/build/outputs/aar/app-release.aar` |
 
-Screenshots
------------
-![screenshot](screenshot.png)
+## Requirements
 
-Support
--------
-If you've found an error in these samples, please [file an issue](https://github.com/googlesamples/android-ndk/issues/new).
+| | |
+|---|---|
+| Android Gradle Plugin | 8.7.0 (Gradle 8.9 through the wrapper) |
+| JDK | 17 |
+| NDK | 28.2.13676358 |
+| CMake | 3.22.1 |
+| compileSdk / targetSdk | 35 |
+| minSdk | 24 (Android 7.0) |
+| ABIs | arm64-v8a, armeabi-v7a, x86, x86_64 |
 
-Patches are encouraged, and may be submitted by [forking this project](https://github.com/googlesamples/android-ndk/fork) and
-submitting a pull request through GitHub. Please see [CONTRIBUTING.md](../CONTRIBUTING.md) for more details.
+## Build
 
-- [Stack Overflow](http://stackoverflow.com/questions/tagged/android-ndk)
-- [Android Tools Feedbacks](http://tools.android.com/feedback)
+```sh
+cd tools/android_project
+./gradlew :standalone:assembleRelease :app:assembleRelease
+adb install standalone/build/outputs/apk/release/SkyEmu-v32-release.apk
+```
 
-License
--------
-Copyright 2015 Google, Inc.
+Or open this folder in Android Studio, let it sync and run the `standalone` configuration. Gradle finds the
+Android SDK through `ANDROID_HOME` or a `local.properties` file with `sdk.dir=...` (not checked in, Android Studio
+writes it). `-PskyemuAbis=arm64-v8a` builds only one ABI, which is faster while developing. The release app is
+signed with the open signing key in this folder, replace it with your own for distribution.
 
-Licensed to the Apache Software Foundation (ASF) under one or more contributor
-license agreements.  See the NOTICE file distributed with this work for
-additional information regarding copyright ownership.  The ASF licenses this
-file to you under the Apache License, Version 2.0 (the "License"); you may not
-use this file except in compliance with the License.  You may obtain a copy of
-the License at
+## What is inside
 
-  http://www.apache.org/licenses/LICENSE-2.0
+| Path | Contents |
+|---|---|
+| `standalone/build.gradle` | The app (`com.android.application`): application ID, version, signing |
+| `standalone/src/main/AndroidManifest.xml` | Makes `EnhancedNativeActivity` the launcher activity |
+| `app/build.gradle` | Library module (`com.android.library`, namespace `com.skyemu`) and the NDK / CMake setup |
+| `app/consumer-rules.pro` | Keeps the classes native code calls through JNI when an app shrinks its code |
+| `app/src/main/AndroidManifest.xml` | `EnhancedNativeActivity` (merged into the app or host app), file associations for `.gb`, `.gbc`, `.gba`, `.nds` and `.zip`, and the `skyemu://oauth` link used for sign-in |
+| `app/src/main/java/com/sky/SkyEmu/EnhancedNativeActivity.java` | The `NativeActivity` that runs SkyEmu: controllers, keyboard, file picker, system theme |
+| `app/src/main/java/com/sky/SkyEmu/MainSkyEmuObject.java` | JNI API for host apps: input, save states, screen and every setting |
+| `app/src/main/res` | Launcher icons and strings |
+| `app/src/main/cpp` | Left over from the Google NDK *Native Activity* sample this project started from (Apache 2.0); not part of the build |
 
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
-WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
-License for the specific language governing permissions and limitations under
-the License.
+How a host app talks to SkyEmu (the activity's methods, the `se_android_*` API and the callbacks native code
+expects) is described in [Embedding › Android library](../../docs/EMBEDDING.md#android-library).

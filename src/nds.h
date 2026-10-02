@@ -6902,7 +6902,9 @@ static FORCE_INLINE void nds_tick_audio(nds_t*nds, sb_emu_state_t*emu){
         audio->channel[c].sample+=1;
       }
     }
-    if((sb_ring_buffer_size(&emu->audio_ring_buff)+3>SB_AUDIO_RING_BUFFER_SIZE)) continue;
+    // A recording gets every sample, also when playback can't keep up (fast forward)
+    bool ring_full = sb_ring_buffer_size(&emu->audio_ring_buff)+3>SB_AUDIO_RING_BUFFER_SIZE;
+    if(ring_full&&!emu->audio_tap) continue;
 
     // Clipping
     if(l>1.0)l=1;
@@ -6913,14 +6915,17 @@ static FORCE_INLINE void nds_tick_audio(nds_t*nds, sb_emu_state_t*emu){
     r*=0.5;
 
     // Quantization
+    int16_t sample_l = l*32760, sample_r = r*32760;
+    if(emu->audio_tap)emu->audio_tap(sample_l,sample_r);
+    if(ring_full)continue;
     unsigned write_entry0 = (emu->audio_ring_buff.write_ptr++)%SB_AUDIO_RING_BUFFER_SIZE;
     unsigned write_entry1 = (emu->audio_ring_buff.write_ptr++)%SB_AUDIO_RING_BUFFER_SIZE;
 
     emu->mix_l_volume = emu->mix_l_volume*lowpass_coef + fabs(l)*(1.0-lowpass_coef);
     emu->mix_r_volume = emu->mix_r_volume*lowpass_coef + fabs(r)*(1.0-lowpass_coef); 
 
-    emu->audio_ring_buff.data[write_entry0] = l*32760;
-    emu->audio_ring_buff.data[write_entry1] = r*32760;
+    emu->audio_ring_buff.data[write_entry0] = sample_l;
+    emu->audio_ring_buff.data[write_entry1] = sample_r;
   }
 }
 

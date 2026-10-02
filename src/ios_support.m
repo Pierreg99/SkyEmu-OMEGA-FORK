@@ -1,6 +1,8 @@
 #include "ios_support.h"
 #include "sokol_app.h"
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #import <UIKit/UIKit.h>
 #import <WebKit/WebKit.h>
 #import <SafariServices/SafariServices.h> // added for secure browser support
@@ -192,9 +194,14 @@ void se_ios_close_modal(){
 }
 
 void se_ios_remote_keycode_callback(const char *data1, const char* data2){
+  // The strings belong to the HTTP request, copy them for the main thread
+  char* key = strdup(data1? data1 : "");
+  char* value = strdup(data2? data2 : "");
   [[NSOperationQueue mainQueue] addOperationWithBlock:^ {
     // Forward the keycode data to sokol_app for processing
-    sapp_ios_remote_keycode_callback(data1, data2);
+    sapp_ios_remote_keycode_callback(key, value);
+    free(key);
+    free(value);
    }];
 }
 

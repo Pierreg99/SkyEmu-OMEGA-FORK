@@ -5,15 +5,18 @@ import static android.view.InputDevice.SOURCE_GAMEPAD;
 import static android.view.InputDevice.SOURCE_JOYSTICK;
 import static android.view.KeyEvent.*;
 
+import android.app.UiModeManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.content.res.Configuration;
 import android.database.Cursor;
 import android.graphics.Rect;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.OpenableColumns;
+import android.provider.Settings;
 import android.text.InputType;
 import android.util.DisplayMetrics;
 import android.util.Log;
@@ -65,6 +68,78 @@ public class EnhancedNativeActivity extends NativeActivity {
     }
     public static String getLanguage() {
         return Locale.getDefault().toString();
+    }
+
+    // Material You tonal palettes (Android 12+), ordered like SkyEmu's standard tones:
+    // 100, 99, 95, 90, 80, 70, 60, 50, 40, 30, 20, 10, 0
+    private static final int[][] MATERIAL_YOU_PALETTES = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ? new int[][]{
+        {android.R.color.system_accent1_0, android.R.color.system_accent1_10, android.R.color.system_accent1_50,
+         android.R.color.system_accent1_100, android.R.color.system_accent1_200, android.R.color.system_accent1_300,
+         android.R.color.system_accent1_400, android.R.color.system_accent1_500, android.R.color.system_accent1_600,
+         android.R.color.system_accent1_700, android.R.color.system_accent1_800, android.R.color.system_accent1_900,
+         android.R.color.system_accent1_1000},
+        {android.R.color.system_accent2_0, android.R.color.system_accent2_10, android.R.color.system_accent2_50,
+         android.R.color.system_accent2_100, android.R.color.system_accent2_200, android.R.color.system_accent2_300,
+         android.R.color.system_accent2_400, android.R.color.system_accent2_500, android.R.color.system_accent2_600,
+         android.R.color.system_accent2_700, android.R.color.system_accent2_800, android.R.color.system_accent2_900,
+         android.R.color.system_accent2_1000},
+        {android.R.color.system_accent3_0, android.R.color.system_accent3_10, android.R.color.system_accent3_50,
+         android.R.color.system_accent3_100, android.R.color.system_accent3_200, android.R.color.system_accent3_300,
+         android.R.color.system_accent3_400, android.R.color.system_accent3_500, android.R.color.system_accent3_600,
+         android.R.color.system_accent3_700, android.R.color.system_accent3_800, android.R.color.system_accent3_900,
+         android.R.color.system_accent3_1000},
+        {android.R.color.system_neutral1_0, android.R.color.system_neutral1_10, android.R.color.system_neutral1_50,
+         android.R.color.system_neutral1_100, android.R.color.system_neutral1_200, android.R.color.system_neutral1_300,
+         android.R.color.system_neutral1_400, android.R.color.system_neutral1_500, android.R.color.system_neutral1_600,
+         android.R.color.system_neutral1_700, android.R.color.system_neutral1_800, android.R.color.system_neutral1_900,
+         android.R.color.system_neutral1_1000},
+        {android.R.color.system_neutral2_0, android.R.color.system_neutral2_10, android.R.color.system_neutral2_50,
+         android.R.color.system_neutral2_100, android.R.color.system_neutral2_200, android.R.color.system_neutral2_300,
+         android.R.color.system_neutral2_400, android.R.color.system_neutral2_500, android.R.color.system_neutral2_600,
+         android.R.color.system_neutral2_700, android.R.color.system_neutral2_800, android.R.color.system_neutral2_900,
+         android.R.color.system_neutral2_1000},
+    } : null;
+
+    /*
+     * Called from native code to theme the Material 3 GUI.
+     * Layout: [dark (1 dark, 0 light, -1 unknown), accent ARGB (0 if unknown), palette count (0 or 5),
+     *          then accent1, accent2, accent3, neutral1, neutral2 with 13 tones each,
+     *          then high contrast (1 on, 0 off, -1 unknown)]
+     */
+    public int[] getSystemAppearance() {
+        int[] out = new int[3 + 5 * 13 + 1];
+        int night = getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK;
+        out[0] = night == Configuration.UI_MODE_NIGHT_YES ? 1 : night == Configuration.UI_MODE_NIGHT_NO ? 0 : -1;
+        if (MATERIAL_YOU_PALETTES != null) {
+            try {
+                for (int p = 0; p < 5; ++p) {
+                    for (int t = 0; t < 13; ++t) {
+                        out[3 + p * 13 + t] = getResources().getColor(MATERIAL_YOU_PALETTES[p][t], getTheme());
+                    }
+                }
+                out[1] = out[3 + 7]; // system_accent1_500
+                out[2] = 5;
+            } catch (Exception e) {
+                Log.w(TAG, "Material You palette unavailable", e);
+                out[1] = 0;
+                out[2] = 0;
+            }
+        }
+        out[3 + 5 * 13] = isHighContrast() ? 1 : 0;
+        return out;
+    }
+
+    /* The system contrast level (Android 14+) set to high, or the high contrast text accessibility option */
+    private boolean isHighContrast() {
+        if (Build.VERSION.SDK_INT >= 34) {
+            UiModeManager uiMode = (UiModeManager) getSystemService(Context.UI_MODE_SERVICE);
+            if (uiMode != null && uiMode.getContrast() >= 0.75f) return true;
+        }
+        try {
+            return Settings.Secure.getInt(getContentResolver(), "high_text_contrast_enabled", 0) == 1;
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     public void setRemoteKeycodeCallback(String keyCode) {

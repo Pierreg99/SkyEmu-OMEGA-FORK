@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Adds the launcher entry to the activity of the SkyEmu library -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <application
+      android:label="@string/app_name"
+      android:icon="@mipmap/ic_launcher"
+      android:roundIcon="@mipmap/ic_launcher_round">
+    <activity
+        android:name="com.sky.SkyEmu.EnhancedNativeActivity"
+        android:exported="true">
+      <intent-filter>
+        <action android:name="android.intent.action.MAIN" />
+        <category android:name="android.intent.category.LAUNCHER" />
+      </intent-filter>
+    </activity>
+  </application>
+</manifest>

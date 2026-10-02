@@ -1,0 +1,41 @@
+apply plugin: 'com.android.application'
+
+// The SkyEmu app: the library module (:app) with a launcher entry, signed so it can be installed
+android {
+    namespace = "com.sky.SkyEmu.standalone"
+    signingConfigs {
+        release {
+            // The open signing key in the repository, so everyone can build updates of the same app
+            storePassword 'skyemu-super-secure-password'
+            keyAlias 'skyemu-open-code-certificate'
+            keyPassword 'skyemu-super-secure-password'
+            storeFile file('../skyemu-open-signing-store')
+        }
+    }
+    compileSdkVersion 35
+
+    defaultConfig {
+        applicationId "com.sky.SkyEmu"
+        minSdkVersion 24
+        targetSdkVersion 35
+        versionCode 32
+        versionName "v3.2"
+        setProperty("archivesBaseName", "SkyEmu-v" + versionCode)
+        signingConfig signingConfigs.release
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.release
+        }
+    }
+    packagingOptions {
+        jniLibs {
+            useLegacyPackaging = false
+        }
+    }
+}
+
+dependencies {
+    implementation project(':app')
+}

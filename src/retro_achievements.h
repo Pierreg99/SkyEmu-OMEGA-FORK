@@ -53,6 +53,10 @@ void retro_achievements_restore_state(const uint8_t* buffer);
 
 bool retro_achievements_has_game_loaded(); 
 
+// Unofficial achievements are loaded and listed too. In spectator mode unlocks and leaderboard
+// entries are shown but not sent. Returns true when the game has to be loaded again to apply them.
+bool retro_achievements_set_options(bool unofficial, bool spectator);
+
 #endif
 
 #endif
