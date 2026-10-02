@@ -30,6 +30,10 @@ jobs:
         run: |
           cc -O2 -Wall -Wextra -Isrc tools/se_cheat_finder_test.c src/se_cheat_finder.c -o se_cheat_finder_test
           ./se_cheat_finder_test
+      - name: Recorder tests 🎬
+        run: |
+          cc -O2 -Wall -Wextra -Isrc tools/se_record_test.c src/se_record.c src/stb.c -lm -o se_record_test
+          ./se_record_test
           
       - name: GH Release 🚀
         # You may pin to the exact commit or the version.

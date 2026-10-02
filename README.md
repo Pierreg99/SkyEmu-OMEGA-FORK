@@ -17,7 +17,7 @@
 [![iOS](https://github.com/Pierreg99/SkyEmu-OMEGA-FORK/actions/workflows/deploy_ios.yml/badge.svg)](https://github.com/Pierreg99/SkyEmu-OMEGA-FORK/actions/workflows/deploy_ios.yml)
 [![Web](https://github.com/Pierreg99/SkyEmu-OMEGA-FORK/actions/workflows/deploy_web.yml/badge.svg)](https://github.com/Pierreg99/SkyEmu-OMEGA-FORK/actions/workflows/deploy_web.yml)
 
-[**Get started**](#-get-started) · [**Build**](docs/BUILDING.md) · [**Embed**](docs/EMBEDDING.md) · [**Design systems**](docs/DESIGN_SYSTEMS.md) · [**Shaders**](docs/GRAPHICS.md) · [**Controllers**](docs/CONTROLLERS.md) · [**Cheats & patches**](docs/CHEATS_AND_PATCHES.md) · [**All docs**](docs/README.md)
+[**Get started**](#-get-started) · [**Build**](docs/BUILDING.md) · [**Embed**](docs/EMBEDDING.md) · [**Design systems**](docs/DESIGN_SYSTEMS.md) · [**Shaders**](docs/GRAPHICS.md) · [**Controllers**](docs/CONTROLLERS.md) · [**Cheats & patches**](docs/CHEATS_AND_PATCHES.md) · [**Recording**](docs/RECORDING_AND_STREAMING.md) · [**All docs**](docs/README.md)
 
 </div>
 
@@ -95,6 +95,8 @@
 - IPS, UPS and BPS patches for ROM hacks and translations, applied without touching the ROM
 - On-screen controller with a drag and drop layout editor
 - Game controllers with rumble, readable button names and rebindable keys
+- Video, sound and screenshot recording, and a replay buffer to save the last moments
+- Remote Play in any browser and an overlay for OBS
 
 </td>
 <td valign="top">
@@ -132,6 +134,8 @@
 | **Cheats** | Action Replay engine, 32 codes | Cheat finder that searches memory and makes Action Replay / GameShark codes, 128 codes |
 | **ROM patches** | | IPS, UPS and BPS soft patching, by drag and drop or next to the ROM |
 | **RetroAchievements** | Hardcore and Encore Mode | Adds unofficial achievements, spectator mode and rich presence in the panel |
+| **Recording** | | Videos (every frame, sound in sync, also when fast forwarded), sound, screenshots and a replay buffer |
+| **Streaming** | | Live MJPEG and WAV streams, Remote Play in a browser with touch and controller input, an OBS overlay |
 | **Windows** | Stand-alone app | `SkyEmu.dll` with a C API ([`skyemu_dll.h`](src/skyemu_dll.h)) for host apps |
 | **Android** | Stand-alone app | Android library with a JNI settings and control API |
 | **iOS / macOS** | Stand-alone app | Static libraries for host apps (the macOS app bundle is still available) |
@@ -219,6 +223,8 @@ Customize Layout** lets you move and resize its buttons. See [docs/CONTROLLERS.m
 | Start / Select | <kbd>Enter</kbd> / <kbd>'</kbd> | | Load state 1–4 | <kbd>F1</kbd> … <kbd>F4</kbd> |
 | Fold screen (DS) | <kbd>B</kbd> | | Solar sensor − / + | <kbd>-</kbd> / <kbd>=</kbd> |
 | Tap screen (DS) | <kbd>V</kbd> | | Full screen | <kbd>F11</kbd> |
+| | | | Record video / Save replay | <kbd>F9</kbd> / <kbd>F10</kbd> |
+| | | | Screenshot | <kbd>F12</kbd> |
 
 ## 🎯 Accuracy
 
@@ -260,6 +266,7 @@ The comparison with other emulators is in [docs/Accuracy.md](docs/Accuracy.md).
 | [Controllers](docs/CONTROLLERS.md) | On-screen controller, layout editor and game controller mapping |
 | [Cheats and ROM patches](docs/CHEATS_AND_PATCHES.md) | Cheat codes, the cheat finder, and IPS / UPS / BPS patches |
 | [RetroAchievements](docs/RETROACHIEVEMENTS.md) | Achievements, Hardcore, Encore, unofficial and spectator modes |
+| [Recording and streaming](docs/RECORDING_AND_STREAMING.md) | Videos, screenshots, the replay buffer, Remote Play and OBS |
 | [HTTP control server](docs/HTTP_CONTROL_SERVER.md) | Scripting and automation over HTTP |
 | [Custom themes](docs/CUSTOM_THEMES.md) | Making image skins for the classic design |
 | [Accuracy](docs/Accuracy.md) | Test ROM and game compatibility comparison |

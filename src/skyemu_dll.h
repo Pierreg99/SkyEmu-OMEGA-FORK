@@ -255,6 +255,46 @@ SKYEMU_API void se_set_hardcore_mode(uint32_t value);
 SKYEMU_API uint32_t se_get_hardcore_mode(void);
 
 /*
+ * Recording. Videos are AVI files (MJPEG or uncompressed frames with 48 kHz PCM sound) of every
+ * emulated frame, so they play at normal speed also when the game was fast forwarded; sound only
+ * is recorded as WAV. Files are named "<game> <date> <time>" and saved in the Recording Path, or
+ * next to the save file. The replay buffer keeps the last 15, 30, 60 or 120 seconds (0 = off) for
+ * se_save_replay. se_get_last_recording_path is the last file saved, se_get_recording_message
+ * what happened last (for example an error) and se_get_recording_json the state as JSON.
+ * Strings stay valid until the next recording change.
+ */
+SKYEMU_API bool se_start_video_recording(void);
+SKYEMU_API void se_stop_video_recording(void);
+SKYEMU_API bool se_is_recording_video(void);
+SKYEMU_API bool se_start_audio_recording(void);
+SKYEMU_API void se_stop_audio_recording(void);
+SKYEMU_API bool se_is_recording_audio(void);
+SKYEMU_API bool se_save_screenshot(void);
+SKYEMU_API bool se_save_replay(void);
+SKYEMU_API const char* se_get_last_recording_path(void);
+SKYEMU_API const char* se_get_recording_message(void);
+SKYEMU_API const char* se_get_recording_json(void);
+SKYEMU_API void se_set_record_scale(int scale);       /* 1-4 times the console screen */
+SKYEMU_API int se_get_record_scale(void);
+SKYEMU_API void se_set_record_format(int format);     /* 0 high, 1 standard (smaller), 2 lossless */
+SKYEMU_API int se_get_record_format(void);
+SKYEMU_API void se_set_record_audio(int enabled);     /* Sound in videos */
+SKYEMU_API int se_get_record_audio(void);
+SKYEMU_API void se_set_replay_seconds(int seconds);   /* 0, 15, 30, 60 or 120 */
+SKYEMU_API int se_get_replay_seconds(void);
+SKYEMU_API void se_set_screenshot_scale(int scale);   /* 1-8 */
+SKYEMU_API int se_get_screenshot_scale(void);
+
+/*
+ * Streaming, through the HTTP control server: /stream.mjpg (video), /stream.wav (sound), /remote
+ * (Remote Play page) and /overlay (page for streaming software). Size 1-3 and 60 or 30 fps.
+ */
+SKYEMU_API void se_set_stream_scale(int scale);
+SKYEMU_API int se_get_stream_scale(void);
+SKYEMU_API void se_set_stream_fps(int fps);
+SKYEMU_API int se_get_stream_fps(void);
+
+/*
  * RetroAchievements. se_ra_login starts logging in (the token is saved, so it only has to be done
  * once) and se_ra_get_login_state returns 0 logged out, 1 logging in or 2 logged in;
  * se_ra_get_login_error explains a failed login. Unofficial achievements are loaded and listed

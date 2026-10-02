@@ -25,6 +25,7 @@
 ### 🎮 Play
 - [**Cheats and ROM patches**](CHEATS_AND_PATCHES.md): cheat codes, the cheat finder, and IPS, UPS and BPS patches for hacks and translations
 - [**RetroAchievements**](RETROACHIEVEMENTS.md): achievements, Hardcore, Encore, unofficial and spectator modes
+- [**Recording and streaming**](RECORDING_AND_STREAMING.md): videos, screenshots, replays, Remote Play and OBS
 - [**Controllers**](CONTROLLERS.md): on-screen controller, layout editor and game controller mapping
 
 </td>

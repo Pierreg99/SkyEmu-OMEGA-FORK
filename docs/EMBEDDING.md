@@ -59,7 +59,7 @@ The names are the keybind names shown in the GUI:
 
 `A` `B` `X` `Y` `Up` `Down` `Left` `Right` `L` `R` `Start` `Select` `Fold Screen (NDS)` `Tap Screen (NDS)`
 `Capture State 0`–`3` `Restore State 0`–`3` `Reset Game` `Turbo A` `Turbo B` `Turbo X` `Turbo Y` `Turbo L`
-`Turbo R` `Solar Sensor+` `Solar Sensor-` `Toggle Full Screen`
+`Turbo R` `Solar Sensor+` `Solar Sensor-` `Toggle Full Screen` `Screenshot` `Record Video` `Save Replay`
 
 ### Framebuffer
 
@@ -128,6 +128,24 @@ se_set_ra_spectator(1);
 const char* achievements = se_get_achievements_json();
 ```
 
+### Recording and streaming
+
+```c
+se_set_record_scale(3);                      // videos at 3x the console screen
+se_start_video_recording();                  // AVI with sound, every emulated frame
+/* ... */
+se_stop_video_recording();
+printf("%s\n", se_get_last_recording_path());
+
+se_set_replay_seconds(30);                   // keep the last 30 seconds
+se_save_replay();                            // and save them as a video
+se_save_screenshot();
+```
+
+The live streams, the Remote Play page and the overlay are served by the
+[HTTP control server](HTTP_CONTROL_SERVER.md#streammjpg--streamwav). See
+[Recording and streaming](RECORDING_AND_STREAMING.md).
+
 Strings returned by the `_json` and status functions stay valid until the same function is called again. The
 search comparisons, the JSON fields and the other functions are listed in [`skyemu_dll.h`](../src/skyemu_dll.h)
 and explained in [Cheats and ROM patches](CHEATS_AND_PATCHES.md) and [RetroAchievements](RETROACHIEVEMENTS.md).
@@ -187,7 +205,9 @@ methods for the host:
 `se_android_capture_state_slot(int)` and `se_android_set_design_system(int)`. Patches, cheats, the cheat finder
 and RetroAchievements are there too, for example `se_android_load_patch(String)`, `se_android_add_cheat(String,
 String, int)`, `se_android_cheat_search_filter(int, long)` and `se_android_get_achievements_json()`. Addresses and
-values are passed as `long` so the whole unsigned 32-bit range fits.
+values are passed as `long` so the whole unsigned 32-bit range fits. Recording is available as
+`se_android_start_video_recording()`, `se_android_save_screenshot()`, `se_android_save_replay()` and the setters
+of its options.
 
 ### Your own activity
 

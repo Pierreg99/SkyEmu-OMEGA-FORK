@@ -6,8 +6,10 @@ SkyEmu contains a small web server with a REST-like API, so other programs and s
 load games, read the screen, read and write memory, step frames, press buttons and change settings.
 
 It is available in all native builds (not in the web build). Enable it in **Menu → Advanced → Enable HTTP
-Control Server** and pick the port (8080 by default). While you play in RetroAchievements Hardcore Mode it only
-answers [`/achievements`](#achievements). Try it from a browser:
+Control Server** (or **Menu → Streaming**) and pick the port (8080 by default). While you play in RetroAchievements
+Hardcore Mode it only answers the commands that don't change the game: [`/achievements`](#achievements), the
+[recording](#record--recording) commands, the [streams](#streammjpg--streamwav), the [pages](#remote--overlay) and
+[`/input_state`](#input_state). Try it from a browser:
 
 ```
 http://localhost:8080/ping
@@ -39,6 +41,11 @@ http://localhost:8080/ping
 | [`/cheats`](#cheats) · [`/edit_cheat`](#edit_cheat) · [`/remove_cheat`](#remove_cheat) | Manage cheats | Text or JSON |
 | [`/cheat_search`](#cheat_search) · [`/make_cheat`](#make_cheat) | Find values in memory and make codes for them | JSON |
 | [`/achievements`](#achievements) | RetroAchievements user, game and achievements | JSON |
+| [`/record`](#record--recording) · [`/recording`](#record--recording) | Start or stop recording a video or sound, recording state | JSON |
+| [`/save_screenshot`](#save_screenshot--save_replay) · [`/save_replay`](#save_screenshot--save_replay) | Save a screenshot or the replay buffer | JSON |
+| [`/stream.mjpg`](#streammjpg--streamwav) · [`/stream.wav`](#streammjpg--streamwav) | Live video and sound | MJPEG, WAV |
+| [`/remote`](#remote--overlay) · [`/overlay`](#remote--overlay) | Remote Play page, overlay for streaming software | HTML |
+| [`/input_state`](#input_state) | Console buttons held in the last frame | JSON |
 | [`/settings`](#settings) | All settings | JSON |
 | [`/setting`](#setting) | Change settings | `ok` |
 | [`/show_ui`](#show_ui--hide_ui) · [`/hide_ui`](#show_ui--hide_ui) | Show or hide the GUI | Empty |
@@ -318,11 +325,64 @@ http://localhost:8080/achievements
 → {"available": true, "logged_in": true, "user": {...}, "game": {...}, "summary": {...}, "achievements": [...]}
 ```
 
+### `/record` · `/recording`
+
+`/record` starts (`1`) or stops (`0`) recording a `video` (AVI) or `audio` (WAV), see
+[Recording](RECORDING_AND_STREAMING.md#recording). Both return the recording state:
+
+```
+http://localhost:8080/record?video=1
+http://localhost:8080/recording
+→ {
+    "video": {"recording": true, "file": "/roms/Game 2026-10-02 14-05-33.avi", "seconds": 12.4, "frames": 741,
+              "bytes": 21233664, "width": 480, "height": 320},
+    "audio": {"recording": false},
+    "replay": {"seconds": 30, "held": 30.0},
+    "last_file": "/roms/Game 2026-10-02 14-04-10.png",
+    "message": "Recording video: Game 2026-10-02 14-05-33.avi",
+    "error": false
+  }
+```
+
+`seconds` is the length recorded so far (paused time does not count). After a recording stops, `last_file` is the
+saved file and `message` says whether it worked.
+
+### `/save_screenshot` · `/save_replay`
+
+Save a PNG screenshot, or the [replay buffer](RECORDING_AND_STREAMING.md#replay-buffer) as a video, and return the
+same JSON as `/recording` with the new file in `last_file`. `/save_replay` reports an error in `message` when the
+replay buffer is off or empty.
+
+### `/stream.mjpg` · `/stream.wav`
+
+Endless live streams of the game: MJPEG video (`multipart/x-mixed-replace`, the frames as JPEG) and 48 kHz 16 bit
+stereo WAV sound. Browsers show `/stream.mjpg` in an `<img>`, and VLC, ffmpeg and OBS Media Sources play both.
+Frames are only encoded while someone watches, at most four of each stream can be open. Size and frame rate are
+the `stream_scale` and `stream_fps` [settings](#setting). See
+[Streaming](RECORDING_AND_STREAMING.md#streaming-and-remote-play).
+
+### `/remote` · `/overlay`
+
+`/remote` is the [Remote Play](RECORDING_AND_STREAMING.md#remote-play) page: the game with its sound and a touch,
+keyboard and game controller input. `/overlay` is a transparent page for an OBS Browser Source with the buttons
+held, the game and the REC badge ([options](RECORDING_AND_STREAMING.md#obs-and-other-streaming-software)).
+
+### `/input_state`
+
+The console buttons held in the last frame, whatever they came from (keyboard, controller, touch or `/input`):
+
+```
+http://localhost:8080/input_state
+→ {"system": "GBA", "game": "Pokemon Emerald", "running": true,
+   "inputs": {"A": 1, "B": 0, "X": 0, "Y": 0, "Up": 0, "Down": 0, "Left": 0, "Right": 1, "L": 0, "R": 0, "Start": 0, "Select": 0}}
+```
+
 ### `/settings`
 
 Returns every setting as JSON, including `screen_shader`, `design_system`, `color_scheme`, `contrast`,
 `use_custom_accent`, `custom_accent`, `use_bundled_font`, `touch_controller`, `touch_controls_show_speed`,
-`controller_face_layout`, `soft_patching`, `hardcore_mode`, `ra_unofficial` and `ra_spectator`.
+`controller_face_layout`, `soft_patching`, `hardcore_mode`, `ra_unofficial`, `ra_spectator`, `record_scale`,
+`record_format`, `record_audio`, `replay_seconds`, `screenshot_scale`, `stream_scale` and `stream_fps`.
 
 ```
 http://localhost:8080/settings
@@ -363,6 +423,12 @@ settings are applied either way.
 | `hardcore_mode` | RetroAchievements [Hardcore Mode](RETROACHIEVEMENTS.md#modes) |
 | `ra_unofficial` | `1` also loads unofficial RetroAchievements |
 | `ra_spectator` | `1` turns on RetroAchievements spectator mode: unlocks are shown but not sent |
+| `record_scale` | Video size, `1`–`4` times the console screen ([details](RECORDING_AND_STREAMING.md#files)) |
+| `record_format` | Video quality: `0` high, `1` standard (smaller), `2` lossless |
+| `record_audio` | `1` records sound in videos |
+| `replay_seconds` | Replay buffer: `0` off, `15`, `30`, `60` or `120` |
+| `screenshot_scale` | Screenshot size, `1`–`8` |
+| `stream_scale`, `stream_fps` | Live video stream: size `1`–`3`, `60` or `30` frames per second |
 
 Touch control, RetroAchievements and other options use their `/settings` names (for example
 `touch_controls_opacity`, `draw_notifications`, `enable_download_cache`).

@@ -149,13 +149,14 @@ nix run             # build and start SkyEmu
 
 ## Tests
 
-The design token engine, the ROM patch engine and the cheat finder have stand-alone unit tests, also run by the
+The design token engine, the ROM patch engine, the cheat finder and the recorder have stand-alone unit tests, also run by the
 Linux workflow:
 
 ```sh
 cc -O2 -Isrc tools/se_design_test.c src/se_design.c -lm -o se_design_test && ./se_design_test
 cc -O2 -Isrc tools/se_patch_test.c src/se_patch.c -o se_patch_test && ./se_patch_test
 cc -O2 -Isrc tools/se_cheat_finder_test.c src/se_cheat_finder.c -o se_cheat_finder_test && ./se_cheat_finder_test
+cc -O2 -Isrc tools/se_record_test.c src/se_record.c src/stb.c -lm -o se_record_test && ./se_record_test
 ```
 
 The emulation cores can be checked against test ROMs with the `run_gb_test` and `run_gba_test` command line

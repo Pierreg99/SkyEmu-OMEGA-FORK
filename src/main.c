@@ -14,6 +14,7 @@
 
 #ifdef ENABLE_HTTP_CONTROL_SERVER
 #include "http_control_server.h"
+#include "se_web_pages.h"
 #endif 
 
 #ifdef ENABLE_RETRO_ACHIEVEMENTS
@@ -40,6 +41,7 @@
 #include "se_design.h"
 #include "se_patch.h"
 #include "se_cheat_finder.h"
+#include "se_record.h"
 #include <sys/stat.h>
 #ifdef _WIN32
 #include <sys/utime.h>
@@ -168,7 +170,10 @@ const static char* se_keybind_names[SE_NUM_KEYBINDS]={
   "Turbo R",
   "Solar Sensor+",
   "Solar Sensor-",
-  "Toggle Full Screen"
+  "Toggle Full Screen",
+  "Screenshot",
+  "Record Video",
+  "Save Replay"
 };
 
 #define SE_ANALOG_UP_DOWN    0
@@ -287,7 +292,14 @@ typedef struct{
   uint32_t soft_patching_off;         // 1 = load ROMs without their IPS / UPS / BPS patches
   uint32_t ra_unofficial;             // 1 = load unofficial RetroAchievements too
   uint32_t ra_spectator;              // 1 = RetroAchievements unlocks are shown but not sent
-  uint32_t padding[146];
+  uint32_t record_scale;              // Video size 1-4 times the console screen, 0 = 2
+  uint32_t record_format;             // 0 high quality MJPEG, 1 standard MJPEG, 2 uncompressed
+  uint32_t record_no_audio;           // 1 = videos without sound
+  uint32_t replay_seconds;            // Replay buffer: 0 off, 1 15 s, 2 30 s, 3 1 min, 4 2 min
+  uint32_t screenshot_scale;          // 1-8, 0 = 1
+  uint32_t stream_scale;              // MJPEG stream size 1-3, 0 = 2
+  uint32_t stream_fps;                // 0 = 60 fps, 1 = 30 fps
+  uint32_t padding[139];
 }persistent_settings_t; 
 _Static_assert(sizeof(persistent_settings_t)==1024, "persistent_settings_t must be exactly 1024 bytes");
 #define SE_STATS_GRAPH_DATA 256
@@ -336,7 +348,8 @@ typedef struct{
   char theme[SB_FILE_PATH_SIZE];
   char custom_font[SB_FILE_PATH_SIZE];
   char patches[SB_FILE_PATH_SIZE];
-  char padding[2][SB_FILE_PATH_SIZE];
+  char recordings[SB_FILE_PATH_SIZE]; // Videos and screenshots, empty = next to the save file
+  char padding[1][SB_FILE_PATH_SIZE];
 }se_search_paths_t;
 
 _Static_assert(sizeof(se_search_paths_t)==SB_FILE_PATH_SIZE*8, "se_search_paths_t must contain 8 paths");
@@ -711,6 +724,8 @@ static const char* se_sdl_axis_bind_name(SDL_GameController* gc, int axis);
 void se_reset_save_states();
 void se_set_new_controller(se_controller_state_t* cont, int index);
 bool se_run_ar_cheat(const uint32_t* buffer, uint32_t size);
+static void se_rec_on_frame(void);
+static void se_rec_stop_all(void);
 void se_emscripten_flush_fs();
 static uint32_t se_save_best_effort_state(se_core_state_t* state);
 static bool se_load_best_effort_state(se_core_state_t* state,uint8_t *save_state_data, uint32_t size, uint32_t bess_offset);
@@ -3504,6 +3519,7 @@ SKYEMU_API void se_load_rom(const char *filename){
   }
   se_reset_rewind_buffer(&rewind_buffer);
   se_reset_save_states();
+  se_rec_stop_all();
   se_reset_cheats();
   gui_state.editing_cheat_index = -1;
   se_cheat_search_reset();
@@ -4220,6 +4236,7 @@ static void se_emulate_single_frame(){
   }
 #endif
   se_run_all_ar_cheats(se_run_ar_cheat);
+  se_rec_on_frame();
 }
 static void se_screenshot(uint8_t * output_buffer, int * out_width, int * out_height){
   *out_height=*out_width=0;
@@ -4240,6 +4257,801 @@ static void se_screenshot(uint8_t * output_buffer, int * out_width, int * out_he
   }
   for(int i=3;i<SE_MAX_SCREENSHOT_SIZE;i+=4)output_buffer[i]=0xff;
 }
+
+///////////////////////////////
+// Recording and screenshots //
+///////////////////////////////
+// Videos and replays record every emulated frame with the audio the core made for it, so they
+// play at normal speed even when the game was fast forwarded. The image is the console's own
+// screen, without shaders, color correction or the GUI.
+static const int se_rec_replay_seconds[5] = {0,15,30,60,120};
+// Frames emulated since SkyEmu started, the streams use it to find new frames
+static uint64_t se_frames_emulated;
+static bool se_stream_audio_wanted(void);
+static void se_stream_publish_audio(const int16_t* samples, size_t frames);
+static struct{
+  se_avi_writer_t* video;
+  se_wav_writer_t* audio;
+  char video_path[SB_FILE_PATH_SIZE], audio_path[SB_FILE_PATH_SIZE];
+  double video_start, audio_start;   // se_time() when they started
+  se_avi_format_t video_format;
+  int video_scale, video_w, video_h; // Scale and console screen size of the video
+  // Samples the core made since the last frame
+  int16_t* samples;
+  size_t sample_frames, sample_capacity;
+  // Frames and samples since the tap was turned on, to keep the sound in step with the frames
+  uint64_t tap_frames, tap_samples;
+  se_record_buffer_t scratch, encoded, replay_encoded;
+  se_replay_buffer_t replay;
+  se_avi_format_t replay_format;
+  int replay_scale, replay_w, replay_h, replay_seconds;
+  uint8_t frame[SE_MAX_SCREENSHOT_SIZE];
+  char last_file[SB_FILE_PATH_SIZE];
+  char message[SB_FILE_PATH_SIZE+160];
+  bool message_error;
+  double message_time;
+}se_rec;
+#ifdef EMSCRIPTEN
+void se_download_emscripten_file(const char * path);
+#endif
+// The HTTP server thread and host apps start and stop recordings too, the public functions lock this
+static mutex_t se_rec_mutex;
+static void se_rec_lock(void){if(se_rec_mutex)mutex_lock(se_rec_mutex);}
+static void se_rec_unlock(void){if(se_rec_mutex)mutex_unlock(se_rec_mutex);}
+
+static void se_rec_set_message(bool error, const char* fmt, ...){
+  va_list args;
+  va_start(args,fmt);
+  vsnprintf(se_rec.message,sizeof(se_rec.message),se_localize_and_cache(fmt),args);
+  va_end(args);
+  se_rec.message_error = error;
+  se_rec.message_time = se_time();
+  printf("%s\n",se_rec.message);
+}
+// 1-4, 2 by default
+static int se_rec_video_scale(void){
+  uint32_t scale = gui_state.settings.record_scale;
+  return scale>=1&&scale<=4? (int)scale : 2;
+}
+// 0 high quality MJPEG, 1 standard MJPEG (smaller files), 2 uncompressed
+static int se_rec_video_quality(void){
+  switch(gui_state.settings.record_format){
+    case 1: return 85;
+    case 2: return 0;
+    default: return 95;
+  }
+}
+static void se_rec_frame_rate(uint32_t* num, uint32_t* den){
+  if(emu_state.system==SYSTEM_NDS){*num = 33513982; *den = 355*263*6;}
+  else if(emu_state.system==SYSTEM_GB){*num = 4194304; *den = 70224;}
+  else {*num = 16777216; *den = 280896;}
+}
+static bool se_rec_capturing(void){
+  return se_rec.video||se_rec.audio||se_rec.replay.capacity||se_stream_audio_wanted();
+}
+static void se_rec_audio_tap(int16_t left, int16_t right){
+  if(se_rec.sample_frames==se_rec.sample_capacity){
+    size_t capacity = se_rec.sample_capacity? se_rec.sample_capacity*2 : 4096;
+    // A frame never makes this many samples, something stopped calling se_rec_on_frame
+    if(capacity>48000*8)return;
+    int16_t* samples = (int16_t*)realloc(se_rec.samples,capacity*2*sizeof(int16_t));
+    if(!samples)return;
+    se_rec.samples = samples;
+    se_rec.sample_capacity = capacity;
+  }
+  se_rec.samples[se_rec.sample_frames*2] = left;
+  se_rec.samples[se_rec.sample_frames*2+1] = right;
+  se_rec.sample_frames++;
+}
+static void se_rec_update_tap(void){
+  bool was_on = emu_state.audio_tap!=NULL;
+  emu_state.audio_tap = se_rec_capturing()? se_rec_audio_tap : NULL;
+  if(!emu_state.audio_tap||!was_on){
+    se_rec.sample_frames = 0;
+    se_rec.tap_frames = se_rec.tap_samples = 0;
+  }
+}
+// The cores make no samples while a game has its sound turned off. Silence is added for those
+// frames (and any larger drift is corrected) so the sound of a recording stays in step with its
+// frames. Normally the cores make exactly the right number of samples and nothing is changed.
+static void se_rec_balance_audio(void){
+  uint32_t num, den;
+  se_rec_frame_rate(&num,&den);
+  se_rec.tap_frames++;
+  uint64_t target = (se_rec.tap_frames*(uint64_t)SE_AUDIO_SAMPLE_RATE*den+num/2)/num;
+  int64_t missing = (int64_t)target-(int64_t)(se_rec.tap_samples+se_rec.sample_frames);
+  int64_t frame_samples = (int64_t)SE_AUDIO_SAMPLE_RATE*den/num;
+  if(missing>frame_samples/2){
+    for(int64_t i=0;i<missing;++i)se_rec_audio_tap(0,0);
+  }else if(missing< -frame_samples/2){
+    int64_t extra = -missing;
+    se_rec.sample_frames = (int64_t)se_rec.sample_frames>extra? se_rec.sample_frames-extra : 0;
+  }
+  se_rec.tap_samples+=se_rec.sample_frames;
+}
+// Folder of new recordings: the Recording Path, or else the folder of the save file (on Android
+// the Movies folder, as app storage can't be browsed). save_folder forces the folder of the save.
+static void se_rec_folder_for(char* out, size_t size, bool save_folder){
+#ifdef EMSCRIPTEN
+  // Files are offered as downloads, see se_rec_finished()
+  snprintf(out,size,"/tmp/");
+  return;
+#endif
+  const char* path = gui_state.paths.recordings;
+  bool custom = path[0]&&strcmp(path,"./")!=0&&strcmp(path,".")!=0;
+#ifdef SE_PLATFORM_ANDROID
+  if(!custom&&!save_folder){
+    path = "/sdcard/Movies/SkyEmu/";
+    custom = true;
+  }
+#endif
+  if(custom&&!save_folder){
+    snprintf(out,size,"%s",path);
+  }else{
+    snprintf(out,size,"%s",emu_state.save_data_base_path);
+    char* slash = strrchr(out,'/');
+    char* backslash = strrchr(out,'\\');
+    if(backslash>slash)slash = backslash;
+    if(slash)slash[1] = 0;
+    else snprintf(out,size,"./");
+  }
+  size_t len = strlen(out);
+  if(len&&out[len-1]!='/'&&out[len-1]!='\\'&&len+1<size){out[len] = '/'; out[len+1] = 0;}
+}
+static void se_rec_folder(char* out, size_t size){se_rec_folder_for(out,size,false);}
+// "<folder>/<game> 2026-10-02 14-05-33.<ext>", with " (2)" and so on when that file exists.
+// When the folder can't be written, the folder of the save file is used.
+static void se_rec_new_path(const char* ext, char* out, size_t size){
+  char folder[SB_FILE_PATH_SIZE];
+  se_rec_folder(folder,sizeof(folder));
+  char test[SB_FILE_PATH_SIZE+32];
+  snprintf(test,sizeof(test),"%s.skyemu-write-test",folder);
+  FILE* probe = se_fopen_mkdir(test,"wb");
+  if(probe){
+    fclose(probe);
+    remove(test);
+  }else se_rec_folder_for(folder,sizeof(folder),true);
+  const char* name = emu_state.save_data_base_path;
+  const char* slash = strrchr(name,'/');
+  const char* backslash = strrchr(name,'\\');
+  if(backslash>slash)slash = backslash;
+  if(slash)name = slash+1;
+  if(!name[0])name = "SkyEmu";
+  time_t now = time(NULL);
+  struct tm* t = localtime(&now);
+  char stamp[32] = "";
+  if(t)strftime(stamp,sizeof(stamp),"%Y-%m-%d %H-%M-%S",t);
+  for(int n=1;n<1000;++n){
+    if(n==1)snprintf(out,size,"%s%s %s.%s",folder,name,stamp,ext);
+    else snprintf(out,size,"%s%s %s (%d).%s",folder,name,stamp,n,ext);
+    char part[SB_FILE_PATH_SIZE];
+    // A split recording continues in "<name> (2).avi", so avoid both
+    se_record_part_path(out,2,part,sizeof(part));
+    if(!sb_file_exists(out)&&!sb_file_exists(part))return;
+  }
+}
+static const char* se_rec_file_name(const char* path){
+  const char* slash = strrchr(path,'/');
+  const char* backslash = strrchr(path,'\\');
+  if(backslash>slash)slash = backslash;
+  return slash? slash+1 : path;
+}
+// Called when a file (and the parts it was split into) is complete
+static void se_rec_finished(const char* path, int parts){
+  snprintf(se_rec.last_file,sizeof(se_rec.last_file),"%s",path);
+#ifdef EMSCRIPTEN
+  for(int p=1;p<=parts;++p){
+    char part[SB_FILE_PATH_SIZE];
+    se_record_part_path(path,p,part,sizeof(part));
+    se_download_emscripten_file(part);
+    remove(part);
+  }
+#else
+  (void)parts;
+#endif
+}
+static void se_rec_stop_video_locked(const char* error){
+  if(!se_rec.video)return;
+  int parts = se_avi_parts(se_rec.video);
+  uint64_t frames = se_avi_frames(se_rec.video);
+  const char* write_error = se_avi_error(se_rec.video);
+  bool ok = se_avi_close(se_rec.video);
+  se_rec.video = NULL;
+  se_rec_update_tap();
+  if(error)se_rec_set_message(true,"Recording stopped: %s",se_localize_and_cache(error));
+  else if(!ok)se_rec_set_message(true,"Recording stopped: %s",se_localize_and_cache(write_error? write_error : "Could not write the video file"));
+  else{
+    double seconds = frames/se_get_sim_fps();
+    se_rec_set_message(false,"Video saved (%d:%02d): %s",(int)seconds/60,(int)seconds%60,se_rec_file_name(se_rec.video_path));
+  }
+  if(frames)se_rec_finished(se_rec.video_path,parts);
+}
+static bool se_rec_start_video_locked(void){
+  if(se_rec.video)return true;
+  if(!emu_state.rom_loaded){
+    se_rec_set_message(true,"Load a game before recording");
+    return false;
+  }
+  int w, h;
+  se_screenshot(se_rec.frame,&w,&h);
+  if(w<=0||h<=0)return false;
+  se_rec.video_scale = se_rec_video_scale();
+  se_rec.video_w = w;
+  se_rec.video_h = h;
+  se_avi_format_t* f = &se_rec.video_format;
+  memset(f,0,sizeof(*f));
+  f->width = w*se_rec.video_scale;
+  f->height = h*se_rec.video_scale;
+  f->quality = se_rec_video_quality();
+  se_rec_frame_rate(&f->fps_num,&f->fps_den);
+  if(!gui_state.settings.record_no_audio){
+    f->audio_rate = SE_AUDIO_SAMPLE_RATE;
+    f->audio_channels = 2;
+  }
+  se_rec_new_path("avi",se_rec.video_path,sizeof(se_rec.video_path));
+  se_rec.video = se_avi_open(se_rec.video_path,f);
+  if(!se_rec.video){
+    se_rec_set_message(true,"Could not create %s",se_rec.video_path);
+    return false;
+  }
+  se_rec.video_start = se_time();
+  se_rec.sample_frames = 0;
+  se_rec_update_tap();
+  se_rec_set_message(false,"Recording video: %s",se_rec_file_name(se_rec.video_path));
+  return true;
+}
+static void se_rec_stop_audio_locked(const char* error){
+  if(!se_rec.audio)return;
+  uint64_t frames = se_wav_frames(se_rec.audio);
+  const char* write_error = se_wav_error(se_rec.audio);
+  bool ok = se_wav_close(se_rec.audio);
+  se_rec.audio = NULL;
+  se_rec_update_tap();
+  if(error)se_rec_set_message(true,"Audio recording stopped: %s",se_localize_and_cache(error));
+  else if(!ok)se_rec_set_message(true,"Audio recording stopped: %s",se_localize_and_cache(write_error? write_error : "Could not write the audio file"));
+  else{
+    double seconds = frames/(double)SE_AUDIO_SAMPLE_RATE;
+    se_rec_set_message(false,"Audio saved (%d:%02d): %s",(int)seconds/60,(int)seconds%60,se_rec_file_name(se_rec.audio_path));
+  }
+  if(frames)se_rec_finished(se_rec.audio_path,1+(int)(frames*4/(2048ull*1024*1024)));
+}
+static bool se_rec_start_audio_locked(void){
+  if(se_rec.audio)return true;
+  if(!emu_state.rom_loaded){
+    se_rec_set_message(true,"Load a game before recording");
+    return false;
+  }
+  se_rec_new_path("wav",se_rec.audio_path,sizeof(se_rec.audio_path));
+  se_rec.audio = se_wav_open(se_rec.audio_path,SE_AUDIO_SAMPLE_RATE,2);
+  if(!se_rec.audio){
+    se_rec_set_message(true,"Could not create %s",se_rec.audio_path);
+    return false;
+  }
+  se_rec.audio_start = se_time();
+  se_rec.sample_frames = 0;
+  se_rec_update_tap();
+  se_rec_set_message(false,"Recording audio: %s",se_rec_file_name(se_rec.audio_path));
+  return true;
+}
+// Sets up, resizes or turns off the replay buffer to match the settings and the running game
+static void se_rec_update_replay(int w, int h){
+  int seconds = se_rec_replay_seconds[gui_state.settings.replay_seconds%5];
+  if(!emu_state.rom_loaded)seconds = 0;
+  int scale = se_rec_video_scale();
+  // Uncompressed frames would need far too much memory, the replay buffer keeps them as JPEG
+  int quality = se_rec_video_quality();
+  if(quality==0)quality = 95;
+  if(!seconds){
+    if(se_rec.replay.capacity)se_replay_free(&se_rec.replay);
+    se_rec.replay_seconds = 0;
+    se_rec_update_tap();
+    return;
+  }
+  if(se_rec.replay.capacity&&seconds==se_rec.replay_seconds&&scale==se_rec.replay_scale&&w==se_rec.replay_w&&
+     h==se_rec.replay_h&&quality==se_rec.replay.quality)return;
+  uint32_t num, den;
+  se_rec_frame_rate(&num,&den);
+  uint32_t capacity = (uint32_t)((uint64_t)seconds*num/den);
+  if(!se_replay_init(&se_rec.replay,capacity,w*scale,h*scale,quality,2)){
+    se_rec_set_message(true,"Not enough memory for the replay buffer");
+    gui_state.settings.replay_seconds = 0;
+  }
+  se_rec.replay_seconds = seconds;
+  se_rec.replay_scale = scale;
+  se_rec.replay_w = w;
+  se_rec.replay_h = h;
+  se_avi_format_t* f = &se_rec.replay_format;
+  memset(f,0,sizeof(*f));
+  f->width = w*scale;
+  f->height = h*scale;
+  f->quality = quality;
+  f->fps_num = num;
+  f->fps_den = den;
+  f->audio_rate = SE_AUDIO_SAMPLE_RATE;
+  f->audio_channels = 2;
+  se_rec_update_tap();
+}
+static bool se_rec_save_replay_locked(void){
+  if(!se_rec.replay.count){
+    se_rec_set_message(true,gui_state.settings.replay_seconds? "The replay buffer is still empty" : "Turn on the replay buffer first");
+    return false;
+  }
+  char path[SB_FILE_PATH_SIZE];
+  se_rec_new_path("avi",path,sizeof(path));
+  if(!se_replay_save(&se_rec.replay,path,&se_rec.replay_format)){
+    se_rec_set_message(true,"Could not save the replay to %s",path);
+    return false;
+  }
+  double seconds = se_rec.replay.count/se_get_sim_fps();
+  se_rec_set_message(false,"Replay saved (last %d s): %s",(int)(seconds+0.5),se_rec_file_name(path));
+  se_rec_finished(path,1);
+  return true;
+}
+static bool se_rec_screenshot_locked(void){
+  if(!emu_state.rom_loaded){
+    se_rec_set_message(true,"Load a game before taking a screenshot");
+    return false;
+  }
+  int w, h;
+  se_screenshot(se_rec.frame,&w,&h);
+  if(w<=0||h<=0)return false;
+  int scale = gui_state.settings.screenshot_scale;
+  if(scale<1||scale>8)scale = 1;
+  uint8_t* data = (uint8_t*)malloc((size_t)w*scale*h*scale*4);
+  if(!data)return false;
+  for(int y=0;y<h*scale;++y)for(int x=0;x<w*scale;++x){
+    memcpy(data+((size_t)y*w*scale+x)*4,se_rec.frame+((size_t)(y/scale)*w+x/scale)*4,4);
+  }
+  char path[SB_FILE_PATH_SIZE];
+  se_rec_new_path("png",path,sizeof(path));
+  bool ok = stbi_write_png(path,w*scale,h*scale,4,data,0)!=0;
+  free(data);
+  if(!ok){
+    se_rec_set_message(true,"Could not save the screenshot to %s",path);
+    return false;
+  }
+  se_rec_set_message(false,"Screenshot saved: %s",se_rec_file_name(path));
+  se_rec_finished(path,1);
+  return true;
+}
+// After every emulated frame
+static void se_rec_on_frame(void){
+  se_frames_emulated++;
+  se_rec_lock();
+  if(emu_state.audio_tap)se_rec_balance_audio();
+  if(se_stream_audio_wanted())se_stream_publish_audio(se_rec.samples,se_rec.sample_frames);
+  bool video = se_rec.video||se_rec.replay.capacity;
+  if(video){
+    int w, h;
+    se_screenshot(se_rec.frame,&w,&h);
+    if(se_rec.video&&(w!=se_rec.video_w||h!=se_rec.video_h))se_rec_stop_video_locked("the screen size changed");
+    if(se_rec.replay.capacity&&(w!=se_rec.replay_w||h!=se_rec.replay_h))se_rec_update_replay(w,h);
+    bool encoded = false;
+    if(se_rec.video){
+      encoded = se_record_encode_frame(se_rec.frame,w,h,se_rec.video_scale,se_rec.video_format.quality,&se_rec.scratch,&se_rec.encoded);
+      bool ok = encoded&&se_avi_add_audio(se_rec.video,se_rec.samples,se_rec.sample_frames)&&
+                se_avi_add_frame(se_rec.video,se_rec.encoded.data,se_rec.encoded.size);
+      if(!ok)se_rec_stop_video_locked(encoded? se_avi_error(se_rec.video) : "not enough memory");
+    }
+    if(se_rec.replay.capacity){
+      // The video's encoding is reused when the formats match
+      se_record_buffer_t* frame = &se_rec.encoded;
+      if(!encoded||se_rec.video_scale!=se_rec.replay_scale||se_rec.video_format.quality!=se_rec.replay.quality){
+        frame = &se_rec.replay_encoded;
+        if(!se_record_encode_frame(se_rec.frame,w,h,se_rec.replay_scale,se_rec.replay.quality,&se_rec.scratch,frame))frame = NULL;
+      }
+      if(frame)se_replay_push(&se_rec.replay,frame->data,frame->size,se_rec.samples,(uint32_t)se_rec.sample_frames);
+    }
+  }
+  if(se_rec.audio&&!se_wav_add_audio(se_rec.audio,se_rec.samples,se_rec.sample_frames))se_rec_stop_audio_locked(se_wav_error(se_rec.audio));
+  se_rec.sample_frames = 0;
+  se_rec_unlock();
+}
+// Finishes the files, for example when another game is loaded or SkyEmu quits
+static void se_rec_stop_all(void){
+  se_rec_lock();
+  se_rec_stop_video_locked(NULL);
+  se_rec_stop_audio_locked(NULL);
+  if(se_rec.replay.capacity)se_replay_clear(&se_rec.replay);
+  se_rec_unlock();
+}
+SKYEMU_API bool se_start_video_recording(void){
+  se_rec_lock();
+  bool ok = se_rec_start_video_locked();
+  se_rec_unlock();
+  return ok;
+}
+SKYEMU_API void se_stop_video_recording(void){
+  se_rec_lock();
+  se_rec_stop_video_locked(NULL);
+  se_rec_unlock();
+}
+SKYEMU_API bool se_is_recording_video(void){return se_rec.video!=NULL;}
+SKYEMU_API bool se_start_audio_recording(void){
+  se_rec_lock();
+  bool ok = se_rec_start_audio_locked();
+  se_rec_unlock();
+  return ok;
+}
+SKYEMU_API void se_stop_audio_recording(void){
+  se_rec_lock();
+  se_rec_stop_audio_locked(NULL);
+  se_rec_unlock();
+}
+SKYEMU_API bool se_is_recording_audio(void){return se_rec.audio!=NULL;}
+SKYEMU_API bool se_save_screenshot(void){
+  se_rec_lock();
+  bool ok = se_rec_screenshot_locked();
+  se_rec_unlock();
+  return ok;
+}
+SKYEMU_API bool se_save_replay(void){
+  se_rec_lock();
+  bool ok = se_rec_save_replay_locked();
+  se_rec_unlock();
+  return ok;
+}
+// Path of the last file saved, and what happened last (both empty at first)
+SKYEMU_API const char* se_get_last_recording_path(void){return se_rec.last_file;}
+SKYEMU_API const char* se_get_recording_message(void){return se_rec.message;}
+SKYEMU_API void se_set_record_scale(int scale){if(scale>=1&&scale<=4)gui_state.settings.record_scale = scale;}
+SKYEMU_API int se_get_record_scale(void){return se_rec_video_scale();}
+SKYEMU_API void se_set_record_format(int format){if(format>=0&&format<=2)gui_state.settings.record_format = format;}
+SKYEMU_API int se_get_record_format(void){return gui_state.settings.record_format%3;}
+SKYEMU_API void se_set_record_audio(int enabled){gui_state.settings.record_no_audio = !enabled;}
+SKYEMU_API int se_get_record_audio(void){return !gui_state.settings.record_no_audio;}
+SKYEMU_API void se_set_replay_seconds(int seconds){
+  for(int i=0;i<5;++i)if(se_rec_replay_seconds[i]==seconds)gui_state.settings.replay_seconds = i;
+}
+SKYEMU_API int se_get_replay_seconds(void){return se_rec_replay_seconds[gui_state.settings.replay_seconds%5];}
+SKYEMU_API void se_set_screenshot_scale(int scale){if(scale>=1&&scale<=8)gui_state.settings.screenshot_scale = scale;}
+SKYEMU_API int se_get_screenshot_scale(void){
+  int scale = gui_state.settings.screenshot_scale;
+  return scale>=1&&scale<=8? scale : 1;
+}
+// Hotkeys and settings changes, once per frame on the main thread
+static void se_rec_update(void){
+  sb_joy_t* curr = &emu_state.joy;
+  sb_joy_t* prev = &emu_state.prev_frame_joy;
+  se_rec_lock();
+  if(curr->inputs[SE_KEY_SCREENSHOT]&&!prev->inputs[SE_KEY_SCREENSHOT])se_rec_screenshot_locked();
+  if(curr->inputs[SE_KEY_RECORD_VIDEO]&&!prev->inputs[SE_KEY_RECORD_VIDEO]){
+    if(se_rec.video)se_rec_stop_video_locked(NULL);
+    else se_rec_start_video_locked();
+  }
+  if(curr->inputs[SE_KEY_SAVE_REPLAY]&&!prev->inputs[SE_KEY_SAVE_REPLAY])se_rec_save_replay_locked();
+  int w = se_rec.replay_w, h = se_rec.replay_h;
+  if(emu_state.rom_loaded&&gui_state.settings.replay_seconds%5&&!se_rec.replay.capacity){
+    // Started before the first frame, the size of the screen is needed
+    se_screenshot(se_rec.frame,&w,&h);
+  }
+  if(w>0&&h>0)se_rec_update_replay(w,h);
+  else if(!(gui_state.settings.replay_seconds%5))se_rec_update_replay(0,0);
+  // The sound stream turns the tap on and off as listeners come and go
+  if((emu_state.audio_tap!=NULL)!=se_rec_capturing())se_rec_update_tap();
+  se_rec_unlock();
+}
+// Length of the video (or audio) recorded so far, paused time is not recorded
+static double se_rec_recorded_seconds(void){
+  if(se_rec.video)return se_avi_frames(se_rec.video)/se_get_sim_fps();
+  if(se_rec.audio)return se_wav_frames(se_rec.audio)/(double)SE_AUDIO_SAMPLE_RATE;
+  return 0;
+}
+static void se_rec_format_time(double seconds, char* out, size_t size){
+  int s = (int)seconds;
+  if(s>=3600)snprintf(out,size,"%d:%02d:%02d",s/3600,(s/60)%60,s%60);
+  else snprintf(out,size,"%d:%02d",s/60,s%60);
+}
+static void se_rec_format_size(uint64_t bytes, char* out, size_t size){
+  if(bytes>=1024ull*1024*1024)snprintf(out,size,"%.2f GB",bytes/(1024.0*1024*1024));
+  else snprintf(out,size,"%.1f MB",bytes/(1024.0*1024));
+}
+// Red "REC 0:12" in the menu bar while recording, clicking it stops the recording
+static void se_rec_draw_menu_bar_indicator(void){
+  se_rec_lock();
+  if(se_rec.video||se_rec.audio){
+    char time[32];
+    double start = se_rec.video? se_rec.video_start : se_rec.audio_start;
+    se_rec_format_time(se_rec_recorded_seconds(),time,sizeof(time));
+    char label[64];
+    snprintf(label,sizeof(label),"%s %s##RecIndicator",se_rec.video? ICON_FK_CIRCLE " REC" : ICON_FK_MICROPHONE " REC",time);
+    // Blinks once a second, like a camera
+    bool on = fmod(se_time()-start,1.0)<0.6;
+    igPushStyleColorU32(ImGuiCol_Text,on? 0xff3b30ff : 0xff6c6cbf);
+    if(se_button(label,(ImVec2){0,SE_MENU_BAR_BUTTON_HEIGHT}))se_rec_stop_video_locked(NULL),se_rec_stop_audio_locked(NULL);
+    igPopStyleColor(1);
+    se_tooltip("Stop recording");
+    igSameLine(0,4);
+  }
+  se_rec_unlock();
+}
+// Short message at the top of the screen when a file was saved or something failed
+static void se_rec_draw_toast(float left, float top, float width){
+  double age = se_time()-se_rec.message_time;
+  if(!se_rec.message[0]||se_rec.message_time==0||age>3.5)return;
+  float alpha = age<3.0? 1.0f : (float)(1.0-(age-3.0)/0.5);
+  ImDrawList* dl = igGetWindowDrawList();
+  const char* icon = se_rec.message_error? ICON_FK_EXCLAMATION_TRIANGLE : ICON_FK_CHECK_CIRCLE;
+  char text[sizeof(se_rec.message)+8];
+  snprintf(text,sizeof(text),"%s  %s",icon,se_rec.message);
+  ImVec2 size;
+  float max_w = width*0.9f;
+  igCalcTextSize(&size,text,NULL,false,max_w);
+  float pad = 10;
+  float x = left+(width-size.x)*0.5f-pad, y = top+12;
+  ImU32 bg = 0xe0202020, fg = se_rec.message_error? 0xff6b6bff : 0xffffffff;
+  if(gui_state.design_active){
+    bg = se_design_u32(se_rec.message_error? gui_state.design.error : gui_state.design.surface_popup);
+    fg = se_design_u32(se_rec.message_error? gui_state.design.on_error : gui_state.design.on_surface);
+  }
+  ImU32 a = (ImU32)(alpha*255.0f);
+  bg = (bg&0x00ffffff)|(((bg>>24)*a/255)<<24);
+  fg = (fg&0x00ffffff)|(((fg>>24)*a/255)<<24);
+  ImDrawList_AddRectFilled(dl,(ImVec2){x,y},(ImVec2){x+size.x+pad*2,y+size.y+pad*1.4f},bg,(size.y+pad*1.4f)*0.5f,ImDrawCornerFlags_All);
+  ImDrawList_AddTextFontPtr(dl,igGetFont(),igGetFontSize(),(ImVec2){x+pad,y+pad*0.7f},fg,text,NULL,max_w,NULL);
+}
+static void se_recording_json(se_string_t* out){
+  se_rec_lock();
+  se_string_printf(out,"{\n  \"video\": {\"recording\": %s",se_rec.video? "true" : "false");
+  if(se_rec.video){
+    se_string_printf(out,", \"file\": \"%s\", \"seconds\": %.1f, \"frames\": %llu, \"bytes\": %llu, \"width\": %d, \"height\": %d",
+                     se_json_escaped(se_rec.video_path),se_avi_frames(se_rec.video)/se_get_sim_fps(),(unsigned long long)se_avi_frames(se_rec.video),
+                     (unsigned long long)se_avi_bytes(se_rec.video),se_rec.video_format.width,se_rec.video_format.height);
+  }
+  se_string_printf(out,"},\n  \"audio\": {\"recording\": %s",se_rec.audio? "true" : "false");
+  if(se_rec.audio){
+    se_string_printf(out,", \"file\": \"%s\", \"seconds\": %.1f",se_json_escaped(se_rec.audio_path),
+                     se_wav_frames(se_rec.audio)/(double)SE_AUDIO_SAMPLE_RATE);
+  }
+  se_string_printf(out,"},\n  \"replay\": {\"seconds\": %d, \"held\": %.1f},\n",se_get_replay_seconds(),
+                   se_rec.replay.count/se_get_sim_fps());
+  se_string_printf(out,"  \"last_file\": \"%s\",\n  \"message\": \"%s\",\n  \"error\": %s\n}",
+                   se_json_escaped(se_rec.last_file),se_json_escaped(se_rec.message),se_rec.message_error? "true" : "false");
+  se_rec_unlock();
+}
+SKYEMU_API const char* se_get_recording_json(void){
+  static se_string_t kept;
+  se_string_t json = {0};
+  se_recording_json(&json);
+  return se_keep_json(&kept,&json);
+}
+static void se_draw_recording_settings(float win_w){
+  se_section(ICON_FK_VIDEO_CAMERA " Recording");
+  se_rec_lock();
+  char time[32], size[32];
+  // Video
+  if(se_rec.video){
+    se_rec_format_time(se_avi_frames(se_rec.video)/se_get_sim_fps(),time,sizeof(time));
+    se_rec_format_size(se_avi_bytes(se_rec.video),size,sizeof(size));
+    igPushStyleColorU32(ImGuiCol_Text,0xff3b30ff);
+    se_text(ICON_FK_CIRCLE " REC %s",time);
+    igPopStyleColor(1);
+    igSameLine(0,6);
+    se_text_disabled("%s",size);
+    if(se_button(ICON_FK_STOP " Stop Video",(ImVec2){0,0}))se_rec_stop_video_locked(NULL);
+  }else if(se_button(ICON_FK_VIDEO_CAMERA " Record Video",(ImVec2){0,0}))se_rec_start_video_locked();
+  igSameLine(0,4);
+  if(se_button(ICON_FK_CAMERA " Screenshot",(ImVec2){0,0}))se_rec_screenshot_locked();
+  // Audio only
+  if(se_rec.audio){
+    se_rec_format_time(se_wav_frames(se_rec.audio)/(double)SE_AUDIO_SAMPLE_RATE,time,sizeof(time));
+    igPushStyleColorU32(ImGuiCol_Text,0xff3b30ff);
+    se_text(ICON_FK_MICROPHONE " REC %s",time);
+    igPopStyleColor(1);
+    if(se_button(ICON_FK_STOP " Stop Audio",(ImVec2){0,0}))se_rec_stop_audio_locked(NULL);
+  }else if(se_button(ICON_FK_MUSIC " Record Audio",(ImVec2){0,0}))se_rec_start_audio_locked();
+  if(se_rec.message[0]){
+    ImU32 color = se_rec.message_error? 0xff0000ff : 0xff00c000;
+    if(gui_state.design_active)color = se_design_u32(se_rec.message_error? gui_state.design.error : gui_state.design.accent_text);
+    igPushStyleColorU32(ImGuiCol_Text,color);
+    se_text("%s",se_rec.message);
+    igPopStyleColor(1);
+  }
+  // Replay buffer
+  int replay = gui_state.settings.replay_seconds%5;
+  se_field_label("Replay Buffer");igSameLine(SE_FIELD_INDENT,0);
+  igPushItemWidth(-1);
+  if(se_combo_str("##ReplayBuffer",&replay,"Off\0""15 seconds\0""30 seconds\0""1 minute\0""2 minutes\0",0)){
+    gui_state.settings.replay_seconds = replay;
+  }
+  igPopItemWidth();
+  if(se_rec.replay.capacity){
+    uint64_t bytes = 0;
+    for(uint32_t i=0;i<se_rec.replay.capacity;++i)bytes+=se_rec.replay.frames[i].video.capacity+se_rec.replay.frames[i].audio_capacity*4;
+    se_rec_format_size(bytes,size,sizeof(size));
+    se_rec_format_time(se_rec.replay.count/se_get_sim_fps(),time,sizeof(time));
+    if(se_button(ICON_FK_HISTORY " Save Replay",(ImVec2){0,0}))se_rec_save_replay_locked();
+    igSameLine(0,6);
+    igAlignTextToFramePadding();
+    se_text_disabled(se_localize_and_cache("%s held, %s of memory"),time,size);
+  }else se_text_disabled("Keeps the last seconds of play, to save them after something happened.");
+  // Options, used by the next recording
+  int scale = se_rec_video_scale()-1;
+  int w = 240, h = 160;
+  if(emu_state.system==SYSTEM_GB){w = 160; h = 144;}
+  if(emu_state.system==SYSTEM_NDS){w = 256; h = 384;}
+  char sizes[256];
+  int off = 0;
+  for(int i=1;i<=4;++i)off+=snprintf(sizes+off,sizeof(sizes)-off,"%dx (%dx%d)",i,w*i,h*i)+1;
+  sizes[off] = 0;
+  se_field_label("Video Size");igSameLine(SE_FIELD_INDENT,0);
+  igPushItemWidth(-1);
+  // Sizes depend on the console, so they are not translated
+  const char* size_items[4];
+  const char* p = sizes;
+  for(int i=0;i<4;++i){size_items[i] = p; p+=strlen(p)+1;}
+  se_design_push_combo_style();
+  if(igComboStr_arr("##VideoSize",&scale,size_items,4,0))gui_state.settings.record_scale = scale+1;
+  se_design_pop_combo_style();
+  igPopItemWidth();
+  int format = gui_state.settings.record_format%3;
+  se_field_label("Video Quality");igSameLine(SE_FIELD_INDENT,0);
+  igPushItemWidth(-1);
+  if(se_combo_str("##VideoQuality",&format,"High\0Standard (smaller files)\0Lossless (very large files)\0",0)){
+    gui_state.settings.record_format = format;
+  }
+  igPopItemWidth();
+  bool sound = !gui_state.settings.record_no_audio;
+  if(se_checkbox("Record Sound in Videos",&sound))gui_state.settings.record_no_audio = !sound;
+  int shot = se_get_screenshot_scale()-1;
+  se_field_label("Screenshot Size");igSameLine(SE_FIELD_INDENT,0);
+  igPushItemWidth(-1);
+  if(se_combo_str("##ScreenshotSize",&shot,"1x\0""2x\0""3x\0""4x\0""5x\0""6x\0""7x\0""8x\0",0))gui_state.settings.screenshot_scale = shot+1;
+  igPopItemWidth();
+  char folder[SB_FILE_PATH_SIZE];
+  se_rec_folder(folder,sizeof(folder));
+#ifdef EMSCRIPTEN
+  se_text_disabled("Recordings and screenshots are downloaded by the browser.");
+#else
+  se_text_disabled(se_localize_and_cache("Saved in %s"),folder);
+#endif
+  se_rec_unlock();
+  (void)win_w;
+}
+
+///////////////////
+// Streaming     //
+///////////////////
+// The HTTP control server streams the game as MJPEG video and WAV sound, and serves a Remote Play
+// page and an overlay for streaming software. Frames are only encoded while someone watches.
+#ifdef ENABLE_HTTP_CONTROL_SERVER
+static struct{
+  se_record_buffer_t scratch, jpeg;
+  uint8_t frame[SE_MAX_SCREENSHOT_SIZE];
+  uint64_t published_frame;
+  double last_publish;
+  bool audio_active;
+  double audio_start;
+  uint64_t audio_published;
+}se_stream;
+static int se_stream_scale(void){
+  uint32_t scale = gui_state.settings.stream_scale;
+  return scale>=1&&scale<=3? (int)scale : 2;
+}
+static bool se_stream_audio_wanted(void){
+  return gui_state.settings.http_control_server_enable&&hcs_stream_audio_clients()>0;
+}
+// Sound for the WAV stream, at most as fast as real time: fast forward would only make the
+// listeners fall behind
+static void se_stream_publish_audio(const int16_t* samples, size_t frames){
+  double now = se_time();
+  if(!se_stream.audio_active){
+    se_stream.audio_active = true;
+    se_stream.audio_start = now;
+    se_stream.audio_published = 0;
+  }
+  double elapsed = now-se_stream.audio_start;
+  // Restart the clock after a pause or a slow down, so the next sound is not dropped
+  if(se_stream.audio_published<(elapsed-0.5)*SE_AUDIO_SAMPLE_RATE){
+    se_stream.audio_start = now-se_stream.audio_published/(double)SE_AUDIO_SAMPLE_RATE;
+    elapsed = now-se_stream.audio_start;
+  }
+  if(se_stream.audio_published+frames>(elapsed+0.25)*SE_AUDIO_SAMPLE_RATE)return;
+  hcs_stream_publish_audio(samples,frames);
+  se_stream.audio_published+=frames;
+}
+// Once per displayed frame on the main thread: the newest frame for the MJPEG viewers
+static void se_stream_update(void){
+  if(!se_stream_audio_wanted())se_stream.audio_active = false;
+  if(!gui_state.settings.http_control_server_enable||hcs_stream_video_clients()<=0||!emu_state.rom_loaded)return;
+  if(se_frames_emulated==se_stream.published_frame)return;
+  double now = se_time();
+  if(gui_state.settings.stream_fps==1&&now-se_stream.last_publish<1.0/30*0.9)return;
+  int w, h;
+  se_screenshot(se_stream.frame,&w,&h);
+  if(w<=0||h<=0)return;
+  if(!se_record_encode_frame(se_stream.frame,w,h,se_stream_scale(),85,&se_stream.scratch,&se_stream.jpeg))return;
+  hcs_stream_publish_frame(se_stream.jpeg.data,se_stream.jpeg.size);
+  se_stream.published_frame = se_frames_emulated;
+  se_stream.last_publish = now;
+}
+static const char* se_stream_system_name(void){
+  switch(emu_state.system){
+    case SYSTEM_GB: return "GB";
+    case SYSTEM_GBA: return "GBA";
+    case SYSTEM_NDS: return "NDS";
+    default: return "";
+  }
+}
+// Console buttons held in the last frame, for the overlay and the Remote Play page
+static void se_input_state_json(se_string_t* out){
+  const char* game = "";
+  if(emu_state.rom_loaded){
+    game = emu_state.save_data_base_path;
+    const char* slash = strrchr(game,'/');
+    const char* backslash = strrchr(game,'\\');
+    if(backslash>slash)slash = backslash;
+    if(slash)game = slash+1;
+  }
+  bool running = emu_state.run_mode==SB_MODE_RUN||emu_state.run_mode==SB_MODE_REWIND;
+  se_string_printf(out,"{\"system\": \"%s\", \"game\": \"%s\", \"running\": %s, \"inputs\": {",se_stream_system_name(),
+                   se_json_escaped(game),running? "true" : "false");
+  // A, B, X, Y, Up, Down, Left, Right, L, R, Start, Select
+  for(int i=0;i<=SE_KEY_SELECT;++i){
+    se_string_printf(out,"%s\"%s\": %d",i? ", " : "",se_keybind_names[i],emu_state.prev_frame_joy.inputs[i]>0.5);
+  }
+  se_string_printf(out,"}}");
+}
+static void se_draw_streaming_settings(float win_w){
+  se_section(ICON_FK_PODCAST " Streaming");
+  bool enabled = gui_state.settings.http_control_server_enable;
+  if(se_checkbox("Streaming and Remote Play",&enabled))gui_state.settings.http_control_server_enable = enabled;
+  if(!enabled){
+    se_text_disabled("Watch and play on another device on your network, or show the game in streaming software such as OBS.");
+    return;
+  }
+  char base[96];
+  snprintf(base,sizeof(base),"http://%s:%d",hcs_local_ip(),gui_state.settings.http_control_server_port);
+  static const char* labels[4] = {"Remote Play","OBS Overlay","Video","Sound"};
+  static const char* paths[4] = {"/remote","/overlay","/stream.mjpg","/stream.wav"};
+  for(int i=0;i<4;++i){
+    char url[160];
+    snprintf(url,sizeof(url),"%s%s",base,paths[i]);
+    igPushIDInt(i);
+    se_field_label(labels[i]);
+    igSameLine(SE_FIELD_INDENT-25,0);
+    igPushFont(gui_state.mono_font);
+    se_text_disabled("%s",paths[i]);
+    igPopFont();
+    igSameLine(win_w-15,0);
+    if(se_button(ICON_FK_CLIPBOARD,(ImVec2){-1,0})){
+      igSetClipboardText(url);
+      se_rec_set_message(false,"Copied %s",url);
+    }
+    if(igIsItemHovered(ImGuiHoveredFlags_None))igSetTooltip("%s %s",se_localize_and_cache("Copy"),url);
+    igPopID();
+  }
+  se_text_disabled(se_localize_and_cache("Open %s/remote in a browser on your phone or computer."),base);
+  int watching = hcs_stream_video_clients(), listening = hcs_stream_audio_clients();
+  if(watching||listening)se_text(se_localize_and_cache("%d watching, %d listening"),watching,listening);
+  int scale = se_stream_scale()-1;
+  se_field_label("Stream Size");igSameLine(SE_FIELD_INDENT,0);
+  igPushItemWidth(-1);
+  if(se_combo_str("##StreamSize",&scale,"1x\0""2x\0""3x\0",0))gui_state.settings.stream_scale = scale+1;
+  igPopItemWidth();
+  int fps = gui_state.settings.stream_fps==1;
+  se_field_label("Frame Rate");igSameLine(SE_FIELD_INDENT,0);
+  igPushItemWidth(-1);
+  if(se_combo_str("##StreamFps",&fps,"60 fps\0""30 fps (less data)\0",0))gui_state.settings.stream_fps = fps;
+  igPopItemWidth();
+  ImU32 warning = gui_state.design_active? se_design_u32(gui_state.design.error) : 0xff0080ff;
+  igPushStyleColorU32(ImGuiCol_Text,warning);
+  se_text(ICON_FK_EXCLAMATION_TRIANGLE " %s",se_localize_and_cache("Devices on your network can open these pages and control SkyEmu. Turn this off on networks you don't trust."));
+  igPopStyleColor(1);
+}
+SKYEMU_API void se_set_stream_scale(int scale){if(scale>=1&&scale<=3)gui_state.settings.stream_scale = scale;}
+SKYEMU_API int se_get_stream_scale(void){return se_stream_scale();}
+SKYEMU_API void se_set_stream_fps(int fps){gui_state.settings.stream_fps = fps==30;}
+SKYEMU_API int se_get_stream_fps(void){return gui_state.settings.stream_fps==1? 30 : 60;}
+#else
+static bool se_stream_audio_wanted(void){return false;}
+static void se_stream_publish_audio(const int16_t* samples, size_t frames){(void)samples; (void)frames;}
+static void se_stream_update(void){}
+SKYEMU_API void se_set_stream_scale(int scale){(void)scale;}
+SKYEMU_API int se_get_stream_scale(void){return 0;}
+SKYEMU_API void se_set_stream_fps(int fps){(void)fps;}
+SKYEMU_API int se_get_stream_fps(void){return 0;}
+#endif
 
 /*
  * SkyEmu Framebuffer Interface for C# / External Applications
@@ -4911,6 +5723,9 @@ void se_set_default_keybind(gui_state_t *gui){
   gui->key.bound_id[SE_KEY_SOLAR_M]= SAPP_KEYCODE_MINUS;     
   gui->key.bound_id[SE_KEY_SOLAR_P]= SAPP_KEYCODE_EQUAL;     
   gui->key.bound_id[SE_KEY_TOGGLE_FULLSCREEN] = SAPP_KEYCODE_F11;
+  gui->key.bound_id[SE_KEY_SCREENSHOT] = SAPP_KEYCODE_F12;
+  gui->key.bound_id[SE_KEY_RECORD_VIDEO] = SAPP_KEYCODE_F9;
+  gui->key.bound_id[SE_KEY_SAVE_REPLAY] = SAPP_KEYCODE_F10;
 
   for(int i=0;i<SE_NUM_SAVE_STATES;++i){
     gui->key.bound_id[SE_KEY_CAPTURE_STATE(i)]=SAPP_KEYCODE_1+i;
@@ -7396,6 +8211,7 @@ void se_update_frame() {
 #endif
   se_update_key_turbo(&emu_state);
   se_update_solar_sensor(&emu_state);
+  se_rec_update();
 
   if(emu_state.run_mode == SB_MODE_RESET){
     se_reset_core();
@@ -7442,7 +8258,7 @@ void se_update_frame() {
       // On steps emulate all frames, but only render the last frame of the step
       // and don't allow screen ghosting
       if(emu_state.run_mode==SB_MODE_STEP){
-        emu_state.render_frame = max_frames_per_tick==0;
+        emu_state.render_frame = max_frames_per_tick==0||se_rec.video||se_rec.replay.capacity;
         emu_state.screen_ghosting_strength=0; 
       }else{
         if(unlocked_mode){
@@ -7468,7 +8284,8 @@ void se_update_frame() {
         simulation_time+=sim_time_increment;
       }
       emu_state.frame++;
-      emu_state.render_frame = false;
+      // Recordings need every frame drawn, also the ones fast forward skips
+      emu_state.render_frame = se_rec.video||se_rec.replay.capacity;
       curr_time = se_time();
       if(emu_state.run_mode==SB_MODE_PAUSE)break;
     }
@@ -7478,6 +8295,7 @@ void se_update_frame() {
   if(emu_state.run_mode==SB_MODE_PAUSE)emu_state.frame = 0; 
   if(emu_state.run_mode==SB_MODE_REWIND)emu_state.frame = - emu_state.frame*frames_per_rewind_state;
 
+  se_stream_update();
   emu_state.prev_frame_joy = emu_state.joy; 
   se_reset_joy(&emu_state.joy);
 
@@ -7917,6 +8735,10 @@ bool se_load_controller_settings(se_controller_state_t * cont){
     for(int i=0;i<SE_NUM_BINDS_ALLOC;++i){
       cont->key.bound_id[i]=bind_map[i];
       cont->analog.bound_id[i]=bind_map[i+SE_NUM_BINDS_ALLOC];
+    }
+    // Saved before the recording hotkeys existed: their slots hold 0, which is a real button
+    if(cont->key.bound_id[SE_KEY_SCREENSHOT]==0&&cont->key.bound_id[SE_KEY_RECORD_VIDEO]==0&&cont->key.bound_id[SE_KEY_SAVE_REPLAY]==0){
+      cont->key.bound_id[SE_KEY_SCREENSHOT] = cont->key.bound_id[SE_KEY_RECORD_VIDEO] = cont->key.bound_id[SE_KEY_SAVE_REPLAY] = -1;
     }
   }
   return load_old_settings;
@@ -8677,6 +9499,10 @@ void se_draw_menu_panel(){
       se_draw_save_states(false);
     }
   }
+  if(emu_state.rom_loaded)se_draw_recording_settings(win_w);
+#ifdef ENABLE_HTTP_CONTROL_SERVER
+  if(emu_state.rom_loaded)se_draw_streaming_settings(win_w);
+#endif
   se_section(ICON_FK_CLOUD " Google Drive");
   if (!cloud_state.drive){
     bool pending_login = cloud_drive_pending_login();
@@ -9221,6 +10047,7 @@ void se_draw_menu_panel(){
     se_input_path("BIOS/Firmware Path", gui_state.paths.bios,ImGuiInputTextFlags_None);
     se_input_path("Cheat Code Path", gui_state.paths.cheat_codes,ImGuiInputTextFlags_None);
     se_input_path("Patch Path", gui_state.paths.patches,ImGuiInputTextFlags_None);
+    se_input_path("Recording Path", gui_state.paths.recordings,ImGuiInputTextFlags_None);
     bool save_to_path=gui_state.settings.save_to_path;
     se_checkbox("Create new files in paths",&save_to_path);
     gui_state.settings.save_to_path=save_to_path;
@@ -9383,13 +10210,59 @@ uint8_t* se_hcs_callback(const char* cmd, const char** params, uint64_t* result_
   *mime_type = "text/html";
   printf("Got HCS Cmd: %s\n",cmd);
   const char* str_result = NULL;
-  if(strcmp(cmd,"/achievements")==0){
+  if(strcmp(cmd,"/stream.mjpg")==0||strcmp(cmd,"/stream.wav")==0){
+    // Read only, also in Hardcore Mode. http_control_server.cpp turns the request into a stream.
+    *mime_type = strcmp(cmd,"/stream.mjpg")==0? "x-skyemu/stream-mjpeg" : "x-skyemu/stream-wav";
+    char* marker = strdup("stream");
+    *result_size = strlen(marker);
+    return (uint8_t*)marker;
+  }
+  if(strcmp(cmd,"/remote")==0||strcmp(cmd,"/overlay")==0){
+    const unsigned char* page = strcmp(cmd,"/remote")==0? se_web_remote_html : se_web_overlay_html;
+    size_t size = strcmp(cmd,"/remote")==0? se_web_remote_html_size : se_web_overlay_html_size;
+    uint8_t* data = (uint8_t*)malloc(size);
+    if(!data)return NULL;
+    memcpy(data,page,size);
+    *mime_type = "text/html; charset=utf-8";
+    *result_size = size;
+    return data;
+  }
+  if(strcmp(cmd,"/input_state")==0){
+    *mime_type = "application/json";
+    se_string_t out = {0};
+    se_input_state_json(&out);
+    if(!out.data)return NULL;
+    *result_size = out.size;
+    return (uint8_t*)out.data;
+  }
+  bool capture_cmd = strcmp(cmd,"/record")==0||strcmp(cmd,"/recording")==0||strcmp(cmd,"/save_screenshot")==0||
+                     strcmp(cmd,"/save_replay")==0;
+  if(capture_cmd){
+    // Recording only captures what the game shows, so it is also available in Hardcore Mode
+    bool ok = true;
+    if(strcmp(cmd,"/save_screenshot")==0)ok = se_save_screenshot();
+    else if(strcmp(cmd,"/save_replay")==0)ok = se_save_replay();
+    else if(strcmp(cmd,"/record")==0){
+      for(const char** p=params;*p;p+=2){
+        bool on = atoi(p[1])!=0;
+        if(strcmp(p[0],"video")==0)ok&=on? se_start_video_recording() : (se_stop_video_recording(),true);
+        else if(strcmp(p[0],"audio")==0)ok&=on? se_start_audio_recording() : (se_stop_audio_recording(),true);
+      }
+    }
+    *mime_type = "application/json";
+    se_string_t out = {0};
+    se_recording_json(&out);
+    (void)ok;
+    if(!out.data)return NULL;
+    *result_size = out.size;
+    return (uint8_t*)out.data;
+  }else if(strcmp(cmd,"/achievements")==0){
     // Read only and it does not touch the game, so it also answers in Hardcore Mode
     *mime_type = "application/json";
     se_string_t out = {0};
     se_achievements_json(&out);
     if(!out.data)return NULL;
-    *result_size = out.size+1;
+    *result_size = out.size;
     return (uint8_t*)out.data;
   }else if(gui_state.settings.hardcore_mode&& gui_state.ra_logged_in){
     str_result="Error: The HTTP Control Server is unavailable in Hardcore Mode";
@@ -9503,6 +10376,13 @@ uint8_t* se_hcs_callback(const char* cmd, const char** params, uint64_t* result_
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"hardcore_mode\": %d,\n",gui_state.settings.hardcore_mode);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"ra_unofficial\": %d,\n",gui_state.settings.ra_unofficial);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"ra_spectator\": %d,\n",gui_state.settings.ra_spectator);
+    off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"record_scale\": %d,\n",se_get_record_scale());
+    off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"record_format\": %d,\n",se_get_record_format());
+    off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"record_audio\": %d,\n",se_get_record_audio());
+    off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"replay_seconds\": %d,\n",se_get_replay_seconds());
+    off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"screenshot_scale\": %d,\n",se_get_screenshot_scale());
+    off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"stream_scale\": %d,\n",se_get_stream_scale());
+    off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"stream_fps\": %d,\n",se_get_stream_fps());
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"draw_challenge_indicators\": %d,\n",gui_state.settings.draw_challenge_indicators);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"draw_progress_indicators\": %d,\n",gui_state.settings.draw_progress_indicators);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"draw_leaderboard_trackers\": %d,\n",gui_state.settings.draw_leaderboard_trackers);
@@ -9591,6 +10471,13 @@ uint8_t* se_hcs_callback(const char* cmd, const char** params, uint64_t* result_
       else if(strcmp(params[0],"hardcore_mode")==0)se_set_hardcore_mode(atoi(params[1]));
       else if(strcmp(params[0],"ra_unofficial")==0)se_set_ra_unofficial(atoi(params[1]));
       else if(strcmp(params[0],"ra_spectator")==0)se_set_ra_spectator(atoi(params[1]));
+      else if(strcmp(params[0],"record_scale")==0)se_set_record_scale(atoi(params[1]));
+      else if(strcmp(params[0],"record_format")==0)se_set_record_format(atoi(params[1]));
+      else if(strcmp(params[0],"record_audio")==0)se_set_record_audio(atoi(params[1]));
+      else if(strcmp(params[0],"replay_seconds")==0)se_set_replay_seconds(atoi(params[1]));
+      else if(strcmp(params[0],"screenshot_scale")==0)se_set_screenshot_scale(atoi(params[1]));
+      else if(strcmp(params[0],"stream_scale")==0)se_set_stream_scale(atoi(params[1]));
+      else if(strcmp(params[0],"stream_fps")==0)se_set_stream_fps(atoi(params[1]));
       else if(strcmp(params[0],"draw_challenge_indicators")==0)gui_state.settings.draw_challenge_indicators=atoi(params[1]);
       else if(strcmp(params[0],"draw_progress_indicators")==0)gui_state.settings.draw_progress_indicators=atoi(params[1]);
       else if(strcmp(params[0],"draw_leaderboard_trackers")==0)gui_state.settings.draw_leaderboard_trackers=atoi(params[1]);
@@ -9811,7 +10698,7 @@ uint8_t* se_hcs_callback(const char* cmd, const char** params, uint64_t* result_
       if(!out.size)se_string_printf(&out,"No cheats enabled");
     }
     if(!out.data)return NULL;
-    *result_size = out.size+1;
+    *result_size = out.size;
     return (uint8_t*)out.data;
   }else if(strcmp(cmd,"/remove_cheat")==0){
     bool okay=false;
@@ -9932,7 +10819,7 @@ uint8_t* se_hcs_callback(const char* cmd, const char** params, uint64_t* result_
       se_cheat_finder_unlock();
       if(!str_result){
         if(!out.data)return NULL;
-        *result_size = out.size+1;
+        *result_size = out.size;
         return (uint8_t*)out.data;
       }
     }
@@ -9957,7 +10844,7 @@ uint8_t* se_hcs_callback(const char* cmd, const char** params, uint64_t* result_
       for(uint32_t w=0;w<cheats[index].size;++w)se_string_printf(&out,"%s%08X",w? " " : "",cheats[index].buffer[w]);
       se_string_printf(&out,"\"}");
       if(!out.data)return NULL;
-      *result_size = out.size+1;
+      *result_size = out.size;
       return (uint8_t*)out.data;
     }
   }
@@ -10053,7 +10940,7 @@ static void frame(void) {
 
 
     if(gui_state.settings.draw_debug_menu)se_draw_debug_menu();
-    
+    if(show_ui)se_rec_draw_menu_bar_indicator();
 
     int orig_x = igGetCursorPosX();
     int v = (gui_state.settings.volume*100);
@@ -10330,6 +11217,9 @@ static void frame(void) {
     se_update_frame();
 
     se_draw_emulated_system_screen(false);
+    se_rec_lock();
+    se_rec_draw_toast(screen_x,menu_height,screen_width/se_dpi_scale());
+    se_rec_unlock();
 
 #ifdef ENABLE_RETRO_ACHIEVEMENTS
     float left = screen_x;
@@ -10546,6 +11436,12 @@ void se_load_settings(){
     snprintf(keybind_path,SB_FILE_PATH_SIZE,"%skeyboard-bindings.bin",se_get_pref_path());
     if(!sb_load_file_data_into_buffer(keybind_path,(uint8_t*)gui_state.key.bound_id,sizeof(gui_state.key.bound_id))){
       se_set_default_keybind(&gui_state);
+    }else if(gui_state.key.bound_id[SE_KEY_SCREENSHOT]==0&&gui_state.key.bound_id[SE_KEY_RECORD_VIDEO]==0&&
+             gui_state.key.bound_id[SE_KEY_SAVE_REPLAY]==0){
+      // Saved before these hotkeys existed: give them their default keys
+      gui_state.key.bound_id[SE_KEY_SCREENSHOT] = SAPP_KEYCODE_F12;
+      gui_state.key.bound_id[SE_KEY_RECORD_VIDEO] = SAPP_KEYCODE_F9;
+      gui_state.key.bound_id[SE_KEY_SAVE_REPLAY] = SAPP_KEYCODE_F10;
     }
   }
 #if defined(USE_SDL) || defined(SE_PLATFORM_ANDROID)
@@ -10635,6 +11531,7 @@ void se_load_settings(){
     memset(&cloud_state,0,sizeof(se_cloud_state_t));
     cloud_state.save_states_mutex = mutex_create();
     se_cheat_finder_mutex = mutex_create();
+    se_rec_mutex = mutex_create();
     char refresh_token_path[SB_FILE_PATH_SIZE];
     snprintf(refresh_token_path,SB_FILE_PATH_SIZE,"%srefresh_token.txt",se_get_pref_path());
     if(sb_file_exists(refresh_token_path)){
@@ -11780,6 +12677,8 @@ static void init(void) {
   #endif
 }
 static void cleanup(void) {
+  // Finishes recordings, so their files are complete
+  se_rec_stop_all();
   simgui_shutdown();
   se_free_all_images();
 #ifdef ENABLE_RETRO_ACHIEVEMENTS
@@ -11950,6 +12849,30 @@ jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1ra_1spectator(JNIEnv
 jstring Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1achievements_1json(JNIEnv *env, jobject thiz) {
   return (*env)->NewStringUTF(env, se_get_achievements_json());
 }
+jboolean Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1start_1video_1recording(JNIEnv *env, jobject thiz) { return se_start_video_recording()? JNI_TRUE : JNI_FALSE; }
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1stop_1video_1recording(JNIEnv *env, jobject thiz) { se_stop_video_recording(); }
+jboolean Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1is_1recording_1video(JNIEnv *env, jobject thiz) { return se_is_recording_video()? JNI_TRUE : JNI_FALSE; }
+jboolean Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1start_1audio_1recording(JNIEnv *env, jobject thiz) { return se_start_audio_recording()? JNI_TRUE : JNI_FALSE; }
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1stop_1audio_1recording(JNIEnv *env, jobject thiz) { se_stop_audio_recording(); }
+jboolean Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1is_1recording_1audio(JNIEnv *env, jobject thiz) { return se_is_recording_audio()? JNI_TRUE : JNI_FALSE; }
+jboolean Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1save_1screenshot(JNIEnv *env, jobject thiz) { return se_save_screenshot()? JNI_TRUE : JNI_FALSE; }
+jboolean Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1save_1replay(JNIEnv *env, jobject thiz) { return se_save_replay()? JNI_TRUE : JNI_FALSE; }
+jstring Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1last_1recording_1path(JNIEnv *env, jobject thiz) { return (*env)->NewStringUTF(env, se_get_last_recording_path()); }
+jstring Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1recording_1json(JNIEnv *env, jobject thiz) { return (*env)->NewStringUTF(env, se_get_recording_json()); }
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1record_1scale(JNIEnv *env, jobject thiz, jint value) { se_set_record_scale((int) value); }
+jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1record_1scale(JNIEnv *env, jobject thiz) { return (jint) se_get_record_scale(); }
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1record_1format(JNIEnv *env, jobject thiz, jint value) { se_set_record_format((int) value); }
+jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1record_1format(JNIEnv *env, jobject thiz) { return (jint) se_get_record_format(); }
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1record_1audio(JNIEnv *env, jobject thiz, jint value) { se_set_record_audio((int) value); }
+jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1record_1audio(JNIEnv *env, jobject thiz) { return (jint) se_get_record_audio(); }
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1replay_1seconds(JNIEnv *env, jobject thiz, jint value) { se_set_replay_seconds((int) value); }
+jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1replay_1seconds(JNIEnv *env, jobject thiz) { return (jint) se_get_replay_seconds(); }
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1screenshot_1scale(JNIEnv *env, jobject thiz, jint value) { se_set_screenshot_scale((int) value); }
+jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1screenshot_1scale(JNIEnv *env, jobject thiz) { return (jint) se_get_screenshot_scale(); }
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1stream_1scale(JNIEnv *env, jobject thiz, jint value) { se_set_stream_scale((int) value); }
+jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1stream_1scale(JNIEnv *env, jobject thiz) { return (jint) se_get_stream_scale(); }
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1stream_1fps(JNIEnv *env, jobject thiz, jint value) { se_set_stream_fps((int) value); }
+jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1stream_1fps(JNIEnv *env, jobject thiz) { return (jint) se_get_stream_fps(); }
 jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1make_1cheat(JNIEnv *env, jobject thiz, jlong address, jlong value, jint value_size, jstring name) {
   const char *native_name = name? (*env)->GetStringUTFChars(env, name, 0) : NULL;
   int index = se_make_cheat((uint32_t) address, (uint32_t) value, (int) value_size, native_name);

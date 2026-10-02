@@ -373,7 +373,7 @@ add_definitions(-DGIT_BRANCH=\"${GIT_BRANCH}\")
 add_definitions(-DGIT_TAG=\"${GIT_TAG}\")
 
 if(NOT RETRO_CORE_ONLY)
-  set(SKYEMU_SRC src/main.c src/shared.c src/se_design.c src/se_patch.c src/se_cheat_finder.c src/cloud.cpp src/https.cpp src/stb.c src/miniz.c src/res.c src/localization.c src/mutex.cpp)
+  set(SKYEMU_SRC src/main.c src/shared.c src/se_design.c src/se_patch.c src/se_cheat_finder.c src/se_record.c src/cloud.cpp src/https.cpp src/stb.c src/miniz.c src/res.c src/localization.c src/mutex.cpp)
   
   if(ENABLE_HTTP_CONTROL_SERVER)
     add_definitions(-DENABLE_HTTP_CONTROL_SERVER=1)
