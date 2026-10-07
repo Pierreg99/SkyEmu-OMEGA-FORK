@@ -47,6 +47,49 @@ SKYEMU_API void se_load_rom(const char *filename);
 /* Show the emulator UI overlay */
 SKYEMU_API void se_show_ui(void);
 
+/*
+ * ROM patches (IPS, UPS, BPS). A patch named like the ROM next to it, next to its save file or in
+ * the patch path is applied in memory when the game loads; the ROM file is never changed.
+ * se_load_patch copies a patch next to the save file of the loaded game and reloads the game,
+ * returning true when the patch was applied. se_get_patch_status describes the patch in use or
+ * why it could not be applied (empty when the game has no patch).
+ */
+SKYEMU_API bool se_load_patch(const char *patch_path);
+SKYEMU_API const char* se_get_patch_status(void);
+SKYEMU_API void se_set_soft_patching(int enabled);
+SKYEMU_API int se_get_soft_patching(void);
+
+/*
+ * Cheats of the loaded game (Action Replay for the GBA and DS, GameShark for the Game Boy), saved
+ * in its .code file. Indices go from 0 to 127. se_add_cheat takes the code as hex digits, spaces
+ * and line breaks are ignored, and returns the new index or -1. se_get_cheats_json returns
+ * [{"id", "name", "enabled", "code"}, ...], valid until its next call. Cheats are refused in
+ * RetroAchievements Hardcore Mode.
+ */
+SKYEMU_API int se_add_cheat(const char* name, const char* code, int enabled);
+SKYEMU_API bool se_remove_cheat(int index);
+SKYEMU_API bool se_set_cheat_enabled(int index, int enabled);
+SKYEMU_API const char* se_get_cheats_json(void);
+
+/*
+ * Cheat finder: finds where the game keeps a value by searching its RAM while the value changes.
+ * se_cheat_search_start takes the value size (1, 2 or 4 bytes). compare is 0 equal, 1 not equal,
+ * 2 greater, 3 less, 4 changed, 5 unchanged, 6 increased, 7 decreased, 8 increased by,
+ * 9 decreased by (value is only used by 0-3, 8 and 9). se_cheat_search_filter returns the number
+ * of addresses left. se_make_cheat adds an enabled code that keeps value at address and returns
+ * its index or -1; se_cheat_search_add_code does the same with the size of the search.
+ * se_get_cheat_search_json returns {"active", "value_size", "signed", "searches", "count",
+ * "first", "results": [{"address", "value", "previous"}, ...]}, valid until its next call.
+ */
+SKYEMU_API bool se_cheat_search_start(int value_size, int is_signed);
+SKYEMU_API uint32_t se_cheat_search_filter(int compare, uint32_t value);
+SKYEMU_API uint32_t se_cheat_search_count(void);
+SKYEMU_API bool se_cheat_search_get_result(uint32_t index, uint32_t* address, uint32_t* value);
+SKYEMU_API void se_cheat_search_reset(void);
+SKYEMU_API int se_cheat_search_add_code(uint32_t address, uint32_t value, const char* name);
+SKYEMU_API int se_make_cheat(uint32_t address, uint32_t value, int value_size, const char* name);
+SKYEMU_API const char* se_get_cheat_search_json(uint32_t first_result, uint32_t max_results);
+
 /* Hide the emulator UI overlay */
 SKYEMU_API void se_hide_ui(void);
 
@@ -60,6 +103,8 @@ SKYEMU_API void se_stretch_to_fit(int fit);
  *   2 = LCD filter
  *   3 = LCD & Subpixels
  *   4 = Smooth Upscale (xBRZ)
+ *   5 = CRT (scanlines and aperture grille)
+ *   6 = Scanlines
  */
 SKYEMU_API void se_set_screen_shader(uint32_t shader_mode);
 SKYEMU_API uint32_t se_get_screen_shader(void);
@@ -77,6 +122,42 @@ SKYEMU_API float se_get_volume(void);
 /* Theme index */
 SKYEMU_API void se_set_theme(uint32_t theme);
 SKYEMU_API uint32_t se_get_theme(void);
+
+/*
+ * Design system of the GUI:
+ *   0 = Platform native (Material 3 on Android, Fluent on Windows, Adwaita on Linux,
+ *       the classic skin on Apple platforms)
+ *   1 = SkyEmu classic (image skin, uses the theme index above)
+ *   2 = Material 3 / Material You
+ *   3 = Fluent (Windows 11)
+ *   4 = Adwaita (GNOME)
+ */
+SKYEMU_API void se_set_design_system(uint32_t design);
+SKYEMU_API uint32_t se_get_design_system(void);
+
+/* Color scheme of the design systems: 0 = follow system, 1 = light, 2 = dark, 3 = black (AMOLED) */
+SKYEMU_API void se_set_color_scheme(uint32_t scheme);
+SKYEMU_API uint32_t se_get_color_scheme(void);
+
+/* Contrast of the design systems: 0 = follow system, 1 = standard, 2 = high */
+SKYEMU_API void se_set_contrast(uint32_t contrast);
+SKYEMU_API uint32_t se_get_contrast(void);
+
+/* Accent color 0xRRGGBB, or 0xFFFFFFFF to follow the system accent (Material You, Windows, GNOME) */
+SKYEMU_API void se_set_accent_color(uint32_t rgb);
+SKYEMU_API uint32_t se_get_accent_color(void);
+
+/*
+ * Lets a host app report the appearance of the OS when SkyEmu can not read it itself,
+ * e.g. a UWP/WinUI host passing UISettings values, or an Android host with its own activity.
+ *   dark:       1 = dark, 0 = light, -1 = unknown
+ *   accent_rgb: 0xRRGGBB, or 0xFFFFFFFF if unknown
+ */
+SKYEMU_API void se_set_system_appearance(int dark, uint32_t accent_rgb);
+
+/* Lets a host app report the system high contrast setting (e.g. UWP AccessibilitySettings.HighContrast):
+   1 = on, 0 = off, -1 = unknown (SkyEmu queries the system itself) */
+SKYEMU_API void se_set_system_high_contrast(int high_contrast);
 
 /* GB palette colors (index 0-3) */
 SKYEMU_API void se_set_gb_palette(int index, uint32_t color);
@@ -125,6 +206,22 @@ SKYEMU_API float se_get_touch_controls_scale(void);
 SKYEMU_API void se_set_touch_controls_show_turbo(uint32_t value);
 SKYEMU_API uint32_t se_get_touch_controls_show_turbo(void);
 
+/* On-screen touch controller: 1 = shown (after the screen is touched, or always when
+   "Hide when inactive" is off), 0 = never shown */
+SKYEMU_API void se_set_touch_controller(int shown);
+SKYEMU_API int se_get_touch_controller(void);
+/* Rewind and Fast Forward buttons on the on-screen controller: 0 = hidden, 1 = shown */
+SKYEMU_API void se_set_touch_controls_show_speed(uint32_t value);
+SKYEMU_API uint32_t se_get_touch_controls_show_speed(void);
+/* Restores the default portrait and landscape layouts of the on-screen controller */
+SKYEMU_API void se_reset_touch_layout(void);
+
+/* Face buttons of game controllers: 0 = the controller's A button is A (labels),
+   1 = A is the right face button and B the bottom one (GBA / DS positions).
+   Changing it rebinds the face buttons of the connected controller. */
+SKYEMU_API void se_set_controller_face_layout(uint32_t layout);
+SKYEMU_API uint32_t se_get_controller_face_layout(void);
+
 /* Save game data to ROM path: 0 = off, 1 = on */
 SKYEMU_API void se_set_save_to_path(uint32_t value);
 SKYEMU_API uint32_t se_get_save_to_path(void);
@@ -157,6 +254,64 @@ SKYEMU_API float se_get_custom_font_scale(void);
 SKYEMU_API void se_set_hardcore_mode(uint32_t value);
 SKYEMU_API uint32_t se_get_hardcore_mode(void);
 
+/*
+ * Recording. Videos are AVI files (MJPEG or uncompressed frames with 48 kHz PCM sound) of every
+ * emulated frame, so they play at normal speed also when the game was fast forwarded; sound only
+ * is recorded as WAV. Files are named "<game> <date> <time>" and saved in the Recording Path, or
+ * next to the save file. The replay buffer keeps the last 15, 30, 60 or 120 seconds (0 = off) for
+ * se_save_replay. se_get_last_recording_path is the last file saved, se_get_recording_message
+ * what happened last (for example an error) and se_get_recording_json the state as JSON.
+ * Strings stay valid until the next recording change.
+ */
+SKYEMU_API bool se_start_video_recording(void);
+SKYEMU_API void se_stop_video_recording(void);
+SKYEMU_API bool se_is_recording_video(void);
+SKYEMU_API bool se_start_audio_recording(void);
+SKYEMU_API void se_stop_audio_recording(void);
+SKYEMU_API bool se_is_recording_audio(void);
+SKYEMU_API bool se_save_screenshot(void);
+SKYEMU_API bool se_save_replay(void);
+SKYEMU_API const char* se_get_last_recording_path(void);
+SKYEMU_API const char* se_get_recording_message(void);
+SKYEMU_API const char* se_get_recording_json(void);
+SKYEMU_API void se_set_record_scale(int scale);       /* 1-4 times the console screen */
+SKYEMU_API int se_get_record_scale(void);
+SKYEMU_API void se_set_record_format(int format);     /* 0 high, 1 standard (smaller), 2 lossless */
+SKYEMU_API int se_get_record_format(void);
+SKYEMU_API void se_set_record_audio(int enabled);     /* Sound in videos */
+SKYEMU_API int se_get_record_audio(void);
+SKYEMU_API void se_set_replay_seconds(int seconds);   /* 0, 15, 30, 60 or 120 */
+SKYEMU_API int se_get_replay_seconds(void);
+SKYEMU_API void se_set_screenshot_scale(int scale);   /* 1-8 */
+SKYEMU_API int se_get_screenshot_scale(void);
+
+/*
+ * Streaming, through the HTTP control server: /stream.mjpg (video), /stream.wav (sound), /remote
+ * (Remote Play page) and /overlay (page for streaming software). Size 1-3 and 60 or 30 fps.
+ */
+SKYEMU_API void se_set_stream_scale(int scale);
+SKYEMU_API int se_get_stream_scale(void);
+SKYEMU_API void se_set_stream_fps(int fps);
+SKYEMU_API int se_get_stream_fps(void);
+
+/*
+ * RetroAchievements. se_ra_login starts logging in (the token is saved, so it only has to be done
+ * once) and se_ra_get_login_state returns 0 logged out, 1 logging in or 2 logged in;
+ * se_ra_get_login_error explains a failed login. Unofficial achievements are loaded and listed
+ * too when enabled. In spectator mode unlocks and leaderboard entries are shown but not sent.
+ * se_get_achievements_json returns the user, the game, its rich presence and every achievement
+ * with its unlock state and progress, valid until its next call.
+ */
+SKYEMU_API void se_ra_login(const char* username, const char* password);
+SKYEMU_API void se_ra_logout(void);
+SKYEMU_API int se_ra_get_login_state(void);
+SKYEMU_API const char* se_ra_get_login_error(void);
+SKYEMU_API void se_set_ra_unofficial(int enabled);
+SKYEMU_API int se_get_ra_unofficial(void);
+SKYEMU_API void se_set_ra_spectator(int enabled);
+SKYEMU_API int se_get_ra_spectator(void);
+SKYEMU_API const char* se_get_achievements_json(void);
+
 /* Draw challenge indicators: 0 = off, 1 = on */
 SKYEMU_API void se_set_draw_challenge_indicators(uint32_t value);
 SKYEMU_API uint32_t se_get_draw_challenge_indicators(void);
@@ -185,9 +340,23 @@ SKYEMU_API uint32_t se_get_only_one_notification(void);
 SKYEMU_API void se_set_enable_download_cache(uint32_t value);
 SKYEMU_API uint32_t se_get_enable_download_cache(void);
 
-/* NDS layout index */
+/* NDS screen layout: 0 Auto, 1 Vertical, 2 Horizontal, 3 Hybrid Large Top, 4 Hybrid Large Bottom,
+   5 Vertical Large Top, 6 Vertical Large Bottom, 7 Horizontal Large Top, 8 Horizontal Large Bottom,
+   9 Top Screen Only, 10 Bottom Screen Only */
 SKYEMU_API void se_set_nds_layout(uint32_t layout);
 SKYEMU_API uint32_t se_get_nds_layout(void);
+
+/* NDS swap screens: 1 = the bottom screen goes where the top screen would (also bound to F8) */
+SKYEMU_API void se_set_nds_swap_screens(uint32_t swap);
+SKYEMU_API uint32_t se_get_nds_swap_screens(void);
+
+/* Space between the NDS screens in DS pixels, 0-96 */
+SKYEMU_API void se_set_nds_screen_gap(uint32_t gap);
+SKYEMU_API uint32_t se_get_nds_screen_gap(void);
+
+/* Size of the small NDS screen of the large and hybrid layouts in percent, 25-100 (default 50) */
+SKYEMU_API void se_set_nds_small_screen(uint32_t percent);
+SKYEMU_API uint32_t se_get_nds_small_screen(void);
 
 /* Touch screen show button labels: 0 = off, 1 = on */
 SKYEMU_API void se_set_touch_screen_show_button_labels(uint32_t value);
@@ -211,7 +380,7 @@ SKYEMU_API void se_send_key(const char* key, float value);
 /*
  * SkyEmu Framebuffer Interface
  * 
- * The framebuffer is in BGRA format (4 bytes per pixel).
+ * The framebuffer is RGBA: 4 bytes per pixel in red, green, blue, alpha order.
  */
 
 /* System types matching SkyEmu's internal definitions */
@@ -242,7 +411,7 @@ SKYEMU_API void se_get_framebuffer_dimensions(int* width, int* height);
 /* Get the number of framebuffers for the current system */
 SKYEMU_API int se_get_framebuffer_count(void);
 
-/* Get a pointer to the framebuffer data (BGRA format) */
+/* Get a pointer to the framebuffer data (RGBA format) */
 SKYEMU_API const uint8_t* se_get_framebuffer(int screen_index);
 
 /* Copy the framebuffer to a caller-provided buffer */

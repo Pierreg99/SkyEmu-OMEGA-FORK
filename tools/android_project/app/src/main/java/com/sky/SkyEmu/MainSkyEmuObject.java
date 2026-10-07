@@ -44,6 +44,24 @@ public class MainSkyEmuObject {
     public native void se_android_set_stretch_to_fit(int value);
     public native int se_android_get_stretch_to_fit();
 
+    /* ---- Design system ----
+     * design: 0 platform native (Material 3 on Android), 1 SkyEmu classic, 2 Material 3, 3 Fluent, 4 Adwaita
+     * scheme: 0 follow system, 1 light, 2 dark, 3 black (AMOLED)
+     * contrast: 0 follow system, 1 standard, 2 high
+     * accent: 0xRRGGBB, or -1 to use the Material You wallpaper colors */
+    public native void se_android_set_design_system(int design);
+    public native int se_android_get_design_system();
+    public native void se_android_set_color_scheme(int scheme);
+    public native int se_android_get_color_scheme();
+    public native void se_android_set_contrast(int contrast);
+    public native int se_android_get_contrast();
+    public native void se_android_set_accent_color(int rgb);
+    public native int se_android_get_accent_color();
+    /* For hosts that embed SkyEmu in their own activity: dark 1/0/-1, accent ARGB or -1 */
+    public native void se_android_set_system_appearance(int dark, int accent);
+    /* For hosts that embed SkyEmu in their own activity: system high contrast 1/0/-1 */
+    public native void se_android_set_system_high_contrast(int highContrast);
+
     /* ---- GB Palette (index 0-3) ---- */
     public native void se_android_set_gb_palette(int index, int color);
     public native int se_android_get_gb_palette(int index);
@@ -63,6 +81,70 @@ public class MainSkyEmuObject {
     public native float se_android_get_touch_controls_scale();
     public native void se_android_set_touch_controls_show_turbo(int value);
     public native int se_android_get_touch_controls_show_turbo();
+    /* On-screen controller: 1 shown, 0 off */
+    public native void se_android_set_touch_controller(int shown);
+    public native int se_android_get_touch_controller();
+    /* Rewind and Fast Forward buttons on the on-screen controller */
+    public native void se_android_set_touch_controls_show_speed(int value);
+    public native int se_android_get_touch_controls_show_speed();
+    /* Restores the default on-screen controller layouts */
+    public native void se_android_reset_touch_layout();
+    /* Game controller face buttons: 0 match the labels, 1 match the GBA positions (A on the right) */
+    public native void se_android_set_controller_face_layout(int layout);
+    /* ROM patches (IPS, UPS, BPS): adds a patch to the loaded game and reloads it */
+    public native boolean se_android_load_patch(String path);
+    public native String se_android_get_patch_status();
+    public native void se_android_set_soft_patching(int enabled);
+    public native int se_android_get_soft_patching();
+    /* Cheats of the loaded game, see skyemu_dll.h. Addresses and values are unsigned 32 bit numbers. */
+    public native int se_android_add_cheat(String name, String code, int enabled);
+    public native boolean se_android_remove_cheat(int index);
+    public native boolean se_android_set_cheat_enabled(int index, int enabled);
+    public native String se_android_get_cheats_json();
+    /* Cheat finder: compare is 0 equal, 1 not equal, 2 greater, 3 less, 4 changed, 5 unchanged,
+       6 increased, 7 decreased, 8 increased by, 9 decreased by */
+    public native boolean se_android_cheat_search_start(int valueSize, int signed);
+    public native long se_android_cheat_search_filter(int compare, long value);
+    public native void se_android_cheat_search_reset();
+    public native String se_android_get_cheat_search_json(int first, int max);
+    public native int se_android_cheat_search_add_code(long address, long value, String name);
+    public native int se_android_make_cheat(long address, long value, int valueSize, String name);
+    /* RetroAchievements: login state is 0 logged out, 1 logging in, 2 logged in */
+    public native void se_android_ra_login(String username, String password);
+    public native void se_android_ra_logout();
+    public native int se_android_ra_get_login_state();
+    public native String se_android_ra_get_login_error();
+    public native void se_android_set_ra_unofficial(int enabled);
+    public native int se_android_get_ra_unofficial();
+    public native void se_android_set_ra_spectator(int enabled);
+    public native int se_android_get_ra_spectator();
+    public native String se_android_get_achievements_json();
+    /* Recording: videos (AVI), sound (WAV), screenshots (PNG) and the replay buffer, see skyemu_dll.h */
+    public native boolean se_android_start_video_recording();
+    public native void se_android_stop_video_recording();
+    public native boolean se_android_is_recording_video();
+    public native boolean se_android_start_audio_recording();
+    public native void se_android_stop_audio_recording();
+    public native boolean se_android_is_recording_audio();
+    public native boolean se_android_save_screenshot();
+    public native boolean se_android_save_replay();
+    public native String se_android_get_last_recording_path();
+    public native String se_android_get_recording_json();
+    public native void se_android_set_record_scale(int scale);
+    public native int se_android_get_record_scale();
+    public native void se_android_set_record_format(int format);
+    public native int se_android_get_record_format();
+    public native void se_android_set_record_audio(int enabled);
+    public native int se_android_get_record_audio();
+    public native void se_android_set_replay_seconds(int seconds);
+    public native int se_android_get_replay_seconds();
+    public native void se_android_set_screenshot_scale(int scale);
+    public native int se_android_get_screenshot_scale();
+    public native void se_android_set_stream_scale(int scale);
+    public native int se_android_get_stream_scale();
+    public native void se_android_set_stream_fps(int fps);
+    public native int se_android_get_stream_fps();
+    public native int se_android_get_controller_face_layout();
     public native void se_android_set_avoid_overlapping_touchscreen(int value);
     public native int se_android_get_avoid_overlapping_touchscreen();
     public native void se_android_set_touch_screen_show_button_labels(int value);
@@ -85,6 +167,12 @@ public class MainSkyEmuObject {
     public native int se_android_get_save_to_path();
     public native void se_android_set_nds_layout(int layout);
     public native int se_android_get_nds_layout();
+    public native void se_android_set_nds_swap_screens(int value);
+    public native int se_android_get_nds_swap_screens();
+    public native void se_android_set_nds_screen_gap(int value);
+    public native int se_android_get_nds_screen_gap();
+    public native void se_android_set_nds_small_screen(int value);
+    public native int se_android_get_nds_small_screen();
     public native void se_android_set_show_screen_bezel(int value);
     public native int se_android_get_show_screen_bezel();
 

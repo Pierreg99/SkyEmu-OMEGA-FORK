@@ -282,11 +282,8 @@ if(NOT RETRO_CORE_ONLY)
       add_library(sokol STATIC src/sokol/sokol.m ${SOKOL_HEADERS})
       if(MACOS AND (NOT IOS))
           add_definitions(-DSE_PLATFORM_MACOS)
-          if(NOT USE_SDL)
-              add_definitions(-DSOKOL_METAL=1)
-          else()
-              add_definitions(-DSOKOL_GLCORE33=1)
-          endif()
+          # sokol.m is the Metal backend, also when SDL handles input and sound
+          add_definitions(-DSOKOL_METAL=1)
           target_link_libraries(sokol PUBLIC
               "-framework QuartzCore"
               "-framework Cocoa"
@@ -373,7 +370,7 @@ add_definitions(-DGIT_BRANCH=\"${GIT_BRANCH}\")
 add_definitions(-DGIT_TAG=\"${GIT_TAG}\")
 
 if(NOT RETRO_CORE_ONLY)
-  set(SKYEMU_SRC src/main.c src/shared.c src/cloud.cpp src/https.cpp src/stb.c src/miniz.c src/res.c src/localization.c src/mutex.cpp)
+  set(SKYEMU_SRC src/main.c src/shared.c src/se_design.c src/se_patch.c src/se_cheat_finder.c src/se_record.c src/se_screen_layout.c src/cloud.cpp src/https.cpp src/stb.c src/miniz.c src/res.c src/localization.c src/mutex.cpp)
   
   if(ENABLE_HTTP_CONTROL_SERVER)
     add_definitions(-DENABLE_HTTP_CONTROL_SERVER=1)
@@ -451,6 +448,8 @@ if(NOT RETRO_CORE_ONLY)
   if(IOS)
       set(SKYEMU_SRC ${SKYEMU_SRC} src/ios_support.m)
       add_definitions(-DSE_PLATFORM_IOS)
+  elseif(MACOS)
+      set(SKYEMU_SRC ${SKYEMU_SRC} src/macos_support.m)
   endif()
 
   # ---------------------------------------------------------------------
@@ -475,30 +474,19 @@ if(NOT RETRO_CORE_ONLY)
     if(WIN32)
       add_library(${PROJECT_NAME} SHARED ${SKYEMU_SRC})
       target_compile_definitions(${PROJECT_NAME} PRIVATE SE_PLATFORM_WINDOWS_DLL SKYEMU_DLL_EXPORTS SOKOL_NO_ENTRY)
-    elseif(MACOS)
-      if(BUILD_MACOS_STATIC_LIB)
-        add_library(${PROJECT_NAME} STATIC ${SKYEMU_SRC})
-      else()
-            set(MACOSX_BUNDLE_GUI_IDENTIFIER "SkyEmu")
-            set(MACOSX_BUNDLE_SHORT_VERSION_STRING ${GIT_COMMIT_HASH})
-            set(MACOSX_BUNDLE_LONG_VERSION_STRING ${GIT_COMMIT_HASH})
-            set(MACOSX_BUNDLE_BUNDLE_VERSION ${GIT_COMMIT_HASH})
-            set(CMAKE_OSX_DEPLOYMENT_TARGET "10.13" CACHE STRING "Minimum OS X deployment version" FORCE)
-      
-            set(MACOSX_BUNDLE_ICON_FILE AppIcon.icns)
-            set(APP_ICON src/resources/icons/AppIcon.icns)
-            set_source_files_properties(${APP_ICON} PROPERTIES MACOSX_PACKAGE_LOCATION "Resources")
-            add_executable(${PROJECT_NAME} ${SKYEMU_SRC} ${APP_ICON})
-            set_property(TARGET ${PROJECT_NAME} PROPERTY XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "SkyEmu")
-            set_property(TARGET ${PROJECT_NAME} PROPERTY MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/src/resources/ios-info.plist.in")
-            # Mac Catalyst support
-            set_target_properties(${PROJECT_NAME} PROPERTIES
-              XCODE_ATTRIBUTE_SUPPORTED_PLATFORMS "macosx iphonesimulator maccatalyst"
-              XCODE_ATTRIBUTE_MACOSX_DEPLOYMENT_TARGET "10.15"
-              XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2"
-            )
+      # SkyEmu.exe starts SkyEmu.dll, so the Windows build runs without a host app
+      add_executable(SkyEmuLauncher WIN32 src/win_launcher.c src/resources/icons/appicon.rc)
+      target_compile_definitions(SkyEmuLauncher PRIVATE SE_PLATFORM_WINDOWS_DLL)
+      # The icon resource names its file relative to its own folder
+      target_include_directories(SkyEmuLauncher PRIVATE src src/resources/icons)
+      target_link_libraries(SkyEmuLauncher PRIVATE ${PROJECT_NAME} shell32)
+      # Same name as the DLL, but its debug files must not overwrite those of the DLL
+      set_target_properties(SkyEmuLauncher PROPERTIES OUTPUT_NAME "SkyEmu" PDB_NAME "SkyEmu-launcher")
+      if(MSVC)
+        target_link_options(SkyEmuLauncher PRIVATE /INCREMENTAL:NO)
       endif()
     elseif(IOS)
+      # Checked before MACOS, which is also set for iOS (IOS is only defined after project())
       if(BUILD_IOS_STATIC_LIB)
         # Build a static library for iOS
         add_library(${PROJECT_NAME} STATIC ${SKYEMU_SRC})
@@ -516,10 +504,35 @@ if(NOT RETRO_CORE_ONLY)
         set(MACOSX_BUNDLE_ICON_FILE AppIcon.icns)
         set(APP_ICON src/resources/icons/AppIcon.icns)
         set_source_files_properties(${APP_ICON} PROPERTIES MACOSX_PACKAGE_LOCATION "Resources")
-        add_executable(${PROJECT_NAME} ${SKYEMU_SRC} ${APP_ICON})
+        # sokol's entry point is main_ios(), src/apple_launcher.c has main()
+        add_executable(${PROJECT_NAME} ${SKYEMU_SRC} src/apple_launcher.c ${APP_ICON})
         set_property(TARGET ${PROJECT_NAME} PROPERTY XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "SkyEmu")
         set_property(TARGET ${PROJECT_NAME} PROPERTY MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/src/resources/ios-info.plist.in")
         set_target_properties(${PROJECT_NAME} PROPERTIES XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2")
+      endif()
+    elseif(MACOS)
+      if(BUILD_MACOS_STATIC_LIB)
+        add_library(${PROJECT_NAME} STATIC ${SKYEMU_SRC})
+      else()
+            set(MACOSX_BUNDLE_GUI_IDENTIFIER "SkyEmu")
+            set(MACOSX_BUNDLE_SHORT_VERSION_STRING ${GIT_COMMIT_HASH})
+            set(MACOSX_BUNDLE_LONG_VERSION_STRING ${GIT_COMMIT_HASH})
+            set(MACOSX_BUNDLE_BUNDLE_VERSION ${GIT_COMMIT_HASH})
+            set(CMAKE_OSX_DEPLOYMENT_TARGET "10.13" CACHE STRING "Minimum OS X deployment version" FORCE)
+      
+            set(MACOSX_BUNDLE_ICON_FILE AppIcon.icns)
+            set(APP_ICON src/resources/icons/AppIcon.icns)
+            set_source_files_properties(${APP_ICON} PROPERTIES MACOSX_PACKAGE_LOCATION "Resources")
+            # sokol's entry point is main_macos(), src/apple_launcher.c has main()
+            add_executable(${PROJECT_NAME} ${SKYEMU_SRC} src/apple_launcher.c ${APP_ICON})
+            set_property(TARGET ${PROJECT_NAME} PROPERTY XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "SkyEmu")
+            set_property(TARGET ${PROJECT_NAME} PROPERTY MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/src/resources/ios-info.plist.in")
+            # Mac Catalyst support
+            set_target_properties(${PROJECT_NAME} PROPERTIES
+              XCODE_ATTRIBUTE_SUPPORTED_PLATFORMS "macosx iphonesimulator maccatalyst"
+              XCODE_ATTRIBUTE_MACOSX_DEPLOYMENT_TARGET "10.15"
+              XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2"
+            )
       endif()
     elseif(ANDROID)
       add_library(${PROJECT_NAME} SHARED ${SKYEMU_SRC})
@@ -592,6 +605,14 @@ if(NOT RETRO_CORE_ONLY)
   endif()
 
   target_link_libraries(${PROJECT_NAME} ${LINK_LIBS})
+  if(TARGET SkyEmuLauncher)
+      # The DLL links its libraries itself, the launcher only needs its import library
+      set_property(TARGET ${PROJECT_NAME} PROPERTY INTERFACE_LINK_LIBRARIES "")
+  endif()
+  if (SE_PLATFORM_LINUX OR SE_PLATFORM_FREEBSD)
+      # src/se_design.c sets the GTK theme variant of the X11 window
+      target_include_directories(${PROJECT_NAME} PRIVATE "${X11_INCLUDE_DIR}")
+  endif()
   if(MSVC)
       # For the Windows DLL build, use dynamic CRT (/MD) for .NET compatibility.
       # For other MSVC builds, use static CRT (/MT).
@@ -600,6 +621,10 @@ if(NOT RETRO_CORE_ONLY)
           set_property(TARGET ${PROJECT_NAME} PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
           # Also switch dependency static libs to /MD so all objects use the same CRT
           target_compile_options(${PROJECT_NAME} PRIVATE /MD)
+          if(TARGET SkyEmuLauncher)
+              set_property(TARGET SkyEmuLauncher PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
+              target_compile_options(SkyEmuLauncher PRIVATE /MD)
+          endif()
           set_property(TARGET sokol PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
           target_compile_options(sokol PRIVATE /MD)
           set_property(TARGET cimgui PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")

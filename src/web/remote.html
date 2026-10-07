@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#141218">
+<title>SkyEmu Remote Play</title>
+<style>
+  :root{
+    --bg:#141218; --surface:#211f26; --surface-hi:#2b2930; --on:#e6e0e9; --on-dim:#cac4d0;
+    --accent:#d0bcff; --on-accent:#381e72; --error:#f2b8b5; --rec:#ff3b30;
+    color-scheme: dark;
+  }
+  @media (prefers-color-scheme: light){
+    :root{ --bg:#fef7ff; --surface:#f3edf7; --surface-hi:#e6e0e9; --on:#1d1b20; --on-dim:#49454f;
+           --accent:#6750a4; --on-accent:#ffffff; --error:#b3261e; color-scheme: light; }
+  }
+  *{ box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body{ margin:0; height:100%; background:var(--bg); color:var(--on);
+    font:15px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,Cantarell,sans-serif; overflow:hidden;
+    user-select:none; -webkit-user-select:none; touch-action:none; }
+  #app{ display:grid; height:100%; width:100%; grid-template-rows:auto minmax(0,1fr) auto; grid-template-columns:minmax(0,1fr);
+    padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+  header{ display:flex; flex-wrap:wrap; align-items:center; gap:8px; padding:8px 12px; }
+  header h1{ font-size:16px; font-weight:600; margin:0; flex:1 1 180px; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  header small{ color:var(--on-dim); font-weight:400; margin-left:6px; }
+  button.chip{ border:0; border-radius:999px; padding:8px 14px; background:var(--surface-hi); color:var(--on);
+    font:inherit; font-weight:500; cursor:pointer; }
+  button.chip[aria-pressed="true"]{ background:var(--accent); color:var(--on-accent); }
+  #stage{ position:relative; display:flex; align-items:center; justify-content:center; min-height:0; min-width:0; padding:0 8px; }
+  /* Fills the stage, the image keeps its shape inside it */
+  #screen{ width:100%; height:100%; object-fit:contain; image-rendering:pixelated; image-rendering:crisp-edges; }
+  #notice{ position:absolute; inset:auto 12px 12px 12px; text-align:center; color:var(--on-dim); font-size:13px; }
+  #notice.error{ color:var(--error); }
+  #pad{ display:grid; grid-template-columns:1fr auto 1fr; align-items:center; gap:8px; padding:8px 12px 16px; }
+  #pad[hidden]{ display:none; }
+  .shoulders{ grid-column:1/-1; display:flex; justify-content:space-between; }
+  .btn{ display:flex; align-items:center; justify-content:center; border-radius:999px; background:var(--surface-hi);
+    color:var(--on); font-weight:600; touch-action:none; }
+  .btn.on{ background:var(--accent); color:var(--on-accent); }
+  .shoulder{ width:min(88px,22vw); height:40px; }
+  /* The clusters shrink with narrow screens, buttons are placed in percent of them */
+  #dpad, #face{ position:relative; width:min(150px,34vw); aspect-ratio:1; }
+  #dpad{ justify-self:start; } #face{ justify-self:end; }
+  #dpad .btn{ position:absolute; width:33.4%; height:33.4%; border-radius:12px; font-size:18px; }
+  #dpad [data-key=Up]{ left:33.3%; top:0; } #dpad [data-key=Down]{ left:33.3%; bottom:0; }
+  #dpad [data-key=Left]{ left:0; top:33.3%; } #dpad [data-key=Right]{ right:0; top:33.3%; }
+  #face .btn{ position:absolute; width:38%; height:38%; font-size:18px; }
+  #face [data-key=A]{ right:0; top:31%; } #face [data-key=B]{ left:31%; bottom:0; }
+  #face [data-key=X]{ left:31%; top:0; } #face [data-key=Y]{ left:0; top:31%; }
+  #face.two .btn{ width:42%; height:42%; }
+  #face.two [data-key=A]{ right:2%; top:16%; } #face.two [data-key=B]{ left:12%; bottom:14%; }
+  #face.two [data-key=X], #face.two [data-key=Y]{ display:none; }
+  #middle{ display:flex; flex-direction:column; gap:10px; align-items:center; }
+  #middle .btn{ width:min(84px,18vw); height:32px; font-size:12px; letter-spacing:.06em; }
+  #help{ color:var(--on-dim); font-size:12px; text-align:center; padding:0 12px 10px; }
+  @media (orientation:landscape) and (max-height:600px){
+    #app{ grid-template-rows:auto 1fr; grid-template-columns:1fr; }
+    #pad{ position:fixed; inset:auto 0 0 0; pointer-events:none; background:none; }
+    #pad .btn{ pointer-events:auto; opacity:.82; }
+    #help{ display:none; }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>SkyEmu Remote Play <small id="game"></small></h1>
+    <button class="chip" id="sound" aria-pressed="false" title="Play the game's sound on this device">Sound</button>
+    <button class="chip" id="controls" aria-pressed="false" title="Show the on-screen controller">Controller</button>
+    <button class="chip" id="full" title="Full screen">Full screen</button>
+  </header>
+  <div id="stage">
+    <img id="screen" alt="Game screen" src="/stream.mjpg">
+    <div id="notice"></div>
+  </div>
+  <div>
+    <div id="pad" hidden>
+      <div class="shoulders"><div class="btn shoulder" data-key="L">L</div><div class="btn shoulder" data-key="R">R</div></div>
+      <div id="dpad">
+        <div class="btn" data-key="Up">&#9650;</div><div class="btn" data-key="Left">&#9664;</div>
+        <div class="btn" data-key="Right">&#9654;</div><div class="btn" data-key="Down">&#9660;</div>
+      </div>
+      <div id="middle"><div class="btn" data-key="Select">SELECT</div><div class="btn" data-key="Start">START</div></div>
+      <div id="face" class="two">
+        <div class="btn" data-key="X">X</div><div class="btn" data-key="Y">Y</div>
+        <div class="btn" data-key="A">A</div><div class="btn" data-key="B">B</div>
+      </div>
+    </div>
+    <div id="help">Keyboard: arrows, X = A, Z = B, S = X, A = Y, Q = L, W = R, Enter = Start, Shift = Select. Game controllers work too.</div>
+  </div>
+</div>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const notice = (text, error) => { $("notice").textContent = text || ""; $("notice").className = error ? "error" : ""; };
+
+// Inputs are sent as /input?<name>=1|0. SkyEmu keeps a value until it is changed, so requests are
+// sent one after the other (never reordered) and everything is released when the page is hidden.
+const KEYS = ["A","B","X","Y","Up","Down","Left","Right","L","R","Start","Select"];
+const sources = { touch:{}, keyboard:{}, gamepad:{} };
+const sent = {};
+let pending = {}, inflight = false, controlsOff = false;
+function pressed(key){ return !!(sources.touch[key] || sources.keyboard[key] || sources.gamepad[key]); }
+function update(){
+  for(const key of KEYS){
+    const value = pressed(key) ? 1 : 0;
+    if(sent[key] !== value){ pending[key] = value; sent[key] = value; }
+    document.querySelectorAll(`[data-key="${key}"]`).forEach(el => el.classList.toggle("on", !!value));
+  }
+  flush();
+}
+function flush(){
+  if(inflight || !Object.keys(pending).length) return;
+  const query = Object.entries(pending).map(([k,v]) => `${encodeURIComponent(k)}=${v}`).join("&");
+  pending = {};
+  inflight = true;
+  fetch(`/input?${query}`, { cache:"no-store", keepalive:true })
+    .then(r => r.text()).then(text => {
+      const off = text.startsWith("Error");
+      if(off !== controlsOff){ controlsOff = off; notice(off ? "Controls are off while the game is played in RetroAchievements Hardcore Mode." : ""); }
+    })
+    .catch(() => notice("Lost the connection to SkyEmu", true))
+    .finally(() => { inflight = false; flush(); });
+}
+function releaseAll(){
+  for(const s of Object.values(sources)) for(const k in s) s[k] = false;
+  update();
+}
+addEventListener("blur", releaseAll);
+document.addEventListener("visibilitychange", () => { if(document.hidden) releaseAll(); });
+addEventListener("pagehide", releaseAll);
+
+// Keyboard
+const KEYMAP = { ArrowUp:"Up", ArrowDown:"Down", ArrowLeft:"Left", ArrowRight:"Right", KeyX:"A", KeyZ:"B", KeyS:"X",
+                 KeyA:"Y", KeyQ:"L", KeyW:"R", Enter:"Start", ShiftLeft:"Select", ShiftRight:"Select", Backspace:"Select" };
+addEventListener("keydown", e => { const k = KEYMAP[e.code]; if(k){ sources.keyboard[k] = true; update(); e.preventDefault(); } });
+addEventListener("keyup", e => { const k = KEYMAP[e.code]; if(k){ sources.keyboard[k] = false; update(); e.preventDefault(); } });
+
+// Touch controller. Every pointer holds the button under it, so a thumb can slide across the d-pad.
+const pointers = new Map();
+function keysAt(x, y){
+  const keys = new Set();
+  const dpad = $("dpad").getBoundingClientRect();
+  if(x >= dpad.left && x <= dpad.right && y >= dpad.top && y <= dpad.bottom){
+    const dx = x - (dpad.left + dpad.width/2), dy = y - (dpad.top + dpad.height/2);
+    const dead = dpad.width * 0.12;
+    if(dx < -dead) keys.add("Left"); if(dx > dead) keys.add("Right");
+    if(dy < -dead) keys.add("Up"); if(dy > dead) keys.add("Down");
+    return keys;
+  }
+  const el = document.elementFromPoint(x, y);
+  const key = el && el.closest("[data-key]") && el.closest("[data-key]").dataset.key;
+  if(key) keys.add(key);
+  return keys;
+}
+function touchUpdate(){
+  const held = {};
+  for(const keys of pointers.values()) for(const k of keys) held[k] = true;
+  sources.touch = held;
+  update();
+}
+const pad = $("pad");
+pad.addEventListener("pointerdown", e => { pad.setPointerCapture(e.pointerId); pointers.set(e.pointerId, keysAt(e.clientX, e.clientY)); touchUpdate(); e.preventDefault(); });
+pad.addEventListener("pointermove", e => { if(pointers.has(e.pointerId)){ pointers.set(e.pointerId, keysAt(e.clientX, e.clientY)); touchUpdate(); } });
+for(const type of ["pointerup","pointercancel","lostpointercapture"]){
+  pad.addEventListener(type, e => { pointers.delete(e.pointerId); touchUpdate(); });
+}
+function showPad(show){
+  pad.hidden = !show;
+  $("controls").setAttribute("aria-pressed", show ? "true" : "false");
+}
+$("controls").onclick = () => showPad(pad.hidden);
+if(matchMedia("(pointer:coarse)").matches) showPad(true);
+
+// Game controllers, mapped by position like the GBA: right button A, bottom button B
+const PAD_BUTTONS = { 0:"B", 1:"A", 2:"Y", 3:"X", 4:"L", 5:"R", 6:"L", 7:"R", 8:"Select", 9:"Start", 12:"Up", 13:"Down", 14:"Left", 15:"Right" };
+function pollGamepads(){
+  const held = {};
+  for(const gp of navigator.getGamepads ? navigator.getGamepads() : []){
+    if(!gp) continue;
+    gp.buttons.forEach((b, i) => { if(b.pressed && PAD_BUTTONS[i]) held[PAD_BUTTONS[i]] = true; });
+    if(gp.axes.length >= 2){
+      if(gp.axes[0] < -0.5) held.Left = true; if(gp.axes[0] > 0.5) held.Right = true;
+      if(gp.axes[1] < -0.5) held.Up = true; if(gp.axes[1] > 0.5) held.Down = true;
+    }
+  }
+  const changed = KEYS.some(k => !!held[k] !== !!sources.gamepad[k]);
+  sources.gamepad = held;
+  if(changed) update();
+  requestAnimationFrame(pollGamepads);
+}
+requestAnimationFrame(pollGamepads);
+
+// Sound: the endless WAV stream is played with Web Audio, a little ahead of time
+let audio = null;
+async function startSound(){
+  const ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate:48000, latencyHint:"interactive" });
+  const abort = new AbortController();
+  audio = { ctx, abort };
+  $("sound").setAttribute("aria-pressed", "true");
+  try{
+    const response = await fetch("/stream.wav", { cache:"no-store", signal:abort.signal });
+    if(!response.ok) throw new Error(await response.text());
+    const reader = response.body.getReader();
+    let header = 44, carry = new Uint8Array(0), next = 0;
+    for(;;){
+      const { value, done } = await reader.read();
+      if(done) break;
+      let bytes = value;
+      if(header){ const skip = Math.min(header, bytes.length); header -= skip; bytes = bytes.subarray(skip); }
+      if(carry.length){ const joined = new Uint8Array(carry.length + bytes.length); joined.set(carry); joined.set(bytes, carry.length); bytes = joined; }
+      const frames = Math.floor(bytes.length / 4);
+      carry = bytes.slice(frames * 4);
+      if(!frames) continue;
+      const view = new DataView(bytes.buffer, bytes.byteOffset, frames * 4);
+      const buffer = ctx.createBuffer(2, frames, 48000);
+      const left = buffer.getChannelData(0), right = buffer.getChannelData(1);
+      for(let i = 0; i < frames; i++){ left[i] = view.getInt16(i*4, true) / 32768; right[i] = view.getInt16(i*4+2, true) / 32768; }
+      const now = ctx.currentTime;
+      if(next < now + 0.02 || next > now + 0.4) next = now + 0.08;   // Start over when late or too far ahead
+      const source = ctx.createBufferSource();
+      source.buffer = buffer;
+      source.connect(ctx.destination);
+      source.start(next);
+      next += buffer.duration;
+    }
+  }catch(e){
+    if(e.name !== "AbortError") notice("The sound stream stopped: " + e.message, true);
+  }
+}
+function stopSound(){
+  if(!audio) return;
+  audio.abort.abort();
+  audio.ctx.close();
+  audio = null;
+  $("sound").setAttribute("aria-pressed", "false");
+}
+$("sound").onclick = () => audio ? stopSound() : startSound();
+
+$("full").onclick = () => document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen().catch(() => {});
+$("screen").onerror = () => { notice("Can't show the game. Is a game loaded and the HTTP server on?", true); setTimeout(() => { $("screen").src = "/stream.mjpg?" + Date.now(); }, 2000); };
+$("screen").onload = () => { if($("notice").className === "error") notice(""); };
+
+// Game name and console (the DS has X and Y)
+async function refresh(){
+  try{
+    const state = await (await fetch("/input_state", { cache:"no-store" })).json();
+    $("game").textContent = state.game || "";
+    document.title = state.game ? `${state.game} · SkyEmu Remote Play` : "SkyEmu Remote Play";
+    $("face").classList.toggle("two", state.system !== "NDS");
+    document.querySelector(".shoulders").style.visibility = state.system === "GB" ? "hidden" : "visible";
+  }catch(e){}
+}
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>

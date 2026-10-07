@@ -14,6 +14,7 @@
 
 #ifdef ENABLE_HTTP_CONTROL_SERVER
 #include "http_control_server.h"
+#include "se_web_pages.h"
 #endif 
 
 #ifdef ENABLE_RETRO_ACHIEVEMENTS
@@ -37,6 +38,17 @@
 #include "cloud.h"
 #include "mutex.h"
 #include "res.h"
+#include "se_design.h"
+#include "se_patch.h"
+#include "se_cheat_finder.h"
+#include "se_record.h"
+#include "se_screen_layout.h"
+#include <sys/stat.h>
+#ifdef _WIN32
+#include <sys/utime.h>
+#else
+#include <utime.h>
+#endif
 #include "sokol_app.h"
 #include "sokol_audio.h"
 #include "sokol_gfx.h"
@@ -62,10 +74,7 @@
 #ifdef SE_PLATFORM_ANDROID
   #include <android/log.h>
 #endif
-#ifdef SE_PLATFORM_IOS
-#include "ios_support.h"
-#endif
-#ifdef TARGET_OS_MACCATALYST
+#if defined(SE_PLATFORM_IOS) || defined(SE_PLATFORM_MACOS) || defined(TARGET_OS_MACCATALYST)
 #include "ios_support.h"
 #endif
 #ifdef USE_SDL
@@ -159,7 +168,11 @@ const static char* se_keybind_names[SE_NUM_KEYBINDS]={
   "Turbo R",
   "Solar Sensor+",
   "Solar Sensor-",
-  "Toggle Full Screen"
+  "Toggle Full Screen",
+  "Screenshot",
+  "Record Video",
+  "Save Replay",
+  "Swap Screens (NDS)"
 };
 
 #define SE_ANALOG_UP_DOWN    0
@@ -177,6 +190,9 @@ const static char* se_analog_bind_names[]={
 //Reserve space for extra keybinds/analog binds so that adding them in new versions don't break
 //a users settings.
 #define SE_NUM_BINDS_ALLOC 64
+// The last slot of the saved bindings holds their format, to give new hotkeys their defaults
+#define SE_BIND_FORMAT_SLOT (SE_NUM_BINDS_ALLOC-1)
+#define SE_BIND_FORMAT 2
 
 #define GUI_MAX_IMAGES_PER_FRAME 16
 #define SE_NUM_RECENT_PATHS 32
@@ -206,6 +222,25 @@ typedef struct{
 typedef struct{
   char path[SB_FILE_PATH_SIZE];
 }se_game_info_t;
+// Elements of the on-screen controller layout. Each one groups the buttons that the layout
+// editor moves and scales together.
+#define SE_TOUCH_DPAD          0
+#define SE_TOUCH_FACE          1 // A and B (plus X and Y on the DS)
+#define SE_TOUCH_L             2
+#define SE_TOUCH_R             3
+#define SE_TOUCH_START         4
+#define SE_TOUCH_SELECT        5
+#define SE_TOUCH_TURBO         6
+#define SE_TOUCH_HOLD          7
+#define SE_TOUCH_REWIND        8
+#define SE_TOUCH_FAST_FORWARD  9
+#define SE_TOUCH_NUM_ELEMENTS 10
+
+// Values of persistent_settings_t.controller_face_layout (default game controller bindings)
+#define SE_FACE_LAYOUT_LABELS   0 // The controller's A button is A (Xbox style)
+#define SE_FACE_LAYOUT_POSITION 1 // A is the right face button and B the bottom one, like on a GBA or DS
+#define SE_FACE_LAYOUT_COUNT    2
+
 typedef struct{
   // This structure is directly saved out for the user settings. 
   // Be very careful to keep alignment and ordering the same otherwise you will break the settings. 
@@ -217,7 +252,7 @@ typedef struct{
   float ghosting;
   float color_correction;
   uint32_t integer_scaling; 
-  uint32_t screen_shader; //0: pixels, 1: lcd, 2: lcd+subpixels, 3: upscale
+  uint32_t screen_shader; //0: pixelate, 1: bilinear, 2: lcd, 3: lcd+subpixels, 4: xBRZ, 5: CRT, 6: scanlines
   uint32_t screen_rotation; //0: No rotation, 1: Rotate Left, 2: Rotate Right, 3: Upside Down
   uint32_t stretch_to_fit;
   uint32_t auto_hide_touch_controls;
@@ -244,7 +279,33 @@ typedef struct{
   uint32_t nds_layout; 
   uint32_t touch_screen_show_button_labels;
   uint32_t show_screen_bezel;
-  uint32_t padding[218];
+  uint32_t design_system;     // SE_DESIGN_* (0 = native design of the platform)
+  uint32_t color_scheme;      // SE_COLOR_SCHEME_* (0 = follow the system)
+  uint32_t use_custom_accent; // 0 = system accent (Material You, Windows, GNOME), 1 = custom_accent
+  uint32_t custom_accent;     // 0xRRGGBB
+  uint32_t use_bundled_font;  // 0 = use the platform UI font when it is available, 1 = bundled font
+  uint32_t contrast;          // SE_CONTRAST_* (0 = follow the system)
+  uint32_t touch_controller_off;      // 1 = never show the on-screen controller
+  uint32_t touch_controls_show_speed; // Show Rewind and Fast Forward on the on-screen controller
+  uint32_t controller_face_layout;    // SE_FACE_LAYOUT_* used for the default game controller bindings
+  // Custom on-screen controller layout, [0] landscape and [1] portrait. Each element is moved by
+  // {x, y} (fractions of the screen area) and scaled around its center (0 means 1).
+  float touch_layout[2][SE_TOUCH_NUM_ELEMENTS][3];
+  uint32_t soft_patching_off;         // 1 = load ROMs without their IPS / UPS / BPS patches
+  uint32_t ra_unofficial;             // 1 = load unofficial RetroAchievements too
+  uint32_t ra_spectator;              // 1 = RetroAchievements unlocks are shown but not sent
+  uint32_t record_scale;              // Video size 1-4 times the console screen, 0 = 2
+  uint32_t record_format;             // 0 high quality MJPEG, 1 standard MJPEG, 2 uncompressed
+  uint32_t record_no_audio;           // 1 = videos without sound
+  uint32_t replay_seconds;            // Replay buffer: 0 off, 1 15 s, 2 30 s, 3 1 min, 4 2 min
+  uint32_t screenshot_scale;          // 1-8, 0 = 1
+  uint32_t stream_scale;              // MJPEG stream size 1-3, 0 = 2
+  uint32_t stream_fps;                // 0 = 60 fps, 1 = 30 fps
+  uint32_t nds_screen_gap;            // Space between the DS screens in DS pixels, 0-96
+  uint32_t nds_small_screen;          // Size of the small DS screen in percent, 25-100, 0 = 50
+  uint32_t nds_swap_screens;          // 1 = the bottom screen goes where the top screen would
+  uint32_t menu_collapsed[24];        // Hashes of the collapsed menu sections, 0 = unused
+  uint32_t padding[112];
 }persistent_settings_t; 
 _Static_assert(sizeof(persistent_settings_t)==1024, "persistent_settings_t must be exactly 1024 bytes");
 #define SE_STATS_GRAPH_DATA 256
@@ -292,7 +353,9 @@ typedef struct{
   char cheat_codes[SB_FILE_PATH_SIZE];
   char theme[SB_FILE_PATH_SIZE];
   char custom_font[SB_FILE_PATH_SIZE];
-  char padding[3][SB_FILE_PATH_SIZE];
+  char patches[SB_FILE_PATH_SIZE];
+  char recordings[SB_FILE_PATH_SIZE]; // Videos and screenshots, empty = next to the save file
+  char padding[1][SB_FILE_PATH_SIZE];
 }se_search_paths_t;
 
 _Static_assert(sizeof(se_search_paths_t)==SB_FILE_PATH_SIZE*8, "se_search_paths_t must contain 8 paths");
@@ -414,15 +477,6 @@ typedef struct{
 #define SE_THEME_DREW_SCREEN     0x2  
 #define SE_THEME_DREW_CONTROLLER 0x4
 
-#define SE_NDS_LAYOUT_AUTO 0 
-#define SE_NDS_LAYOUT_VERTICAL 1
-#define SE_NDS_LAYOUT_HORIZONTAL 2
-#define SE_NDS_LAYOUT_HYBRID_LARGE_TOP 3
-#define SE_NDS_LAYOUT_HYBRID_LARGE_BOTTOM 4
-#define SE_NDS_LAYOUT_VERTICAL_LARGE_TOP 5
-#define SE_NDS_LAYOUT_VERTICAL_LARGE_BOTTOM 6
-#define SE_NDS_LAYOUT_HORIZONTAL_LARGE_TOP 7
-#define SE_NDS_LAYOUT_HORIZONTAL_LARGE_BOTTOM 8
 
 typedef struct{
   uint16_t start_pixel;
@@ -473,6 +527,7 @@ typedef struct {
     bool ra_encore_mode;
     bool ra_logged_in;
     bool ra_needs_reload;
+    bool ra_apply_options; // RetroAchievements options changed by the API, applied by se_update_frame()
     se_keybind_state_t key;
     se_controller_state_t controller;
     se_game_info_t recently_loaded_games[SE_NUM_RECENT_PATHS];
@@ -521,6 +576,47 @@ typedef struct {
     bool single_panel_mode;    
     //Points to the most recently opened panel. When single panel mode is enabled all other panels should be closed. 
     bool * last_opened_panel;
+    // Platform design system (Material 3, Fluent, Adwaita). Inactive when the classic image skin is used.
+    bool design_active;
+    se_design_tokens_t design;
+    se_system_appearance_t system_appearance;
+    double last_appearance_query;
+    // Appearance pushed by a host app (UWP/WinUI, Android library users) through se_set_system_appearance()
+    bool host_appearance_set;
+    int host_dark;
+    uint32_t host_accent;
+    int host_high_contrast; // -1 not reported, see se_set_system_high_contrast()
+    // Area the on-screen controller is laid out in, set before it is drawn
+    struct{float x,y,w,h; bool portrait, editor, record;} touch_canvas;
+    float touch_element_bounds[SE_TOUCH_NUM_ELEMENTS][4]; // Last drawn element rectangles (min x, min y, max x, max y)
+    float touch_element_anchor[SE_TOUCH_NUM_ELEMENTS][2]; // Element centers before the custom layout is applied
+    // On-screen controller layout editor
+    bool touch_editor_open;
+    int touch_editor_selected;     // SE_TOUCH_* or -1
+    bool touch_editor_dragging;
+    float touch_editor_drag[2];    // Drag in progress, in fractions of the screen area
+    bool touch_editor_reopen_menu;
+    bool touch_editor_portrait;    // Orientation being edited
+    float touch_editor_canvas[4];  // Screen area being edited (x, y, w, h)
+    int touch_editor_prev_run_mode;
+    // Soft patching of the loaded ROM
+    struct{
+      char rom_file[SB_FILE_PATH_SIZE]; // ROM (or zip) file that was loaded
+      char path[SB_FILE_PATH_SIZE];     // Patch found for it, empty when there is none
+      char status[SB_FILE_PATH_SIZE+128];
+      char add_error[SB_FILE_PATH_SIZE+128]; // Why the last patch added with se_load_patch() was refused
+      bool applied, failed;
+      size_t original_size, patched_size;
+    }patch;
+    int loaded_skin_key;  // Skin variant loaded by se_reload_theme() (-1 = layout only skin of the design systems)
+    int font_design_key;  // Design/font combination the font atlas was built for
+    char system_font_path[SB_FILE_PATH_SIZE]; // Platform UI font in use, empty when the bundled font is used
+    int section_text_vtx_start; // First vertex of the text drawn by the last se_section() call
+    bool menu_sections;         // se_section() starts a collapsible, searchable section of the menu
+    char menu_search[64];       // Text of the menu's search field
+    int menu_sections_shown;    // Sections that matched the search in the last frame
+    uint32_t menu_section_ids[32];
+    int menu_section_count;
 } gui_state_t;
 
 #define SE_REWIND_BUFFER_SIZE (1024*1024)
@@ -529,6 +625,8 @@ typedef struct {
 
 #define SE_NUM_SAVE_STATES 4
 #define SE_MAX_SCREENSHOT_SIZE (NDS_LCD_H*NDS_LCD_W*2*4)
+
+#define SE_SCREEN_SHADER_COUNT 7 // See display_mode in lcd_shaders.shd
 
 #define SE_THEME_DARK 0
 #define SE_THEME_LIGHT 1
@@ -612,16 +710,24 @@ void se_png_write_mem(void *context, void *data, int size){
   cont->size+=size; 
 }
 static void se_sync_cloud_save_states();
-gui_state_t gui_state={ .update_font_atlas=true }; 
+gui_state_t gui_state={ .update_font_atlas=true, .host_high_contrast=-1 };
 
 void se_draw_image(uint8_t *data, int im_width, int im_height,int x, int y, int render_width, int render_height, bool has_alpha);
 void se_draw_lcd(uint8_t *data, int im_width, int im_height,int x, int y, int render_width, int render_height, float rotation,bool is_touch);
 void se_load_rom_overlay(bool visible);
 void se_draw_onscreen_controller(sb_emu_state_t*state, int mode, float win_x, float win_y, float win_w, float win_h, bool preview, bool center);
 static float se_compute_touchscreen_controls_min_dim(float w, float h, bool *portrait);
+static void se_touch_layout_editor_canvas(float x, float y, float w, float h, bool portrait);
+static bool se_touch_controller_shown();
+#ifdef USE_SDL
+static const char* se_sdl_key_bind_name(SDL_GameController* gc, int key);
+static const char* se_sdl_axis_bind_name(SDL_GameController* gc, int axis);
+#endif
 void se_reset_save_states();
 void se_set_new_controller(se_controller_state_t* cont, int index);
 bool se_run_ar_cheat(const uint32_t* buffer, uint32_t size);
+static void se_rec_on_frame(void);
+static void se_rec_stop_all(void);
 void se_emscripten_flush_fs();
 static uint32_t se_save_best_effort_state(se_core_state_t* state);
 static bool se_load_best_effort_state(se_core_state_t* state,uint8_t *save_state_data, uint32_t size, uint32_t bess_offset);
@@ -715,8 +821,230 @@ const char* se_localize_and_cache(const char* input_str){
   se_cache_glyphs(localized_string);
   return localized_string;
 }
+/*** Platform design systems (Material 3, Fluent, Adwaita), see se_design.h ***/
+static ImVec4 se_design_vec4(se_color_t c){return (ImVec4){c.r,c.g,c.b,c.a};}
+// Draw list color of a token, honors the global alpha used for disabled widgets
+static ImU32 se_design_u32(se_color_t c){return igGetColorU32Vec4(se_design_vec4(c));}
+static se_color_t se_design_over(se_color_t base, se_color_t over, float alpha){
+  over.a*=alpha;
+  return se_color_blend(base,over);
+}
+static void se_design_push_color(ImGuiCol idx, se_color_t c){igPushStyleColorVec4(idx,se_design_vec4(c));}
+static bool se_design_colors_equal(ImVec4 a, ImVec4 b){return a.x==b.x&&a.y==b.y&&a.z==b.z&&a.w==b.w;}
+// Regions of the image skin that the design systems replace with native looking widgets.
+// The bezel regions stay in use because they drive the screen and controller layout.
+static bool se_theme_region_is_chrome(int region){
+  return region>=SE_REGION_KEY_L&&region<=SE_REGION_KEY_RECT_BLANK_PRESSED;
+}
+static bool se_theme_region_active(int region){
+  if(gui_state.design_active&&se_theme_region_is_chrome(region))return false;
+  return gui_state.theme.regions[region].active;
+}
+// Dear ImGui has a single font weight, a second pass shifted by one point emulates bold
+// (text positions are floored to whole points, smaller offsets would be lost)
+static void se_design_draw_text(ImDrawList* dl, ImVec2 pos, ImU32 col, const char* text, bool bold, float wrap_width){
+  if(bold)ImDrawList_AddTextFontPtr(dl,igGetFont(),igGetFontSize(),(ImVec2){pos.x+1.0f,pos.y},col,text,NULL,wrap_width,NULL);
+  ImDrawList_AddTextFontPtr(dl,igGetFont(),igGetFontSize(),pos,col,text,NULL,wrap_width,NULL);
+}
+static void se_design_draw_text_centered(ImDrawList* dl, ImVec2 min, ImVec2 max, ImU32 col, const char* text, bool bold){
+  ImVec2 size;
+  igCalcTextSize(&size,text,NULL,false,-1);
+  se_design_draw_text(dl,(ImVec2){floorf((min.x+max.x-size.x)*0.5f),floorf((min.y+max.y-size.y)*0.5f)},col,text,bold,0);
+}
+// Push button. Call sites mark a toggled on button by pushing ButtonActive as the Button
+// color, the design systems render that as their selected state.
+static bool se_design_button(const char* label, ImVec2 size){
+  const se_design_tokens_t* t = &gui_state.design;
+  ImGuiStyle* style = igGetStyle();
+  int colors = 0;
+  if(se_design_colors_equal(style->Colors[ImGuiCol_Button],style->Colors[ImGuiCol_ButtonActive])){
+    se_design_push_color(ImGuiCol_Button,t->selected);
+    se_design_push_color(ImGuiCol_ButtonHovered,se_design_over(t->selected,t->on_selected,0.08f));
+    se_design_push_color(ImGuiCol_ButtonActive,se_design_over(t->selected,t->on_selected,0.12f));
+    se_design_push_color(ImGuiCol_Text,t->on_selected);
+    colors = 4;
+  }
+  igPushStyleVarFloat(ImGuiStyleVar_FrameRounding,t->button_rounding);
+  bool result = igButton(label,size);
+  igPopStyleVar(1);
+  igPopStyleColor(colors);
+  return result;
+}
+// Standard icon button that shows its toggled state with a tonal container
+static bool se_design_icon_toggle(const char* icon, ImVec2 size, bool selected){
+  const se_design_tokens_t* t = &gui_state.design;
+  se_color_t bg = selected? t->secondary_container : (se_color_t){0,0,0,0};
+  se_color_t fg = selected? t->on_secondary_container : t->on_surface_variant;
+  se_design_push_color(ImGuiCol_Button,bg);
+  se_design_push_color(ImGuiCol_ButtonHovered,se_design_over(bg,fg,0.08f));
+  se_design_push_color(ImGuiCol_ButtonActive,se_design_over(bg,fg,0.12f));
+  se_design_push_color(ImGuiCol_Text,fg);
+  igPushStyleVarFloat(ImGuiStyleVar_FrameRounding,t->button_rounding);
+  igPushStyleVarFloat(ImGuiStyleVar_FrameBorderSize,0);
+  bool result = igButton(icon,size);
+  igPopStyleVar(2);
+  igPopStyleColor(4);
+  return result;
+}
+// One segment of a button group: Material segmented button, Fluent and libadwaita linked toggles
+static bool se_design_segment(const char* label, ImVec2 size, bool selected, int index, int count, float spacing){
+  const se_design_tokens_t* t = &gui_state.design;
+  ImDrawList* dl = igGetWindowDrawList();
+  ImVec2 p;
+  igGetCursorScreenPos(&p);
+  igPushIDInt(index);
+  bool pressed = igInvisibleButton("##segment",size,ImGuiButtonFlags_None);
+  bool hovered = igIsItemHovered(ImGuiHoveredFlags_None);
+  bool held = igIsItemActive();
+  igPopID();
+  float inset = size.y>=22? 2.f : 0.f;
+  p.y+=inset;
+  ImVec2 max = {p.x+size.x,p.y+size.y-inset*2};
+  float r = fminf(t->button_rounding,(max.y-p.y)*0.5f);
+  ImDrawCornerFlags corners = (index==0? ImDrawCornerFlags_Left:0)|(index==count-1? ImDrawCornerFlags_Right:0);
+  bool outlined = t->design==SE_DESIGN_MATERIAL3;
+  if(selected)ImDrawList_AddRectFilled(dl,p,max,se_design_u32(outlined? t->secondary_container : t->selected),r,corners);
+  else if(!outlined)ImDrawList_AddRectFilled(dl,p,max,se_design_u32(t->control),r,corners);
+  if(held||hovered)ImDrawList_AddRectFilled(dl,p,max,se_design_u32(held? t->state_press : t->state_hover),r,corners);
+  se_color_t stroke = outlined? t->outline : t->outline_variant;
+  if(outlined||t->control_border>0){
+    if(index>0)ImDrawList_AddLine(dl,(ImVec2){p.x-spacing*0.5f,p.y},(ImVec2){p.x-spacing*0.5f,max.y},se_design_u32(stroke),1.0f);
+    if(index==count-1){
+      // Outline of the whole group, drawn last so fills do not cover it
+      float group_x = p.x-(size.x+spacing)*(count-1);
+      ImDrawList_AddRect(dl,(ImVec2){group_x+0.5f,p.y+0.5f},(ImVec2){max.x-0.5f,max.y-0.5f},se_design_u32(stroke),r,ImDrawCornerFlags_All,1.0f);
+    }
+  }
+  se_color_t fg = t->on_surface;
+  if(selected)fg = outlined? t->on_secondary_container : t->on_selected;
+  se_design_draw_text_centered(dl,p,max,se_design_u32(fg),label,false);
+  return pressed;
+}
+// Slider with a track, an active track and a thumb. The value is drawn after the track
+// when there is room for it, otherwise in a value indicator while dragging.
+static bool se_design_slider(const char* label, float* v, float v_min, float v_max, const char* format){
+  const se_design_tokens_t* t = &gui_state.design;
+  ImDrawList* dl = igGetWindowDrawList();
+  float w = igCalcItemWidth();
+  float h = igGetFrameHeight();
+  char value[128];
+  snprintf(value,sizeof(value),format,*v);
+  ImVec2 ts;
+  igCalcTextSize(&ts,value,NULL,false,-1);
+  ImVec2 p;
+  igGetCursorScreenPos(&p);
+  igPushIDStr(label);
+  igInvisibleButton("##slider",(ImVec2){w,h},ImGuiButtonFlags_None);
+  bool hovered = igIsItemHovered(ImGuiHoveredFlags_None);
+  bool active = igIsItemActive();
+  igPopID();
+  float r = fminf(t->slider_thumb_r,h*0.5f-1.f);
+  float gap = 8;
+  bool inline_value = w-ts.x-gap-r*2>=48;
+  float x0 = p.x+r, x1 = p.x+w-r-(inline_value? ts.x+gap : 0);
+  bool changed = false;
+  if(active&&x1>x0&&v_max!=v_min){
+    float f = (igGetIO()->MousePos.x-x0)/(x1-x0);
+    float new_v = v_min+(f<0? 0 : f>1? 1 : f)*(v_max-v_min);
+    if(new_v!=*v){*v = new_v; changed = true;}
+  }
+  float f = v_max!=v_min? (*v-v_min)/(v_max-v_min) : 0;
+  f = f<0? 0 : f>1? 1 : f;
+  float cx = x0+f*(x1-x0), cy = p.y+h*0.5f, th = t->slider_track_h*0.5f;
+  se_color_t rail = t->design==SE_DESIGN_MATERIAL3? t->secondary_container : t->design==SE_DESIGN_FLUENT? t->outline : t->outline_variant;
+  ImDrawList_AddRectFilled(dl,(ImVec2){x0-th,cy-th},(ImVec2){x1+th,cy+th},se_design_u32(rail),th,ImDrawCornerFlags_All);
+  ImDrawList_AddRectFilled(dl,(ImVec2){x0-th,cy-th},(ImVec2){cx,cy+th},se_design_u32(t->primary),th,ImDrawCornerFlags_All);
+  if(t->thumb_ring){
+    // Fluent: solid knob with an accent dot that grows on hover and shrinks while dragging
+    se_color_t knob = se_color_from_rgb(t->dark? 0x454545:0xFFFFFF,1);
+    ImDrawList_AddCircleFilled(dl,(ImVec2){cx,cy},r,se_design_u32(knob),32);
+    ImDrawList_AddCircle(dl,(ImVec2){cx,cy},r,se_design_u32(t->outline_variant),32,1.0f);
+    ImDrawList_AddCircleFilled(dl,(ImVec2){cx,cy},r*(active? 0.45f : hovered? 0.65f : 0.55f),se_design_u32(t->primary),32);
+  }else if(t->thumb_light){
+    // libadwaita: light knob with a soft shadow
+    ImDrawList_AddCircleFilled(dl,(ImVec2){cx,cy+1},r,se_design_u32((se_color_t){0,0,0,0.2f}),32);
+    ImDrawList_AddCircleFilled(dl,(ImVec2){cx,cy},r,se_design_u32(se_color_from_rgb(active? 0xF0F0F0:0xFFFFFF,1)),32);
+    ImDrawList_AddCircle(dl,(ImVec2){cx,cy},r,se_design_u32((se_color_t){0,0,0,0.12f}),32,1.0f);
+  }else{
+    // Material: filled handle with a state layer halo
+    if(hovered||active)ImDrawList_AddCircleFilled(dl,(ImVec2){cx,cy},r*1.7f,se_design_u32(se_design_over((se_color_t){0,0,0,0},t->primary,active? 0.12f:0.08f)),32);
+    ImDrawList_AddCircleFilled(dl,(ImVec2){cx,cy},r,se_design_u32(t->primary),32);
+  }
+  if(inline_value){
+    se_design_draw_text(dl,(ImVec2){p.x+w-ts.x,floorf(cy-ts.y*0.5f)},se_design_u32(t->on_surface_variant),value,false,0);
+  }else if(hovered||active){
+    ImDrawList* fg = igGetForegroundDrawListNil();
+    float pad = 6;
+    ImVec2 bmin = {floorf(cx-ts.x*0.5f-pad),p.y+h+4};
+    ImVec2 bmax = {bmin.x+ts.x+pad*2,bmin.y+ts.y+pad};
+    ImDrawList_AddRectFilled(fg,bmin,bmax,se_design_u32(se_design_over(t->surface_panel,t->on_surface,1.0f)),(bmax.y-bmin.y)*0.5f,ImDrawCornerFlags_All);
+    se_design_draw_text(fg,(ImVec2){bmin.x+pad,bmin.y+pad*0.5f},se_design_u32(t->surface_panel),value,false,0);
+  }
+  return changed;
+}
+static void se_design_section(const char* text){
+  const se_design_tokens_t* t = &gui_state.design;
+  ImDrawList* dl = igGetWindowDrawList();
+  ImGuiStyle* style = igGetStyle();
+  // Call sites may push a Text color to tint the title (e.g. mastered RetroAchievements games)
+  ImVec4 pushed = *igGetStyleColorVec4(ImGuiCol_Text);
+  se_color_t col = t->section_accent? t->accent_text : t->on_surface;
+  if(!se_design_colors_equal(pushed,se_design_vec4(t->on_surface)))col = (se_color_t){pushed.x,pushed.y,pushed.z,pushed.w};
+  ImVec2 p, avail, start;
+  igGetCursorScreenPos(&p);
+  igGetContentRegionAvail(&avail);
+  igGetCursorStartPos(&start);
+  bool first_item = igGetCursorPosY()<=start.y+1.0f;
+  if(!first_item){
+    if(t->section_divider){
+      float y = floorf(p.y+style->ItemSpacing.y*0.5f)+0.5f;
+      ImDrawList_AddLine(dl,(ImVec2){p.x,y},(ImVec2){p.x+avail.x,y},se_design_u32(t->outline_variant),1.0f);
+    }
+    igDummy((ImVec2){0,style->ItemSpacing.y});
+  }
+  igGetCursorScreenPos(&p);
+  ImVec2 ts;
+  igCalcTextSize(&ts,text,NULL,false,avail.x);
+  gui_state.section_text_vtx_start = dl->VtxBuffer.Size;
+  se_design_draw_text(dl,p,se_design_u32(col),text,t->section_bold,avail.x);
+  igDummy(ts);
+}
 bool se_checkbox(const char* label, bool * v){
-  return igCheckbox(se_localize_and_cache(label),v);
+  label = se_localize_and_cache(label);
+  if(!gui_state.design_active)return igCheckbox(label,v);
+  const se_design_tokens_t* t = &gui_state.design;
+  // Checkboxes are ~18px boxes in all three design systems, not full height frames
+  float pad_y = (18.f-igGetFontSize())*0.5f;
+  if(pad_y<1.f)pad_y = 1.f;
+  igPushStyleVarVec2(ImGuiStyleVar_FramePadding,(ImVec2){igGetStyle()->FramePadding.x,pad_y});
+  igPushStyleVarFloat(ImGuiStyleVar_FrameRounding,t->check_rounding);
+  if(*v){
+    igPushStyleVarFloat(ImGuiStyleVar_FrameBorderSize,0);
+    se_design_push_color(ImGuiCol_FrameBg,t->primary);
+    se_design_push_color(ImGuiCol_FrameBgHovered,se_design_over(t->primary,t->on_primary,0.08f));
+    se_design_push_color(ImGuiCol_FrameBgActive,se_design_over(t->primary,t->on_primary,0.12f));
+  }else{
+    igPushStyleVarFloat(ImGuiStyleVar_FrameBorderSize,t->check_border);
+    se_design_push_color(ImGuiCol_FrameBg,(se_color_t){0,0,0,0});
+    se_design_push_color(ImGuiCol_FrameBgHovered,t->state_hover);
+    se_design_push_color(ImGuiCol_FrameBgActive,t->state_press);
+  }
+  se_design_push_color(ImGuiCol_CheckMark,t->on_primary);
+  se_design_push_color(ImGuiCol_Border,t->design==SE_DESIGN_MATERIAL3? t->on_surface_variant : t->outline);
+  bool result = igCheckbox(label,v);
+  igPopStyleColor(5);
+  igPopStyleVar(3);
+  return result;
+}
+// Combo boxes draw their arrow with the Button colors, the design systems use one uniform field
+static void se_design_push_combo_style(){
+  if(!gui_state.design_active)return;
+  ImGuiStyle* style = igGetStyle();
+  igPushStyleColorVec4(ImGuiCol_Button,style->Colors[ImGuiCol_FrameBg]);
+  igPushStyleColorVec4(ImGuiCol_ButtonHovered,style->Colors[ImGuiCol_FrameBgHovered]);
+}
+static void se_design_pop_combo_style(){
+  if(gui_state.design_active)igPopStyleColor(2);
 }
 void se_text(const char* label,...){
   va_list args;
@@ -727,9 +1055,21 @@ void se_text(const char* label,...){
 static void se_text_disabled(const char* label,...){
   va_list args;
   va_start(args, label);
-  se_push_disabled();
+  // Secondary text. The design systems draw it with their secondary text color, not faded out.
+  if(gui_state.design_active)igPushStyleColorVec4(ImGuiCol_Text,igGetStyle()->Colors[ImGuiCol_TextDisabled]);
+  else se_push_disabled();
   igTextWrappedV(se_localize_and_cache(label),args);
-  se_pop_disabled();
+  if(gui_state.design_active)igPopStyleColor(1);
+  else se_pop_disabled();
+  va_end(args);
+}
+// Label of a settings row. In the design systems it is aligned with the taller framed widget that
+// follows it on the same line (classic rows keep their original layout).
+static void se_field_label(const char* label,...){
+  if(gui_state.design_active)igAlignTextToFramePadding();
+  va_list args;
+  va_start(args, label);
+  igTextWrappedV(se_localize_and_cache(label),args);
   va_end(args);
 }
 static bool se_combo_str(const char* label,int* current_item,const char* items_separated_by_zeros,int popup_max_height_in_items){
@@ -741,7 +1081,10 @@ static bool se_combo_str(const char* label,int* current_item,const char* items_s
     tmp_string+=strlen(tmp_string)+1;
     number_of_strings++;
   }
-  return igComboStr_arr(se_localize_and_cache(label),current_item,localized_combo_options,number_of_strings,popup_max_height_in_items);
+  se_design_push_combo_style();
+  bool result = igComboStr_arr(se_localize_and_cache(label),current_item,localized_combo_options,number_of_strings,popup_max_height_in_items);
+  se_design_pop_combo_style();
+  return result;
 }
 static bool se_input_int(const char* label,int* v,int step,int step_fast,ImGuiInputTextFlags flags){
   return igInputInt(se_localize_and_cache(label),v,step,step_fast,flags);
@@ -758,35 +1101,152 @@ static bool se_input_int32(const char* label,int32_t* v,int step,int step_fast,I
   *v = val;
   return ret;
 }
-void se_section(const char* label,...){
+// Menu sections can be collapsed and are found by the menu's search field by their title or by the
+// options they contain (their labels in English and in the GUI language).
+static const struct{const char* section; const char* keywords;} se_menu_keywords[]={
+  {ICON_FK_FLOPPY_O " Save States","Save Slot\0Capture\0Restore\0Local\0Cloud\0"},
+  {ICON_FK_VIDEO_CAMERA " Recording","Record Video\0Screenshot\0Record Audio\0Replay Buffer\0Save Replay\0Video Size\0Video Quality\0Record Sound in Videos\0Screenshot Size\0"},
+  {ICON_FK_PODCAST " Streaming","Streaming and Remote Play\0Remote Play\0OBS Overlay\0Stream Size\0Frame Rate\0HTTP\0"},
+  {ICON_FK_CLOUD " Google Drive","Login\0Logout\0"},
+  {ICON_FK_KEY " Action Replay Codes","Cheats\0GameShark\0New\0"},
+  {ICON_FK_SEARCH " Cheat Finder","Cheats\0Search\0Memory\0"},
+  {ICON_FK_PUZZLE_PIECE " ROM Patches","Apply Patches\0IPS\0UPS\0BPS\0"},
+  {ICON_FK_TROPHY " RetroAchievements","Username\0Password\0Login\0Register\0Hardcore Mode\0Encore Mode\0Unofficial Achievements\0Spectator Mode\0Notifications\0Progress Indicators\0Leaderboard Trackers\0Challenge Indicators\0"},
+  {ICON_FK_CROSSHAIRS " Located Files","Save File\0BIOS\0Firmware\0"},
+  {ICON_FK_TEXT_HEIGHT " GUI","Language\0Design\0Color Scheme\0Contrast\0Custom Accent Color\0Use System Font\0Theme\0Custom Font\0GUI Scale\0Always Show Menu/Nav Bar\0Full Screen\0"},
+  {ICON_FK_DESKTOP " Display Settings","Screen Shader\0Screen Rotation\0Color Correction\0GBA Color Correction Type\0Screen Ghosting\0Force Integer Scaling\0Stretch Screen to Fit\0Show Screen Bezel\0NDS Screen Layout\0Swap Screens\0Screen Gap\0Small Screen Size\0Game Boy Color Palette\0"},
+  {ICON_FK_HAND_O_RIGHT " Touch Control Settings","Show On-screen Controller\0Customize Layout\0Scale\0Opacity\0Hide when inactive\0Enable Turbo and Hold Button Modifiers\0Show Rewind and Fast Forward Buttons\0Prevent Overlap in Portrait\0Prevent Overlap in Landscape\0Button Labels\0"},
+  {ICON_FK_KEYBOARD_O " Keybinds","Reset Default Keybinds\0Hotkeys\0"},
+  {ICON_FK_GAMEPAD " Controllers","Face Buttons\0Reset Default Controller Bindings\0Rumble\0Gamepad\0"},
+  {ICON_FK_CODE_FORK " Additional Search Paths","Save File/State Path\0BIOS/Firmware Path\0Cheat Code Path\0Patch Path\0Recording Path\0Create new files in paths\0"},
+  {ICON_FK_WRENCH " Advanced","Solar Sensor\0Force GB games to run in DMG mode\0Show Debug Tools\0Enable HTTP Control Server\0Server Port\0Enable Download Cache\0Clear Download Cache\0"},
+};
+static uint32_t se_hash_string(const char* s){
+  uint32_t h = 2166136261u;
+  while(*s){h ^= (uint8_t)*s++; h *= 16777619u;}
+  return h? h : 1;
+}
+// Case insensitive for ASCII, other UTF-8 text is compared as it is
+static bool se_contains_text(const char* text, const char* query){
+  if(!query[0])return true;
+  for(;*text;++text){
+    const char* t = text, *q = query;
+    while(*t&&*q&&tolower((unsigned char)*t)==tolower((unsigned char)*q)){++t;++q;}
+    if(!*q)return true;
+  }
+  return false;
+}
+static const char* se_menu_search_query(void){
+  const char* q = gui_state.menu_search;
+  while(*q==' ')++q;
+  return q;
+}
+static bool se_menu_section_matches(const char* label, const char* title){
+  const char* q = se_menu_search_query();
+  if(!q[0]||se_contains_text(title,q)||se_contains_text(label,q))return true;
+  for(size_t i=0;i<sizeof(se_menu_keywords)/sizeof(se_menu_keywords[0]);++i){
+    if(strcmp(se_menu_keywords[i].section,label))continue;
+    for(const char* k=se_menu_keywords[i].keywords;*k;k+=strlen(k)+1){
+      if(se_contains_text(k,q)||se_contains_text(se_localize_and_cache(k),q))return true;
+    }
+  }
+  // The keybind names are options of both binding sections
+  if(strstr(label," Keybinds")||strstr(label," Controllers")){
+    for(int i=0;i<SE_NUM_KEYBINDS;++i){
+      if(se_contains_text(se_keybind_names[i],q)||se_contains_text(se_localize_and_cache(se_keybind_names[i]),q))return true;
+    }
+  }
+  return false;
+}
+#define SE_MENU_MAX_COLLAPSED 24
+static bool se_menu_section_collapsed(uint32_t id){
+  for(int i=0;i<SE_MENU_MAX_COLLAPSED;++i)if(gui_state.settings.menu_collapsed[i]==id)return true;
+  return false;
+}
+static void se_menu_section_set_collapsed(uint32_t id, bool collapsed){
+  for(int i=0;i<SE_MENU_MAX_COLLAPSED;++i)if(gui_state.settings.menu_collapsed[i]==id)gui_state.settings.menu_collapsed[i]=0;
+  if(!collapsed)return;
+  for(int i=0;i<SE_MENU_MAX_COLLAPSED;++i)if(gui_state.settings.menu_collapsed[i]==0){gui_state.settings.menu_collapsed[i]=id; return;}
+}
+// Draws a section title. In the menu it returns whether the section's contents should be drawn: false
+// when it is collapsed or does not match the search, and then nothing is drawn. Elsewhere it is true.
+bool se_section(const char* label,...){
   ImGuiStyle * style = igGetStyle();
   ImDrawList*dl= igGetWindowDrawList();
   ImVec2 b_min,b_sz,b_max,b_cursor;
-
-  igGetWindowPos(&b_min);
-  igGetWindowSize(&b_sz);
-  igGetCursorPos(&b_cursor);
-  
-  b_min.x+=b_cursor.x-style->FramePadding.x;
-  b_min.y+=b_cursor.y-style->FramePadding.y;
-  b_min.y-=igGetScrollY();
-  b_max.x = b_min.x+b_sz.x-b_cursor.x; 
 
   char buffer[256]="";
   va_list args;
   va_start(args, label);
   vsnprintf(buffer,sizeof(buffer),se_localize_and_cache(label),args);
   va_end(args);
-  ImVec2 text_size; 
-  igCalcTextSize(&text_size,buffer,NULL,false,b_max.x-b_min.x);
 
-  b_max.y = b_min.y+text_size.y+style->FramePadding.y * 2.0f; 
-  
-  ImDrawList_AddRectFilled(dl,b_min,b_max,igGetColorU32Col(ImGuiCol_TitleBg,1.0),0,ImDrawCornerFlags_None);
-  igTextWrapped("%s",buffer);
+  bool menu = gui_state.menu_sections;
+  bool searching = menu&&se_menu_search_query()[0];
+  uint32_t id = 0;
+  if(menu){
+    if(!se_menu_section_matches(label,buffer))return false;
+    id = se_hash_string(label);
+    gui_state.menu_sections_shown++;
+    if(gui_state.menu_section_count<32)gui_state.menu_section_ids[gui_state.menu_section_count++]=id;
+  }
+  bool collapsed = menu&&!searching&&se_menu_section_collapsed(id);
+
+  if(gui_state.design_active){
+    se_design_section(buffer);
+  }else{
+    igGetWindowPos(&b_min);
+    igGetWindowSize(&b_sz);
+    igGetCursorPos(&b_cursor);
+
+    b_min.x+=b_cursor.x-style->FramePadding.x;
+    b_min.y+=b_cursor.y-style->FramePadding.y;
+    b_min.y-=igGetScrollY();
+    b_max.x = b_min.x+b_sz.x-b_cursor.x;
+    ImVec2 text_size;
+    igCalcTextSize(&text_size,buffer,NULL,false,b_max.x-b_min.x);
+
+    b_max.y = b_min.y+text_size.y+style->FramePadding.y * 2.0f;
+
+    ImDrawList_AddRectFilled(dl,b_min,b_max,igGetColorU32Col(ImGuiCol_TitleBg,1.0),0,ImDrawCornerFlags_None);
+    gui_state.section_text_vtx_start = dl->VtxBuffer.Size;
+    igTextWrapped("%s",buffer);
+  }
+  if(!menu)return true;
+
+  // The whole title row toggles the section, with a chevron at its end
+  ImVec2 t_min, t_max, w_pos, c_min, c_max, after;
+  igGetItemRectMin(&t_min);
+  igGetItemRectMax(&t_max);
+  igGetWindowPos(&w_pos);
+  igGetWindowContentRegionMin(&c_min);
+  igGetWindowContentRegionMax(&c_max);
+  igGetCursorScreenPos(&after);
+  float x0 = w_pos.x+c_min.x, x1 = w_pos.x+c_max.x;
+  float pad = style->FramePadding.y;
+  if(!searching){
+    const char* chevron = collapsed? ICON_FK_CHEVRON_RIGHT : ICON_FK_CHEVRON_DOWN;
+    ImVec2 cs;
+    igCalcTextSize(&cs,chevron,NULL,false,-1);
+    float scale = 0.75f;
+    ImVec2 cp = {x1-cs.x*scale-2,(t_min.y+t_max.y-cs.y*scale)*0.5f};
+    ImDrawList_AddTextFontPtr(dl,igGetFont(),igGetFontSize()*scale,cp,igGetColorU32Col(ImGuiCol_TextDisabled,1.0),chevron,NULL,0,NULL);
+  }
+  igSetCursorScreenPos((ImVec2){x0,t_min.y-pad});
+  igPushIDInt((int)id);
+  bool pressed = igInvisibleButton("##section",(ImVec2){x1-x0>1? x1-x0 : 1,t_max.y-t_min.y+pad*2},ImGuiButtonFlags_None);
+  if(igIsItemHovered(ImGuiHoveredFlags_None))igSetMouseCursor(ImGuiMouseCursor_Hand);
+  igPopID();
+  igSetCursorScreenPos(after);
+  if(pressed&&!searching){
+    collapsed = !collapsed;
+    se_menu_section_set_collapsed(id,collapsed);
+  }
+  return !collapsed;
 }
 static bool se_button_themed(int region, const char* label, ImVec2 size, bool always_draw_label){
   label=se_localize_and_cache(label);
+  if(gui_state.design_active)return se_design_button(label,size);
   ImVec2 label_size;
   igCalcTextSize(&label_size,label, NULL, true,-1.0);
   ImGuiStyle * style = igGetStyle();
@@ -799,7 +1259,7 @@ static bool se_button_themed(int region, const char* label, ImVec2 size, bool al
   pos.x+=v.x-igGetScrollX();
   pos.y+=v.y-igGetScrollY();
   ImGuiStyle restore_style = *style;
-  if(gui_state.theme.regions[region].active){
+  if(se_theme_region_active(region)){
     for(int i=0;i<ImGuiCol_COUNT;++i)style->Colors[i].w = 0.;
     if(always_draw_label){
       style->Colors[ImGuiCol_Text] = restore_style.Colors[ImGuiCol_Text];
@@ -851,6 +1311,7 @@ bool se_slider_float_themed(const char* label, float* p_data, float p_min, float
 
   label = se_localize_and_cache(label);
   format = se_localize_and_cache(format);
+  if(gui_state.design_active)return se_design_slider(label,p_data,p_min,p_max,format);
   const float w = igCalcItemWidth();
 
   ImVec2 label_size;
@@ -872,7 +1333,7 @@ bool se_slider_float_themed(const char* label, float* p_data, float p_min, float
   frame_size.x+=frame_size.x*bar_growth;
   frame_size.y+=frame_size.y*bar_growth;
 
-  if( gui_state.theme.regions[SE_REGION_VOL_EMPTY].active){
+  if(se_theme_region_active(SE_REGION_VOL_EMPTY)){
     for(int i=0;i<ImGuiCol_COUNT;++i)style->Colors[i].w = 0.;
     style->Colors[ImGuiCol_Text] = restore_style.Colors[ImGuiCol_Text];
     style->Colors[ImGuiCol_TextDisabled] = restore_style.Colors[ImGuiCol_TextDisabled];
@@ -917,7 +1378,7 @@ bool se_button(const char* label, ImVec2 size){
 }
 static bool se_input_path(const char* label, char* new_path, ImGuiInputTextFlags flags){
   int win_w = igGetWindowWidth();
-  se_text(label);igSameLine(SE_FIELD_INDENT,0);
+  se_field_label(label);igSameLine(SE_FIELD_INDENT,0);
   igPushIDStr(label);
   bool read_only = (flags&ImGuiInputTextFlags_ReadOnly)!=0;
   float button_w = 25; 
@@ -956,7 +1417,7 @@ static bool se_input_path(const char* label, char* new_path, ImGuiInputTextFlags
 }
 static bool se_input_file_callback(const char* label, char* new_path, const char**types,void (*file_open_fn)(const char*), ImGuiInputTextFlags flags){
   int win_w = igGetWindowWidth();
-  se_text(label);igSameLine(SE_FIELD_INDENT,0);
+  se_field_label(label);igSameLine(SE_FIELD_INDENT,0);
   igPushIDStr(label);
   bool read_only = (flags&ImGuiInputTextFlags_ReadOnly)!=0;
   float button_w = 25; 
@@ -1003,9 +1464,14 @@ static void se_tooltip(const char * tooltip){
   }
 }
 static void se_panel_toggle(int region, bool * is_open, const char* icon, const char* tooltip ){
-  if(gui_state.theme.regions[region].active==false)region = SE_REGION_BLANK;
+  if(se_theme_region_active(region)==false)region = SE_REGION_BLANK;
   igPushIDStr(icon);
-  if(*is_open){
+  if(gui_state.design_active){
+    if(se_design_icon_toggle(icon,(ImVec2){SE_MENU_BAR_BUTTON_WIDTH,show_ui?SE_MENU_BAR_HEIGHT:0},*is_open)){
+      *is_open = !*is_open;
+      if(*is_open)gui_state.last_opened_panel = is_open;
+    }
+  }else if(*is_open){
     igPushStyleColorVec4(ImGuiCol_Button, igGetStyle()->Colors[ImGuiCol_ButtonActive]);
     if (se_button_themed(region + 2, icon, (ImVec2) { SE_MENU_BAR_BUTTON_WIDTH, show_ui ? SE_MENU_BAR_HEIGHT : 0 }, region != SE_REGION_MENU)) { *is_open = !*is_open; }
     igPopStyleColor(1);
@@ -1575,7 +2041,8 @@ void se_load_search_paths(){
   char * paths[]={
     gui_state.paths.save,
     gui_state.paths.bios,
-    gui_state.paths.cheat_codes
+    gui_state.paths.cheat_codes,
+    gui_state.paths.patches
   };
   for(int i=0;i<sizeof(paths)/sizeof(paths[0]);++i){
     paths[i][SB_FILE_PATH_SIZE-1]=0;
@@ -2459,7 +2926,588 @@ void se_draw_io_state(const char * label, mmio_reg_t* mmios, int mmios_size, emu
 /////////////////////////////////
 
 // Used for file loading dialogs
-static const char* valid_rom_file_types[] = { "*.gb", "*.gba","*.gbc" ,"*.nds","*.zip",NULL};
+static const char* valid_rom_file_types[] = { "*.gb", "*.gba","*.gbc" ,"*.nds","*.zip","*.ips","*.ups","*.bps",NULL};
+static const char* valid_patch_file_types[] = { "*.ips","*.ups","*.bps",NULL};
+
+// Patch added by se_load_patch(), preferred the next time the game is loaded
+static char se_added_patch[SB_FILE_PATH_SIZE];
+static double se_file_modification_time(const char* path){
+#ifdef _WIN32
+  struct _stat st;
+  if(_stat(path,&st)!=0)return 0;
+#else
+  struct stat st;
+  if(stat(path,&st)!=0)return 0;
+#endif
+  return (double)st.st_mtime;
+}
+static void se_set_file_modification_time(const char* path, double time){
+#ifdef _WIN32
+  struct _utimbuf times = {(time_t)time,(time_t)time};
+  _utime(path,&times);
+#else
+  struct utimbuf times = {(time_t)time,(time_t)time};
+  utime(path,&times);
+#endif
+}
+// Soft patching: <ROM name>.bps, .ups or .ips next to the ROM, next to its save file or in the
+// patch path is applied to the ROM in memory when it is loaded. The ROM file is never changed.
+// When there are several, the most recently changed file is used.
+static bool se_find_patch(const char* rom_file, char* out){
+  char dir[SB_FILE_PATH_SIZE], name[SB_FILE_PATH_SIZE];
+  const char *base, *file, *ext;
+  sb_breakup_path(rom_file,&base,&file,&ext);
+  snprintf(dir,sizeof(dir),"%s",base);
+  snprintf(name,sizeof(name),"%s",file);
+  bool found = false;
+  double newest = -1;
+  // On equal times formats with checksums win, they can not be applied to the wrong ROM
+  static const int order[SE_PATCH_NUM_EXTENSIONS] = {2,1,0};
+  for(int location=0;location<3;++location){
+    for(int o=0;o<SE_PATCH_NUM_EXTENSIONS;++o){
+      const char* patch_ext = se_patch_extensions[order[o]];
+      char path[SB_FILE_PATH_SIZE];
+      if(location==0)se_join_path(path,SB_FILE_PATH_SIZE,dir,name,patch_ext);
+      else if(location==1)snprintf(path,SB_FILE_PATH_SIZE,"%s%s",emu_state.save_data_base_path,patch_ext);
+      else se_join_path(path,SB_FILE_PATH_SIZE,gui_state.paths.patches,name,patch_ext);
+      if(!sb_file_exists(path))continue;
+      double time = strcmp(path,se_added_patch)==0? 1e300 : se_file_modification_time(path);
+      if(time>newest){
+        newest = time;
+        snprintf(out,SB_FILE_PATH_SIZE,"%s",path);
+        found = true;
+      }
+    }
+  }
+  se_added_patch[0] = 0;
+  return found;
+}
+// Applies the patch found by se_find_patch() to emu_state.rom_data before the core loads it
+static void se_soft_patch_rom(void){
+  gui_state.patch.applied = gui_state.patch.failed = false;
+  gui_state.patch.status[0] = 0;
+  if(gui_state.settings.soft_patching_off||!emu_state.rom_data||!gui_state.patch.path[0])return;
+  const char *base, *file, *ext;
+  sb_breakup_path(gui_state.patch.path,&base,&file,&ext);
+  char name[SB_FILE_PATH_SIZE];
+  snprintf(name,sizeof(name),"%s.%s",file,ext);
+  size_t patch_size = 0;
+  uint8_t* patch = sb_load_file_data(gui_state.patch.path,&patch_size);
+  if(!patch){
+    gui_state.patch.failed = true;
+    snprintf(gui_state.patch.status,sizeof(gui_state.patch.status),"%s: %s",name,se_localize_and_cache("Could not read the patch"));
+    return;
+  }
+  uint8_t* out = NULL;
+  size_t out_size = 0;
+  const char* error = NULL;
+  if(se_patch_apply(emu_state.rom_data,emu_state.rom_size,patch,patch_size,&out,&out_size,&error)){
+    gui_state.patch.original_size = emu_state.rom_size;
+    gui_state.patch.patched_size = out_size;
+    free(emu_state.rom_data);
+    emu_state.rom_data = out;
+    emu_state.rom_size = out_size;
+    gui_state.patch.applied = true;
+    snprintf(gui_state.patch.status,sizeof(gui_state.patch.status),"%s (%s)",name,se_patch_format_name(se_patch_detect(patch,patch_size)));
+    printf("Applied patch %s\n",gui_state.patch.path);
+  }else{
+    gui_state.patch.failed = true;
+    snprintf(gui_state.patch.status,sizeof(gui_state.patch.status),"%s: %s",name,se_localize_and_cache(error));
+    printf("Patch %s not applied: %s\n",gui_state.patch.path,error);
+  }
+  free(patch);
+}
+// Text appended with printf formatting, for JSON responses
+typedef struct{
+  char* data;
+  size_t size, capacity;
+}se_string_t;
+static void se_string_printf(se_string_t* s, const char* fmt, ...){
+  va_list args, copy;
+  va_start(args,fmt);
+  va_copy(copy,args);
+  int n = vsnprintf(NULL,0,fmt,copy);
+  va_end(copy);
+  if(n>=0&&s->size+n+1>s->capacity){
+    size_t capacity = s->capacity? s->capacity : 256;
+    while(capacity<s->size+n+1)capacity*=2;
+    char* data = (char*)realloc(s->data,capacity);
+    if(data){
+      s->data = data;
+      s->capacity = capacity;
+    }
+  }
+  if(n>=0&&s->size+n+1<=s->capacity){
+    vsnprintf(s->data+s->size,s->capacity-s->size,fmt,args);
+    s->size+=n;
+  }
+  va_end(args);
+}
+// Contents of a JSON string for s (without the quotes). Valid until it has been called 8 more times.
+static const char* se_json_escaped(const char* s){
+  static char buffers[8][SB_FILE_PATH_SIZE*2];
+  static int next = 0;
+  char* out = buffers[next];
+  next = (next+1)%8;
+  size_t o = 0;
+  for(;s&&*s&&o+7<sizeof(buffers[0]);++s){
+    unsigned char c = (unsigned char)*s;
+    if(c=='"'||c=='\\'){out[o++]='\\'; out[o++]=c;}
+    else if(c=='\n'){out[o++]='\\'; out[o++]='n';}
+    else if(c<0x20)o+=snprintf(out+o,sizeof(buffers[0])-o,"\\u%04x",c);
+    else out[o++]=c;
+  }
+  out[o] = 0;
+  return out;
+}
+
+////////////////////
+// Cheat finder   //
+////////////////////
+#define SE_CHEAT_FINDER_PAGE 12
+static struct{
+  se_cheat_search_t search;
+  int size_index;          // 0: 8 bit, 1: 16 bit, 2: 32 bit
+  bool is_signed;
+  int compare;             // se_search_compare_t
+  char value[24];          // Value typed for the comparison
+  char code_value[24];     // Value written by new codes, the current value when empty
+  uint32_t first_result;   // First result shown in the menu
+  char message[160];
+  bool message_is_error;
+}se_cheat_finder;
+// The menu, the HTTP server thread and host apps all use the search, the public functions lock this
+static mutex_t se_cheat_finder_mutex;
+static void se_cheat_finder_lock(void){if(se_cheat_finder_mutex)mutex_lock(se_cheat_finder_mutex);}
+static void se_cheat_finder_unlock(void){if(se_cheat_finder_mutex)mutex_unlock(se_cheat_finder_mutex);}
+
+static const char* se_cheat_compare_names[SE_SEARCH_NUM_COMPARES] = {
+  "equal","not_equal","greater","less","changed","unchanged","increased","decreased","increased_by","decreased_by"
+};
+// Cheats and the cheat finder are not allowed in Hardcore Mode
+static bool se_cheats_allowed(void){return !(gui_state.settings.hardcore_mode&&gui_state.ra_logged_in);}
+static bool se_cheat_finder_supported(void){
+  return emu_state.rom_loaded&&(emu_state.system==SYSTEM_GB||emu_state.system==SYSTEM_GBA||emu_state.system==SYSTEM_NDS);
+}
+static se_cheat_system_t se_cheat_finder_system(void){
+  if(emu_state.system==SYSTEM_GBA)return SE_CHEAT_SYSTEM_GBA;
+  if(emu_state.system==SYSTEM_NDS)return SE_CHEAT_SYSTEM_NDS;
+  return SE_CHEAT_SYSTEM_GB;
+}
+// The RAM that is searched, the memory cheat codes can write
+static int se_cheat_finder_regions(se_search_region_t* regions){
+  int n = 0;
+  if(emu_state.system==SYSTEM_GBA){
+    regions[n++] = (se_search_region_t){0x02000000,sizeof(core.gba.mem.wram0)};
+    regions[n++] = (se_search_region_t){0x03000000,sizeof(core.gba.mem.wram1)};
+  }else if(emu_state.system==SYSTEM_NDS){
+    regions[n++] = (se_search_region_t){0x02000000,sizeof(core.nds.mem.ram)};
+  }else if(emu_state.system==SYSTEM_GB){
+    sb_gb_t* gb = &core.gb;
+    // Cartridge RAM (bank in bits 16-23 of the address) when it is mapped, then work RAM
+    bool rtc = gb->rtc.has_rtc&&gb->cart.mbc_type==SB_MBC_MBC3&&gb->cart.mapped_ram_bank>=0x08;
+    if(gb->cart.ram_size>0&&gb->cart.ram_write_enable&&!rtc){
+      uint32_t size = gb->cart.ram_size<0x2000? gb->cart.ram_size : 0x2000;
+      regions[n++] = (se_search_region_t){((uint32_t)(gb->cart.mapped_ram_bank&0xff)<<16)|0xA000,size};
+    }
+    regions[n++] = (se_search_region_t){0xC000,0x2000};
+  }
+  return n;
+}
+static uint8_t se_cheat_finder_read_byte(uint32_t address){
+  if(emu_state.system==SYSTEM_GBA){
+    if(address>=0x02000000&&address<0x02000000+sizeof(core.gba.mem.wram0))return core.gba.mem.wram0[address-0x02000000];
+    if(address>=0x03000000&&address<0x03000000+sizeof(core.gba.mem.wram1))return core.gba.mem.wram1[address-0x03000000];
+    return 0;
+  }
+  if(emu_state.system==SYSTEM_NDS){
+    if(address>=0x02000000&&address<0x02000000+sizeof(core.nds.mem.ram))return core.nds.mem.ram[address-0x02000000];
+    return 0;
+  }
+  if(emu_state.system==SYSTEM_GB)return sb_read8_direct(&core.gb,address&0xffff);
+  return 0;
+}
+static uint32_t se_cheat_finder_read_value(uint32_t address, int size){
+  uint32_t value = 0;
+  for(int i=0;i<size;++i)value|=(uint32_t)se_cheat_finder_read_byte(address+i)<<(8*i);
+  return value;
+}
+// Copy of the searched memory, laid out as the regions
+static uint8_t* se_cheat_finder_read_memory(const se_search_region_t* regions, int num_regions){
+  uint32_t total = 0;
+  for(int r=0;r<num_regions;++r)total+=regions[r].size;
+  uint8_t* memory = (uint8_t*)malloc(total? total : 1);
+  if(!memory)return NULL;
+  uint32_t off = 0;
+  for(int r=0;r<num_regions;++r){
+    uint32_t address = regions[r].address, size = regions[r].size;
+    if(emu_state.system==SYSTEM_GBA&&address==0x02000000)memcpy(memory+off,core.gba.mem.wram0,size);
+    else if(emu_state.system==SYSTEM_GBA&&address==0x03000000)memcpy(memory+off,core.gba.mem.wram1,size);
+    else if(emu_state.system==SYSTEM_NDS&&address==0x02000000)memcpy(memory+off,core.nds.mem.ram,size);
+    else for(uint32_t i=0;i<size;++i)memory[off+i] = se_cheat_finder_read_byte(address+i);
+    off+=size;
+  }
+  return memory;
+}
+static void se_cheat_finder_format_address(uint32_t address, char* out, size_t size){
+  if(emu_state.system==SYSTEM_GB){
+    // Cartridge RAM addresses show their bank
+    if((address&0xffff)<0xC000)snprintf(out,size,"%02X:%04X",(address>>16)&0xff,address&0xffff);
+    else snprintf(out,size,"%04X",address&0xffff);
+  }else snprintf(out,size,"%08X",address);
+}
+static void se_cheat_finder_format_value(uint32_t value, char* out, size_t size){
+  int value_size = se_cheat_finder.search.value_size? se_cheat_finder.search.value_size : 1;
+  if(se_cheat_finder.search.is_signed){
+    int32_t v = value_size==1? (int8_t)value : value_size==2? (int16_t)value : (int32_t)value;
+    snprintf(out,size,"%d",v);
+  }else snprintf(out,size,"%u",value);
+}
+// Parses a decimal or 0x hexadecimal number, negative numbers are allowed
+static bool se_cheat_parse_value(const char* text, uint32_t* value){
+  while(*text==' ')text++;
+  if(!*text)return false;
+  char* end = NULL;
+  long long v = strtoll(text,&end,0);
+  while(end&&*end==' ')end++;
+  if(!end||*end)return false;
+  if(v<-2147483648LL||v>4294967295LL)return false;
+  *value = (uint32_t)v;
+  return true;
+}
+static void se_cheat_finder_message(bool error, const char* fmt, ...){
+  va_list args;
+  va_start(args,fmt);
+  vsnprintf(se_cheat_finder.message,sizeof(se_cheat_finder.message),se_localize_and_cache(fmt),args);
+  va_end(args);
+  se_cheat_finder.message_is_error = error;
+}
+static bool se_cheat_finder_start(int value_size, int is_signed){
+  if(!se_cheats_allowed()||!se_cheat_finder_supported())return false;
+  se_search_region_t regions[SE_SEARCH_MAX_REGIONS];
+  int num_regions = se_cheat_finder_regions(regions);
+  uint8_t* memory = se_cheat_finder_read_memory(regions,num_regions);
+  if(!memory)return false;
+  // ARM consoles keep 16 and 32 bit values aligned, the Game Boy does not
+  int alignment = emu_state.system==SYSTEM_GB? 1 : value_size;
+  bool started = se_search_start(&se_cheat_finder.search,regions,num_regions,memory,value_size,alignment,is_signed);
+  free(memory);
+  se_cheat_finder.first_result = 0;
+  se_cheat_finder.message[0] = 0;
+  if(started){
+    se_cheat_finder.size_index = value_size==4? 2 : value_size==2? 1 : 0;
+    se_cheat_finder.is_signed = is_signed;
+  }
+  return started;
+}
+SKYEMU_API bool se_cheat_search_start(int value_size, int is_signed){
+  se_cheat_finder_lock();
+  bool started = se_cheat_finder_start(value_size,is_signed);
+  se_cheat_finder_unlock();
+  return started;
+}
+static uint32_t se_cheat_finder_filter(int compare, uint32_t value){
+  se_cheat_search_t* search = &se_cheat_finder.search;
+  if(!se_cheats_allowed()||!se_cheat_finder_supported()||!se_search_active(search))return 0;
+  if(compare<0||compare>=SE_SEARCH_NUM_COMPARES)return search->num_candidates;
+  uint8_t* memory = se_cheat_finder_read_memory(search->regions,search->num_regions);
+  if(!memory)return search->num_candidates;
+  uint32_t count = se_search_filter(search,memory,(se_search_compare_t)compare,value);
+  free(memory);
+  // The menu shows the last search, also when it came from the HTTP server or the API
+  se_cheat_finder.first_result = 0;
+  se_cheat_finder.compare = compare;
+  if(se_search_compare_uses_value((se_search_compare_t)compare)){
+    char text[24];
+    se_cheat_finder_format_value(value,text,sizeof(text));
+    snprintf(se_cheat_finder.value,sizeof(se_cheat_finder.value),"%s",text);
+  }
+  if(count==1)se_cheat_finder_message(false,"Found it! Add a code for it below.");
+  else se_cheat_finder.message[0] = 0;
+  return count;
+}
+SKYEMU_API uint32_t se_cheat_search_filter(int compare, uint32_t value){
+  se_cheat_finder_lock();
+  uint32_t count = se_cheat_finder_filter(compare,value);
+  se_cheat_finder_unlock();
+  return count;
+}
+static void se_cheat_finder_reset(void){
+  se_search_reset(&se_cheat_finder.search);
+  se_cheat_finder.first_result = 0;
+  se_cheat_finder.message[0] = 0;
+}
+SKYEMU_API void se_cheat_search_reset(void){
+  se_cheat_finder_lock();
+  se_cheat_finder_reset();
+  se_cheat_finder_unlock();
+}
+SKYEMU_API uint32_t se_cheat_search_count(void){
+  se_cheat_finder_lock();
+  uint32_t count = se_search_active(&se_cheat_finder.search)? se_cheat_finder.search.num_candidates : 0;
+  se_cheat_finder_unlock();
+  return count;
+}
+SKYEMU_API bool se_cheat_search_get_result(uint32_t index, uint32_t* address, uint32_t* value){
+  se_cheat_search_t* search = &se_cheat_finder.search;
+  uint32_t offset = 0;
+  bool found = false;
+  se_cheat_finder_lock();
+  if(se_cheats_allowed()&&se_cheat_finder_supported()&&se_search_results(search,index,&offset,1)){
+    uint32_t a = se_search_address(search,offset);
+    if(address)*address = a;
+    if(value)*value = se_cheat_finder_read_value(a,search->value_size);
+    found = true;
+  }
+  se_cheat_finder_unlock();
+  return found;
+}
+static void se_save_cheats_if_loaded(void){
+  if(gui_state.cheat_path[0])se_save_cheats(gui_state.cheat_path);
+}
+static int se_free_cheat_index(void){
+  for(int i=0;i<SE_NUM_CHEATS;++i)if(cheats[i].state==-1)return i;
+  return -1;
+}
+// Adds an active code that keeps value_size bytes at address set to value. Returns its index or -1.
+SKYEMU_API int se_make_cheat(uint32_t address, uint32_t value, int value_size, const char* name){
+  if(!se_cheats_allowed()||!se_cheat_finder_supported())return -1;
+  uint32_t words[8];
+  int num_words = se_cheat_make_code(se_cheat_finder_system(),address,value,value_size,words,8);
+  int index = se_free_cheat_index();
+  if(!num_words||index<0)return -1;
+  se_cheat_t* cheat = cheats+index;
+  memset(cheat,0,sizeof(*cheat));
+  if(name&&name[0])snprintf(cheat->name,sizeof(cheat->name),"%s",name);
+  else{
+    char addr[16];
+    se_cheat_finder_format_address(address,addr,sizeof(addr));
+    snprintf(cheat->name,sizeof(cheat->name),"%s = %u",addr,value_size==4? value : value&((1u<<(8*value_size))-1));
+  }
+  memcpy(cheat->buffer,words,num_words*sizeof(uint32_t));
+  cheat->size = num_words;
+  cheat->state = 1;
+  se_save_cheats_if_loaded();
+  return index;
+}
+static int se_cheat_finder_value_size(void){
+  se_cheat_finder_lock();
+  int value_size = se_cheat_finder.search.value_size? se_cheat_finder.search.value_size : 1;
+  se_cheat_finder_unlock();
+  return value_size;
+}
+SKYEMU_API int se_cheat_search_add_code(uint32_t address, uint32_t value, const char* name){
+  return se_make_cheat(address,value,se_cheat_finder_value_size(),name);
+}
+// Adds a cheat from its code text (Action Replay or GameShark hex digits). Returns its index or -1.
+SKYEMU_API int se_add_cheat(const char* name, const char* code, int enabled){
+  if(!se_cheats_allowed()||!emu_state.rom_loaded||!code)return -1;
+  int index = se_free_cheat_index();
+  if(index<0)return -1;
+  se_cheat_t* cheat = cheats+index;
+  memset(cheat,0,sizeof(*cheat));
+  snprintf(cheat->name,sizeof(cheat->name),"%s",name&&name[0]? name : "Untitled Code");
+  se_convert_cheat_code(code,index);
+  cheat->state = enabled? 1 : 0;
+  se_save_cheats_if_loaded();
+  return index;
+}
+SKYEMU_API bool se_remove_cheat(int index){
+  if(index<0||index>=SE_NUM_CHEATS||cheats[index].state==-1)return false;
+  if(gui_state.editing_cheat_index==index)gui_state.editing_cheat_index = -1;
+  cheats[index].state = -1;
+  se_save_cheats_if_loaded();
+  return true;
+}
+SKYEMU_API bool se_set_cheat_enabled(int index, int enabled){
+  if(!se_cheats_allowed()||index<0||index>=SE_NUM_CHEATS||cheats[index].state==-1)return false;
+  cheats[index].state = enabled? 1 : 0;
+  se_save_cheats_if_loaded();
+  return true;
+}
+static void se_cheats_json(se_string_t* out){
+  se_string_printf(out,"[");
+  bool first = true;
+  for(int i=0;i<SE_NUM_CHEATS;++i){
+    if(cheats[i].state==-1)continue;
+    se_string_printf(out,"%s\n  {\"id\": %d, \"name\": \"%s\", \"enabled\": %s, \"code\": \"",first? "" : ",",
+                     i,se_json_escaped(cheats[i].name),cheats[i].state==1? "true" : "false");
+    for(uint32_t w=0;w<cheats[i].size;++w)se_string_printf(out,"%s%08X",w? " " : "",cheats[i].buffer[w]);
+    se_string_printf(out,"\"}");
+    first = false;
+  }
+  se_string_printf(out,first? "]" : "\n]");
+}
+static void se_cheat_search_json(se_string_t* out, uint32_t first_result, uint32_t max_results){
+  se_cheat_search_t* search = &se_cheat_finder.search;
+  bool active = se_search_active(search)&&se_cheat_finder_supported();
+  se_string_printf(out,"{\"active\": %s",active? "true" : "false");
+  if(active){
+    se_string_printf(out,", \"value_size\": %d, \"signed\": %s, \"searches\": %d, \"count\": %u, \"first\": %u, \"results\": [",
+                     search->value_size,search->is_signed? "true" : "false",search->searches,search->num_candidates,first_result);
+    uint32_t offsets[256];
+    if(max_results>256)max_results = 256;
+    uint32_t n = se_search_results(search,first_result,offsets,max_results);
+    for(uint32_t i=0;i<n;++i){
+      uint32_t address = se_search_address(search,offsets[i]);
+      char value[16], previous[16];
+      se_cheat_finder_format_value(se_cheat_finder_read_value(address,search->value_size),value,sizeof(value));
+      se_cheat_finder_format_value(se_search_read(search->previous,offsets[i],search->value_size),previous,sizeof(previous));
+      se_string_printf(out,"%s{\"address\": \"0x%08X\", \"value\": %s, \"previous\": %s}",i? ", " : "",address,value,previous);
+    }
+    se_string_printf(out,"]");
+  }
+  se_string_printf(out,"}");
+}
+// Replaces the text kept for a getter, so the returned pointer stays valid until its next call
+static const char* se_keep_json(se_string_t* kept, se_string_t* json){
+  free(kept->data);
+  *kept = *json;
+  return kept->data? kept->data : "";
+}
+SKYEMU_API const char* se_get_cheats_json(void){
+  static se_string_t kept;
+  se_string_t json = {0};
+  se_cheats_json(&json);
+  return se_keep_json(&kept,&json);
+}
+SKYEMU_API const char* se_get_cheat_search_json(uint32_t first_result, uint32_t max_results){
+  static se_string_t kept;
+  se_string_t json = {0};
+  se_cheat_finder_lock();
+  se_cheat_search_json(&json,first_result,max_results);
+  const char* result = se_keep_json(&kept,&json);
+  se_cheat_finder_unlock();
+  return result;
+}
+static void se_draw_cheat_finder_locked(float win_w){
+  se_cheat_search_t* search = &se_cheat_finder.search;
+  if(!se_section(ICON_FK_SEARCH " Cheat Finder"))return;
+  ImU32 ok_color = 0xff00c000, error_color = 0xff0000ff;
+  if(gui_state.design_active){
+    ok_color = se_design_u32(gui_state.design.accent_text);
+    error_color = se_design_u32(gui_state.design.error);
+  }
+  if(!se_search_active(search)){
+    se_text_disabled("Finds where the game keeps a value, like lives or money, and makes a code that sets it.");
+    se_field_label("Value Size");igSameLine(SE_FIELD_INDENT,0);
+    igPushItemWidth(-1);
+    se_combo_str("##CheatValueSize",&se_cheat_finder.size_index,"8-bit (0 to 255)\0""16-bit (0 to 65535)\0""32-bit\0",0);
+    igPopItemWidth();
+    se_checkbox("Signed Values (can be negative)",&se_cheat_finder.is_signed);
+    if(se_button(ICON_FK_SEARCH " Start Search",(ImVec2){0,0})){
+      static const int sizes[3] = {1,2,4};
+      if(se_cheat_finder_start(sizes[se_cheat_finder.size_index%3],se_cheat_finder.is_signed)){
+        se_cheat_finder_message(false,"Now change the value in the game, then search for it.");
+      }else se_cheat_finder_message(true,"Could not start the search");
+    }
+  }else{
+    if(search->num_candidates==0){
+      igPushStyleColorU32(ImGuiCol_Text,error_color);
+      se_text(ICON_FK_EXCLAMATION_TRIANGLE " %s",se_localize_and_cache("No address matches. Start a new search."));
+      igPopStyleColor(1);
+    }else if(search->num_candidates==1)se_text("%s",se_localize_and_cache("1 possible address"));
+    else se_text(se_localize_and_cache("%u possible addresses"),search->num_candidates);
+    se_field_label("Compare");igSameLine(SE_FIELD_INDENT,0);
+    igPushItemWidth(-1);
+    se_combo_str("##CheatCompare",&se_cheat_finder.compare,
+                 "Equal to\0Not equal to\0Greater than\0Less than\0Changed\0Unchanged\0"
+                 "Increased\0Decreased\0Increased by\0Decreased by\0",0);
+    igPopItemWidth();
+    bool uses_value = se_search_compare_uses_value((se_search_compare_t)se_cheat_finder.compare);
+    bool enter = false;
+    if(uses_value){
+      se_field_label("Value");igSameLine(SE_FIELD_INDENT,0);
+      igPushItemWidth(-1);
+      enter = igInputTextWithHint("##CheatValue",se_localize_and_cache("e.g. 99 or 0x63"),se_cheat_finder.value,
+                                  sizeof(se_cheat_finder.value),ImGuiInputTextFlags_EnterReturnsTrue,NULL,NULL);
+      igPopItemWidth();
+    }
+    bool can_search = search->num_candidates>0;
+    if(!can_search)se_push_disabled();
+    bool clicked = se_button(ICON_FK_SEARCH " Search",(ImVec2){0,0});
+    if(!can_search)se_pop_disabled();
+    if((clicked||enter)&&can_search){
+      uint32_t value = 0;
+      if(uses_value&&!se_cheat_parse_value(se_cheat_finder.value,&value)){
+        se_cheat_finder_message(true,"Type a number to compare with");
+      }else{
+        se_cheat_finder_filter(se_cheat_finder.compare,value);
+      }
+    }
+    igSameLine(0,4);
+    if(se_button(ICON_FK_REFRESH " New Search",(ImVec2){0,0}))se_cheat_finder_reset();
+  }
+  if(se_cheat_finder.message[0]){
+    igPushStyleColorU32(ImGuiCol_Text,se_cheat_finder.message_is_error? error_color : ok_color);
+    se_text("%s",se_cheat_finder.message);
+    igPopStyleColor(1);
+  }
+  if(!se_search_active(search)||search->num_candidates==0)return;
+
+  // Results, a page at a time
+  if(se_cheat_finder.first_result>=search->num_candidates)se_cheat_finder.first_result = 0;
+  uint32_t offsets[SE_CHEAT_FINDER_PAGE];
+  uint32_t n = se_search_results(search,se_cheat_finder.first_result,offsets,SE_CHEAT_FINDER_PAGE);
+  float value_x = win_w*0.40f, previous_x = win_w*0.66f;
+  se_text_disabled("Address");igSameLine(value_x,0);
+  se_text_disabled("Now");igSameLine(previous_x,0);
+  se_text_disabled("Last Search");
+  for(uint32_t i=0;i<n;++i){
+    uint32_t address = se_search_address(search,offsets[i]);
+    uint32_t current = se_cheat_finder_read_value(address,search->value_size);
+    char addr[16], now[16], previous[16];
+    se_cheat_finder_format_address(address,addr,sizeof(addr));
+    se_cheat_finder_format_value(current,now,sizeof(now));
+    se_cheat_finder_format_value(se_search_read(search->previous,offsets[i],search->value_size),previous,sizeof(previous));
+    igPushIDInt((int)offsets[i]);
+    igAlignTextToFramePadding();
+    igPushFont(gui_state.mono_font);
+    se_text("%s",addr);
+    igSameLine(value_x,0);
+    se_text("%s",now);
+    igSameLine(previous_x,0);
+    se_text_disabled("%s",previous);
+    igPopFont();
+    igSameLine(win_w-15,0);
+    if(se_button(ICON_FK_PLUS,(ImVec2){-1,0})){
+      uint32_t value = current;
+      if(se_cheat_finder.code_value[0]&&!se_cheat_parse_value(se_cheat_finder.code_value,&value)){
+        se_cheat_finder_message(true,"Type a number for the code value, or leave it empty");
+      }else{
+        int index = se_make_cheat(address,value,search->value_size,NULL);
+        if(index<0)se_cheat_finder_message(true,"Could not add a code for %s",addr);
+        else se_cheat_finder_message(false,"Added \"%s\" to the codes above",cheats[index].name);
+      }
+    }
+    if(igIsItemHovered(ImGuiHoveredFlags_None))igSetTooltip("%s",se_localize_and_cache("Add a code that keeps this value"));
+    igPopID();
+  }
+  if(search->num_candidates>SE_CHEAT_FINDER_PAGE){
+    bool first_page = se_cheat_finder.first_result==0;
+    bool last_page = se_cheat_finder.first_result+SE_CHEAT_FINDER_PAGE>=search->num_candidates;
+    if(first_page)se_push_disabled();
+    if(se_button(ICON_FK_CHEVRON_LEFT "##CheatPrev",(ImVec2){0,0})&&!first_page)se_cheat_finder.first_result-=SE_CHEAT_FINDER_PAGE;
+    if(first_page)se_pop_disabled();
+    igSameLine(0,4);
+    if(last_page)se_push_disabled();
+    if(se_button(ICON_FK_CHEVRON_RIGHT "##CheatNext",(ImVec2){0,0})&&!last_page)se_cheat_finder.first_result+=SE_CHEAT_FINDER_PAGE;
+    if(last_page)se_pop_disabled();
+    igSameLine(0,8);
+    igAlignTextToFramePadding();
+    se_text_disabled("%u-%u of %u",se_cheat_finder.first_result+1,se_cheat_finder.first_result+n,search->num_candidates);
+  }
+  se_field_label("Code Value");igSameLine(SE_FIELD_INDENT,0);
+  igPushItemWidth(-1);
+  igInputTextWithHint("##CheatCodeValue",se_localize_and_cache("Keep the current value"),se_cheat_finder.code_value,
+                      sizeof(se_cheat_finder.code_value),ImGuiInputTextFlags_None,NULL,NULL);
+  igPopItemWidth();
+}
+static void se_draw_cheat_finder(float win_w){
+  se_cheat_finder_lock();
+  se_draw_cheat_finder_locked(win_w);
+  se_cheat_finder_unlock();
+}
 void se_load_rom_from_emu_state(sb_emu_state_t*emu){
   if(!emu->rom_data)return;
   printf("Loading: %s\n",emu_state.rom_path);
@@ -2504,11 +3552,90 @@ SKYEMU_API void se_load_html(const char *filename){
 
     free(data);
 }
+// Adds an IPS, UPS or BPS patch to the loaded game: it is copied next to the save file under the
+// ROM's name, so it is found whenever the game is loaded, and the game is reloaded with it
+SKYEMU_API bool se_load_patch(const char* patch_path){
+  const char *base, *file, *ext;
+  sb_breakup_path(patch_path,&base,&file,&ext);
+  char name[SB_FILE_PATH_SIZE];
+  snprintf(name,sizeof(name),"%s.%s",file,ext);
+  char* add_error = gui_state.patch.add_error;
+  if(!emu_state.rom_loaded||!gui_state.patch.rom_file[0]){
+    snprintf(add_error,sizeof(gui_state.patch.add_error),"%s: %s",name,se_localize_and_cache("Load a game before adding a patch"));
+    return false;
+  }
+  size_t size = 0;
+  uint8_t* data = sb_load_file_data(patch_path,&size);
+  se_patch_format_t format = se_patch_detect(data,size);
+  if(format==SE_PATCH_UNKNOWN){
+    snprintf(add_error,sizeof(gui_state.patch.add_error),"%s: %s",name,se_localize_and_cache(data? "Unknown patch format" : "Could not read the patch"));
+    free(data);
+    return false;
+  }
+  char dest[SB_FILE_PATH_SIZE];
+  snprintf(dest,sizeof(dest),"%s%s",emu_state.save_data_base_path,se_patch_extensions[format-SE_PATCH_IPS]);
+  bool copied = strcmp(dest,patch_path)!=0;
+  // A patch already stored under that name is kept in memory and restored if the new one fails
+  size_t previous_size = 0;
+  uint8_t* previous = copied&&sb_file_exists(dest)? sb_load_file_data(dest,&previous_size) : NULL;
+  double previous_time = previous? se_file_modification_time(dest) : 0;
+  if(copied){
+    sb_save_file_data(dest,data,size);
+    se_emscripten_flush_fs();
+  }
+  free(data);
+  snprintf(se_added_patch,sizeof(se_added_patch),"%s",dest);
+  char rom_file[SB_FILE_PATH_SIZE];
+  snprintf(rom_file,sizeof(rom_file),"%s",gui_state.patch.rom_file);
+  bool was_off = gui_state.settings.soft_patching_off;
+  gui_state.settings.soft_patching_off = false;
+  se_load_rom(rom_file);
+  if(gui_state.patch.applied&&strcmp(gui_state.patch.path,dest)==0){
+    add_error[0] = 0;
+    free(previous);
+    return true;
+  }
+  // Refused (for example made for a different ROM): undo the copy and load the game as before.
+  // The status names the copy, the error names the file that was added.
+  const char* reason = strstr(gui_state.patch.status,": ");
+  snprintf(add_error,sizeof(gui_state.patch.add_error),"%s%s",name,reason? reason : "");
+  if(copied){
+    if(previous){
+      sb_save_file_data(dest,previous,previous_size);
+      // Keeps its place in the newest-first order of se_find_patch()
+      if(previous_time)se_set_file_modification_time(dest,previous_time);
+    }else remove(dest);
+    se_emscripten_flush_fs();
+  }
+  free(previous);
+  gui_state.settings.soft_patching_off = was_off;
+  se_load_rom(rom_file);
+  return false;
+}
+SKYEMU_API const char* se_get_patch_status(void){
+  return gui_state.patch.status;
+}
+SKYEMU_API void se_set_soft_patching(int enabled){
+  gui_state.settings.soft_patching_off = !enabled;
+}
+SKYEMU_API int se_get_soft_patching(void){
+  return !gui_state.settings.soft_patching_off;
+}
+static void se_load_patch_from_browser(const char* path){se_load_patch(path);}
 SKYEMU_API void se_load_rom(const char *filename){
+  // A patch opened or dropped like a ROM is added to the game that is running
+  for(int i=0;i<SE_PATCH_NUM_EXTENSIONS;++i){
+    if(sb_path_has_file_ext(filename,se_patch_extensions[i])){
+      se_load_patch(filename);
+      return;
+    }
+  }
   se_reset_rewind_buffer(&rewind_buffer);
   se_reset_save_states();
+  se_rec_stop_all();
   se_reset_cheats();
   gui_state.editing_cheat_index = -1;
+  se_cheat_search_reset();
   se_reset_bios_info();
   emu_state.force_dmg_mode=gui_state.settings.force_dmg_mode;
   //Compute Save File Path
@@ -2559,6 +3686,10 @@ SKYEMU_API void se_load_rom(const char *filename){
     }
     se_load_cheats(cheat_path);
   }
+  // Patch for this ROM, applied once the ROM data has been read
+  if(filename!=gui_state.patch.rom_file)snprintf(gui_state.patch.rom_file,SB_FILE_PATH_SIZE,"%s",filename);
+  gui_state.patch.path[0] = 0;
+  se_find_patch(filename,gui_state.patch.path);
   strncpy(emu_state.rom_path, filename, sizeof(emu_state.rom_path));
 
   if(emu_state.rom_loaded){
@@ -2602,7 +3733,10 @@ SKYEMU_API void se_load_rom(const char *filename){
               emu_state.rom_data = file_data;
           }
         }
-        if(success)se_load_rom_from_emu_state(&emu_state);
+        if(success){
+          se_soft_patch_rom();
+          se_load_rom_from_emu_state(&emu_state);
+        }
         if(emu_state.rom_loaded)break;
       }
       mz_zip_reader_end(&zip);
@@ -2610,6 +3744,7 @@ SKYEMU_API void se_load_rom(const char *filename){
 
   }else{
     emu_state.rom_data = sb_load_file_data(emu_state.rom_path, &emu_state.rom_size);
+    se_soft_patch_rom();
     se_load_rom_from_emu_state(&emu_state);
   }
   if(emu_state.rom_loaded==false){
@@ -2663,7 +3798,7 @@ SKYEMU_API void se_stretch_to_fit(int fit) {
 }
 
 SKYEMU_API void se_set_screen_shader(uint32_t shader_mode) {
-    if (shader_mode <= 4) {
+    if (shader_mode < SE_SCREEN_SHADER_COUNT) {
         gui_state.settings.screen_shader = shader_mode;
     }
 }
@@ -2686,6 +3821,43 @@ SKYEMU_API void se_set_theme(uint32_t theme) {
 }
 SKYEMU_API uint32_t se_get_theme(void) {
     return gui_state.settings.theme;
+}
+
+SKYEMU_API void se_set_design_system(uint32_t design) {
+    gui_state.settings.design_system = design<SE_DESIGN_COUNT? design : SE_DESIGN_AUTO;
+}
+SKYEMU_API uint32_t se_get_design_system(void) {
+    return gui_state.settings.design_system;
+}
+SKYEMU_API void se_set_color_scheme(uint32_t scheme) {
+    gui_state.settings.color_scheme = scheme<SE_COLOR_SCHEME_COUNT? scheme : SE_COLOR_SCHEME_SYSTEM;
+}
+SKYEMU_API uint32_t se_get_color_scheme(void) {
+    return gui_state.settings.color_scheme;
+}
+SKYEMU_API void se_set_accent_color(uint32_t rgb) {
+    gui_state.settings.use_custom_accent = rgb!=SE_ACCENT_NONE;
+    if(gui_state.settings.use_custom_accent)gui_state.settings.custom_accent = rgb&0xffffff;
+}
+SKYEMU_API uint32_t se_get_accent_color(void) {
+    return gui_state.settings.use_custom_accent? gui_state.settings.custom_accent&0xffffff : SE_ACCENT_NONE;
+}
+SKYEMU_API void se_set_contrast(uint32_t contrast) {
+    gui_state.settings.contrast = contrast<SE_CONTRAST_COUNT? contrast : SE_CONTRAST_SYSTEM;
+}
+SKYEMU_API uint32_t se_get_contrast(void) {
+    return gui_state.settings.contrast;
+}
+SKYEMU_API void se_set_system_high_contrast(int high_contrast) {
+    gui_state.host_high_contrast = high_contrast<0? -1 : high_contrast!=0;
+    gui_state.last_appearance_query = 0;
+}
+SKYEMU_API void se_set_system_appearance(int dark, uint32_t accent_rgb) {
+    gui_state.host_appearance_set = true;
+    gui_state.host_dark = dark<0? -1 : dark!=0;
+    gui_state.host_accent = accent_rgb==SE_ACCENT_NONE? SE_ACCENT_NONE : accent_rgb&0xffffff;
+    // Re-query on the next frame so the change is applied right away
+    gui_state.last_appearance_query = 0;
 }
 
 SKYEMU_API void se_set_gb_palette(int index, uint32_t color) {
@@ -2769,6 +3941,21 @@ SKYEMU_API void se_set_touch_controls_show_turbo(uint32_t value) {
 SKYEMU_API uint32_t se_get_touch_controls_show_turbo(void) {
     return gui_state.settings.touch_controls_show_turbo;
 }
+SKYEMU_API void se_set_touch_controller(int shown) {
+    gui_state.settings.touch_controller_off = !shown;
+}
+SKYEMU_API int se_get_touch_controller(void) {
+    return !gui_state.settings.touch_controller_off;
+}
+SKYEMU_API void se_set_touch_controls_show_speed(uint32_t value) {
+    gui_state.settings.touch_controls_show_speed = value!=0;
+}
+SKYEMU_API uint32_t se_get_touch_controls_show_speed(void) {
+    return gui_state.settings.touch_controls_show_speed;
+}
+SKYEMU_API void se_reset_touch_layout(void) {
+    memset(gui_state.settings.touch_layout,0,sizeof(gui_state.settings.touch_layout));
+}
 
 SKYEMU_API void se_set_save_to_path(uint32_t value) {
     gui_state.settings.save_to_path = value;
@@ -2821,6 +4008,7 @@ SKYEMU_API float se_get_custom_font_scale(void) {
 
 SKYEMU_API void se_set_hardcore_mode(uint32_t value) {
     gui_state.settings.hardcore_mode = value;
+    gui_state.ra_apply_options = true;
 }
 SKYEMU_API uint32_t se_get_hardcore_mode(void) {
     return gui_state.settings.hardcore_mode;
@@ -2868,6 +4056,112 @@ SKYEMU_API uint32_t se_get_only_one_notification(void) {
     return gui_state.settings.only_one_notification;
 }
 
+// RetroAchievements account and options, see skyemu_dll.h
+SKYEMU_API void se_set_ra_unofficial(int enabled){
+  gui_state.settings.ra_unofficial = enabled!=0;
+  gui_state.ra_apply_options = true;
+}
+SKYEMU_API int se_get_ra_unofficial(void){return gui_state.settings.ra_unofficial;}
+SKYEMU_API void se_set_ra_spectator(int enabled){
+  gui_state.settings.ra_spectator = enabled!=0;
+  gui_state.ra_apply_options = true;
+}
+SKYEMU_API int se_get_ra_spectator(void){return gui_state.settings.ra_spectator;}
+SKYEMU_API void se_ra_login(const char* username, const char* password){
+#ifdef ENABLE_RETRO_ACHIEVEMENTS
+  if(!username||!password||retro_achievements_is_pending_login())return;
+  // Like the login in the menu: Hardcore Mode is turned on again by the player
+  gui_state.ra_needs_reload = true;
+  gui_state.settings.hardcore_mode = false;
+  retro_achievements_login(username,password);
+#endif
+}
+SKYEMU_API void se_ra_logout(void){
+#ifdef ENABLE_RETRO_ACHIEVEMENTS
+  char buffer[SB_FILE_PATH_SIZE];
+  snprintf(buffer, SB_FILE_PATH_SIZE, "%sra_token.txt", se_get_pref_path());
+  remove(buffer);
+  rc_client_logout(retro_achievements_get_client());
+#endif
+}
+SKYEMU_API int se_ra_get_login_state(void){
+#ifdef ENABLE_RETRO_ACHIEVEMENTS
+  if(rc_client_get_user_info(retro_achievements_get_client()))return 2;
+  if(retro_achievements_is_pending_login())return 1;
+#endif
+  return 0;
+}
+SKYEMU_API const char* se_ra_get_login_error(void){
+#ifdef ENABLE_RETRO_ACHIEVEMENTS
+  const char* error = retro_achievements_get_login_error();
+  return error? error : "";
+#else
+  return "RetroAchievements is not available in this build";
+#endif
+}
+static void se_achievements_json(se_string_t* out){
+#ifdef ENABLE_RETRO_ACHIEVEMENTS
+  rc_client_t* client = retro_achievements_get_client();
+  const rc_client_user_t* user = rc_client_get_user_info(client);
+  se_string_printf(out,"{\n  \"available\": true,\n  \"logged_in\": %s",user? "true" : "false");
+  if(!user){
+    const char* error = retro_achievements_get_login_error();
+    se_string_printf(out,",\n  \"pending_login\": %s",retro_achievements_is_pending_login()? "true" : "false");
+    if(error)se_string_printf(out,",\n  \"login_error\": \"%s\"",se_json_escaped(error));
+    se_string_printf(out,"\n}");
+    return;
+  }
+  se_string_printf(out,",\n  \"user\": {\"username\": \"%s\", \"display_name\": \"%s\", \"score\": %u, \"score_softcore\": %u}",
+                   se_json_escaped(user->username),se_json_escaped(user->display_name),user->score,user->score_softcore);
+  se_string_printf(out,",\n  \"hardcore\": %s, \"encore\": %s, \"unofficial\": %s, \"spectator\": %s",
+                   rc_client_get_hardcore_enabled(client)? "true" : "false",rc_client_get_encore_mode_enabled(client)? "true" : "false",
+                   rc_client_get_unofficial_enabled(client)? "true" : "false",rc_client_get_spectator_mode_enabled(client)? "true" : "false");
+  const rc_client_game_t* game = rc_client_get_game_info(client);
+  if(game){
+    char rich_presence[256] = "";
+    if(rc_client_has_rich_presence(client))rc_client_get_rich_presence_message(client,rich_presence,sizeof(rich_presence));
+    se_string_printf(out,",\n  \"game\": {\"id\": %u, \"title\": \"%s\", \"hash\": \"%s\", \"rich_presence\": \"%s\"}",
+                     game->id,se_json_escaped(game->title),se_json_escaped(game->hash),se_json_escaped(rich_presence));
+    rc_client_user_game_summary_t summary;
+    rc_client_get_user_game_summary(client,&summary);
+    se_string_printf(out,",\n  \"summary\": {\"achievements\": %u, \"unlocked\": %u, \"unofficial\": %u, \"unsupported\": %u, \"points\": %u, \"points_unlocked\": %u}",
+                     summary.num_core_achievements,summary.num_unlocked_achievements,summary.num_unofficial_achievements,
+                     summary.num_unsupported_achievements,summary.points_core,summary.points_unlocked);
+    int category = rc_client_get_unofficial_enabled(client)? RC_CLIENT_ACHIEVEMENT_CATEGORY_CORE_AND_UNOFFICIAL : RC_CLIENT_ACHIEVEMENT_CATEGORY_CORE;
+    rc_client_achievement_list_t* list = rc_client_create_achievement_list(client,category,RC_CLIENT_ACHIEVEMENT_LIST_GROUPING_LOCK_STATE);
+    se_string_printf(out,",\n  \"achievements\": [");
+    bool first = true;
+    for(uint32_t b=0;list&&b<list->num_buckets;++b){
+      for(uint32_t i=0;i<list->buckets[b].num_achievements;++i){
+        const rc_client_achievement_t* a = list->buckets[b].achievements[i];
+        char badge[256] = "";
+        rc_client_achievement_get_image_url(a,a->state,badge,sizeof(badge));
+        se_string_printf(out,"%s\n    {\"id\": %u, \"title\": \"%s\", \"description\": \"%s\", \"points\": %u, \"unlocked\": %s, "
+                         "\"unlocked_hardcore\": %s, \"unlock_time\": %lld, \"unofficial\": %s, \"bucket\": \"%s\", \"progress\": \"%s\", "
+                         "\"percent\": %.1f, \"rarity\": %.2f, \"rarity_hardcore\": %.2f, \"badge_url\": \"%s\"}",
+                         first? "" : ",",a->id,se_json_escaped(a->title),se_json_escaped(a->description),a->points,
+                         a->state==RC_CLIENT_ACHIEVEMENT_STATE_UNLOCKED? "true" : "false",
+                         (a->unlocked&RC_CLIENT_ACHIEVEMENT_UNLOCKED_HARDCORE)? "true" : "false",(long long)a->unlock_time,
+                         a->category==RC_CLIENT_ACHIEVEMENT_CATEGORY_UNOFFICIAL? "true" : "false",se_json_escaped(list->buckets[b].label),
+                         se_json_escaped(a->measured_progress),a->measured_percent,a->rarity,a->rarity_hardcore,se_json_escaped(badge));
+        first = false;
+      }
+    }
+    if(list)rc_client_destroy_achievement_list(list);
+    se_string_printf(out,first? "]" : "\n  ]");
+  }
+  se_string_printf(out,"\n}");
+#else
+  se_string_printf(out,"{\"available\": false}");
+#endif
+}
+SKYEMU_API const char* se_get_achievements_json(void){
+  static se_string_t kept;
+  se_string_t json = {0};
+  se_achievements_json(&json);
+  return se_keep_json(&kept,&json);
+}
+
 SKYEMU_API void se_set_enable_download_cache(uint32_t value) {
     gui_state.settings.enable_download_cache = value;
 }
@@ -2881,6 +4175,16 @@ SKYEMU_API void se_set_nds_layout(uint32_t layout) {
 SKYEMU_API uint32_t se_get_nds_layout(void) {
     return gui_state.settings.nds_layout;
 }
+SKYEMU_API void se_set_nds_swap_screens(uint32_t swap){gui_state.settings.nds_swap_screens = swap!=0;}
+SKYEMU_API uint32_t se_get_nds_swap_screens(void){return gui_state.settings.nds_swap_screens;}
+SKYEMU_API void se_set_nds_screen_gap(uint32_t gap){gui_state.settings.nds_screen_gap = gap>96? 96 : gap;}
+SKYEMU_API uint32_t se_get_nds_screen_gap(void){return gui_state.settings.nds_screen_gap;}
+SKYEMU_API void se_set_nds_small_screen(uint32_t percent){
+  if(percent<25)percent = 25;
+  if(percent>100)percent = 100;
+  gui_state.settings.nds_small_screen = percent;
+}
+SKYEMU_API uint32_t se_get_nds_small_screen(void){return gui_state.settings.nds_small_screen? gui_state.settings.nds_small_screen : 50;}
 
 SKYEMU_API void se_set_touch_screen_show_button_labels(uint32_t value) {
     gui_state.settings.touch_screen_show_button_labels = value;
@@ -3055,6 +4359,7 @@ static void se_emulate_single_frame(){
   }
 #endif
   se_run_all_ar_cheats(se_run_ar_cheat);
+  se_rec_on_frame();
 }
 static void se_screenshot(uint8_t * output_buffer, int * out_width, int * out_height){
   *out_height=*out_width=0;
@@ -3075,6 +4380,801 @@ static void se_screenshot(uint8_t * output_buffer, int * out_width, int * out_he
   }
   for(int i=3;i<SE_MAX_SCREENSHOT_SIZE;i+=4)output_buffer[i]=0xff;
 }
+
+///////////////////////////////
+// Recording and screenshots //
+///////////////////////////////
+// Videos and replays record every emulated frame with the audio the core made for it, so they
+// play at normal speed even when the game was fast forwarded. The image is the console's own
+// screen, without shaders, color correction or the GUI.
+static const int se_rec_replay_seconds[5] = {0,15,30,60,120};
+// Frames emulated since SkyEmu started, the streams use it to find new frames
+static uint64_t se_frames_emulated;
+static bool se_stream_audio_wanted(void);
+static void se_stream_publish_audio(const int16_t* samples, size_t frames);
+static struct{
+  se_avi_writer_t* video;
+  se_wav_writer_t* audio;
+  char video_path[SB_FILE_PATH_SIZE], audio_path[SB_FILE_PATH_SIZE];
+  double video_start, audio_start;   // se_time() when they started
+  se_avi_format_t video_format;
+  int video_scale, video_w, video_h; // Scale and console screen size of the video
+  // Samples the core made since the last frame
+  int16_t* samples;
+  size_t sample_frames, sample_capacity;
+  // Frames and samples since the tap was turned on, to keep the sound in step with the frames
+  uint64_t tap_frames, tap_samples;
+  se_record_buffer_t scratch, encoded, replay_encoded;
+  se_replay_buffer_t replay;
+  se_avi_format_t replay_format;
+  int replay_scale, replay_w, replay_h, replay_seconds;
+  uint8_t frame[SE_MAX_SCREENSHOT_SIZE];
+  char last_file[SB_FILE_PATH_SIZE];
+  char message[SB_FILE_PATH_SIZE+160];
+  bool message_error;
+  double message_time;
+}se_rec;
+#ifdef EMSCRIPTEN
+void se_download_emscripten_file(const char * path);
+#endif
+// The HTTP server thread and host apps start and stop recordings too, the public functions lock this
+static mutex_t se_rec_mutex;
+static void se_rec_lock(void){if(se_rec_mutex)mutex_lock(se_rec_mutex);}
+static void se_rec_unlock(void){if(se_rec_mutex)mutex_unlock(se_rec_mutex);}
+
+static void se_rec_set_message(bool error, const char* fmt, ...){
+  va_list args;
+  va_start(args,fmt);
+  vsnprintf(se_rec.message,sizeof(se_rec.message),se_localize_and_cache(fmt),args);
+  va_end(args);
+  se_rec.message_error = error;
+  se_rec.message_time = se_time();
+  printf("%s\n",se_rec.message);
+}
+// 1-4, 2 by default
+static int se_rec_video_scale(void){
+  uint32_t scale = gui_state.settings.record_scale;
+  return scale>=1&&scale<=4? (int)scale : 2;
+}
+// 0 high quality MJPEG, 1 standard MJPEG (smaller files), 2 uncompressed
+static int se_rec_video_quality(void){
+  switch(gui_state.settings.record_format){
+    case 1: return 85;
+    case 2: return 0;
+    default: return 95;
+  }
+}
+static void se_rec_frame_rate(uint32_t* num, uint32_t* den){
+  if(emu_state.system==SYSTEM_NDS){*num = 33513982; *den = 355*263*6;}
+  else if(emu_state.system==SYSTEM_GB){*num = 4194304; *den = 70224;}
+  else {*num = 16777216; *den = 280896;}
+}
+static bool se_rec_capturing(void){
+  return se_rec.video||se_rec.audio||se_rec.replay.capacity||se_stream_audio_wanted();
+}
+static void se_rec_audio_tap(int16_t left, int16_t right){
+  if(se_rec.sample_frames==se_rec.sample_capacity){
+    size_t capacity = se_rec.sample_capacity? se_rec.sample_capacity*2 : 4096;
+    // A frame never makes this many samples, something stopped calling se_rec_on_frame
+    if(capacity>48000*8)return;
+    int16_t* samples = (int16_t*)realloc(se_rec.samples,capacity*2*sizeof(int16_t));
+    if(!samples)return;
+    se_rec.samples = samples;
+    se_rec.sample_capacity = capacity;
+  }
+  se_rec.samples[se_rec.sample_frames*2] = left;
+  se_rec.samples[se_rec.sample_frames*2+1] = right;
+  se_rec.sample_frames++;
+}
+static void se_rec_update_tap(void){
+  bool was_on = emu_state.audio_tap!=NULL;
+  emu_state.audio_tap = se_rec_capturing()? se_rec_audio_tap : NULL;
+  if(!emu_state.audio_tap||!was_on){
+    se_rec.sample_frames = 0;
+    se_rec.tap_frames = se_rec.tap_samples = 0;
+  }
+}
+// The cores make no samples while a game has its sound turned off. Silence is added for those
+// frames (and any larger drift is corrected) so the sound of a recording stays in step with its
+// frames. Normally the cores make exactly the right number of samples and nothing is changed.
+static void se_rec_balance_audio(void){
+  uint32_t num, den;
+  se_rec_frame_rate(&num,&den);
+  se_rec.tap_frames++;
+  uint64_t target = (se_rec.tap_frames*(uint64_t)SE_AUDIO_SAMPLE_RATE*den+num/2)/num;
+  int64_t missing = (int64_t)target-(int64_t)(se_rec.tap_samples+se_rec.sample_frames);
+  int64_t frame_samples = (int64_t)SE_AUDIO_SAMPLE_RATE*den/num;
+  if(missing>frame_samples/2){
+    for(int64_t i=0;i<missing;++i)se_rec_audio_tap(0,0);
+  }else if(missing< -frame_samples/2){
+    int64_t extra = -missing;
+    se_rec.sample_frames = (int64_t)se_rec.sample_frames>extra? se_rec.sample_frames-extra : 0;
+  }
+  se_rec.tap_samples+=se_rec.sample_frames;
+}
+// Folder of new recordings: the Recording Path, or else the folder of the save file (on Android
+// the Movies folder, as app storage can't be browsed). save_folder forces the folder of the save.
+static void se_rec_folder_for(char* out, size_t size, bool save_folder){
+#ifdef EMSCRIPTEN
+  // Files are offered as downloads, see se_rec_finished()
+  snprintf(out,size,"/tmp/");
+  return;
+#endif
+  const char* path = gui_state.paths.recordings;
+  bool custom = path[0]&&strcmp(path,"./")!=0&&strcmp(path,".")!=0;
+#ifdef SE_PLATFORM_ANDROID
+  if(!custom&&!save_folder){
+    path = "/sdcard/Movies/SkyEmu/";
+    custom = true;
+  }
+#endif
+  if(custom&&!save_folder){
+    snprintf(out,size,"%s",path);
+  }else{
+    snprintf(out,size,"%s",emu_state.save_data_base_path);
+    char* slash = strrchr(out,'/');
+    char* backslash = strrchr(out,'\\');
+    if(backslash>slash)slash = backslash;
+    if(slash)slash[1] = 0;
+    else snprintf(out,size,"./");
+  }
+  size_t len = strlen(out);
+  if(len&&out[len-1]!='/'&&out[len-1]!='\\'&&len+1<size){out[len] = '/'; out[len+1] = 0;}
+}
+static void se_rec_folder(char* out, size_t size){se_rec_folder_for(out,size,false);}
+// "<folder>/<game> 2026-10-02 14-05-33.<ext>", with " (2)" and so on when that file exists.
+// When the folder can't be written, the folder of the save file is used.
+static void se_rec_new_path(const char* ext, char* out, size_t size){
+  char folder[SB_FILE_PATH_SIZE];
+  se_rec_folder(folder,sizeof(folder));
+  char test[SB_FILE_PATH_SIZE+32];
+  snprintf(test,sizeof(test),"%s.skyemu-write-test",folder);
+  FILE* probe = se_fopen_mkdir(test,"wb");
+  if(probe){
+    fclose(probe);
+    remove(test);
+  }else se_rec_folder_for(folder,sizeof(folder),true);
+  const char* name = emu_state.save_data_base_path;
+  const char* slash = strrchr(name,'/');
+  const char* backslash = strrchr(name,'\\');
+  if(backslash>slash)slash = backslash;
+  if(slash)name = slash+1;
+  if(!name[0])name = "SkyEmu";
+  time_t now = time(NULL);
+  struct tm* t = localtime(&now);
+  char stamp[32] = "";
+  if(t)strftime(stamp,sizeof(stamp),"%Y-%m-%d %H-%M-%S",t);
+  for(int n=1;n<1000;++n){
+    if(n==1)snprintf(out,size,"%s%s %s.%s",folder,name,stamp,ext);
+    else snprintf(out,size,"%s%s %s (%d).%s",folder,name,stamp,n,ext);
+    char part[SB_FILE_PATH_SIZE];
+    // A split recording continues in "<name> (2).avi", so avoid both
+    se_record_part_path(out,2,part,sizeof(part));
+    if(!sb_file_exists(out)&&!sb_file_exists(part))return;
+  }
+}
+static const char* se_rec_file_name(const char* path){
+  const char* slash = strrchr(path,'/');
+  const char* backslash = strrchr(path,'\\');
+  if(backslash>slash)slash = backslash;
+  return slash? slash+1 : path;
+}
+// Called when a file (and the parts it was split into) is complete
+static void se_rec_finished(const char* path, int parts){
+  snprintf(se_rec.last_file,sizeof(se_rec.last_file),"%s",path);
+#ifdef EMSCRIPTEN
+  for(int p=1;p<=parts;++p){
+    char part[SB_FILE_PATH_SIZE];
+    se_record_part_path(path,p,part,sizeof(part));
+    se_download_emscripten_file(part);
+    remove(part);
+  }
+#else
+  (void)parts;
+#endif
+}
+static void se_rec_stop_video_locked(const char* error){
+  if(!se_rec.video)return;
+  int parts = se_avi_parts(se_rec.video);
+  uint64_t frames = se_avi_frames(se_rec.video);
+  const char* write_error = se_avi_error(se_rec.video);
+  bool ok = se_avi_close(se_rec.video);
+  se_rec.video = NULL;
+  se_rec_update_tap();
+  if(error)se_rec_set_message(true,"Recording stopped: %s",se_localize_and_cache(error));
+  else if(!ok)se_rec_set_message(true,"Recording stopped: %s",se_localize_and_cache(write_error? write_error : "Could not write the video file"));
+  else{
+    double seconds = frames/se_get_sim_fps();
+    se_rec_set_message(false,"Video saved (%d:%02d): %s",(int)seconds/60,(int)seconds%60,se_rec_file_name(se_rec.video_path));
+  }
+  if(frames)se_rec_finished(se_rec.video_path,parts);
+}
+static bool se_rec_start_video_locked(void){
+  if(se_rec.video)return true;
+  if(!emu_state.rom_loaded){
+    se_rec_set_message(true,"Load a game before recording");
+    return false;
+  }
+  int w, h;
+  se_screenshot(se_rec.frame,&w,&h);
+  if(w<=0||h<=0)return false;
+  se_rec.video_scale = se_rec_video_scale();
+  se_rec.video_w = w;
+  se_rec.video_h = h;
+  se_avi_format_t* f = &se_rec.video_format;
+  memset(f,0,sizeof(*f));
+  f->width = w*se_rec.video_scale;
+  f->height = h*se_rec.video_scale;
+  f->quality = se_rec_video_quality();
+  se_rec_frame_rate(&f->fps_num,&f->fps_den);
+  if(!gui_state.settings.record_no_audio){
+    f->audio_rate = SE_AUDIO_SAMPLE_RATE;
+    f->audio_channels = 2;
+  }
+  se_rec_new_path("avi",se_rec.video_path,sizeof(se_rec.video_path));
+  se_rec.video = se_avi_open(se_rec.video_path,f);
+  if(!se_rec.video){
+    se_rec_set_message(true,"Could not create %s",se_rec.video_path);
+    return false;
+  }
+  se_rec.video_start = se_time();
+  se_rec.sample_frames = 0;
+  se_rec_update_tap();
+  se_rec_set_message(false,"Recording video: %s",se_rec_file_name(se_rec.video_path));
+  return true;
+}
+static void se_rec_stop_audio_locked(const char* error){
+  if(!se_rec.audio)return;
+  uint64_t frames = se_wav_frames(se_rec.audio);
+  const char* write_error = se_wav_error(se_rec.audio);
+  bool ok = se_wav_close(se_rec.audio);
+  se_rec.audio = NULL;
+  se_rec_update_tap();
+  if(error)se_rec_set_message(true,"Audio recording stopped: %s",se_localize_and_cache(error));
+  else if(!ok)se_rec_set_message(true,"Audio recording stopped: %s",se_localize_and_cache(write_error? write_error : "Could not write the audio file"));
+  else{
+    double seconds = frames/(double)SE_AUDIO_SAMPLE_RATE;
+    se_rec_set_message(false,"Audio saved (%d:%02d): %s",(int)seconds/60,(int)seconds%60,se_rec_file_name(se_rec.audio_path));
+  }
+  if(frames)se_rec_finished(se_rec.audio_path,1+(int)(frames*4/(2048ull*1024*1024)));
+}
+static bool se_rec_start_audio_locked(void){
+  if(se_rec.audio)return true;
+  if(!emu_state.rom_loaded){
+    se_rec_set_message(true,"Load a game before recording");
+    return false;
+  }
+  se_rec_new_path("wav",se_rec.audio_path,sizeof(se_rec.audio_path));
+  se_rec.audio = se_wav_open(se_rec.audio_path,SE_AUDIO_SAMPLE_RATE,2);
+  if(!se_rec.audio){
+    se_rec_set_message(true,"Could not create %s",se_rec.audio_path);
+    return false;
+  }
+  se_rec.audio_start = se_time();
+  se_rec.sample_frames = 0;
+  se_rec_update_tap();
+  se_rec_set_message(false,"Recording audio: %s",se_rec_file_name(se_rec.audio_path));
+  return true;
+}
+// Sets up, resizes or turns off the replay buffer to match the settings and the running game
+static void se_rec_update_replay(int w, int h){
+  int seconds = se_rec_replay_seconds[gui_state.settings.replay_seconds%5];
+  if(!emu_state.rom_loaded)seconds = 0;
+  int scale = se_rec_video_scale();
+  // Uncompressed frames would need far too much memory, the replay buffer keeps them as JPEG
+  int quality = se_rec_video_quality();
+  if(quality==0)quality = 95;
+  if(!seconds){
+    if(se_rec.replay.capacity)se_replay_free(&se_rec.replay);
+    se_rec.replay_seconds = 0;
+    se_rec_update_tap();
+    return;
+  }
+  if(se_rec.replay.capacity&&seconds==se_rec.replay_seconds&&scale==se_rec.replay_scale&&w==se_rec.replay_w&&
+     h==se_rec.replay_h&&quality==se_rec.replay.quality)return;
+  uint32_t num, den;
+  se_rec_frame_rate(&num,&den);
+  uint32_t capacity = (uint32_t)((uint64_t)seconds*num/den);
+  if(!se_replay_init(&se_rec.replay,capacity,w*scale,h*scale,quality,2)){
+    se_rec_set_message(true,"Not enough memory for the replay buffer");
+    gui_state.settings.replay_seconds = 0;
+  }
+  se_rec.replay_seconds = seconds;
+  se_rec.replay_scale = scale;
+  se_rec.replay_w = w;
+  se_rec.replay_h = h;
+  se_avi_format_t* f = &se_rec.replay_format;
+  memset(f,0,sizeof(*f));
+  f->width = w*scale;
+  f->height = h*scale;
+  f->quality = quality;
+  f->fps_num = num;
+  f->fps_den = den;
+  f->audio_rate = SE_AUDIO_SAMPLE_RATE;
+  f->audio_channels = 2;
+  se_rec_update_tap();
+}
+static bool se_rec_save_replay_locked(void){
+  if(!se_rec.replay.count){
+    se_rec_set_message(true,gui_state.settings.replay_seconds? "The replay buffer is still empty" : "Turn on the replay buffer first");
+    return false;
+  }
+  char path[SB_FILE_PATH_SIZE];
+  se_rec_new_path("avi",path,sizeof(path));
+  if(!se_replay_save(&se_rec.replay,path,&se_rec.replay_format)){
+    se_rec_set_message(true,"Could not save the replay to %s",path);
+    return false;
+  }
+  double seconds = se_rec.replay.count/se_get_sim_fps();
+  se_rec_set_message(false,"Replay saved (last %d s): %s",(int)(seconds+0.5),se_rec_file_name(path));
+  se_rec_finished(path,1);
+  return true;
+}
+static bool se_rec_screenshot_locked(void){
+  if(!emu_state.rom_loaded){
+    se_rec_set_message(true,"Load a game before taking a screenshot");
+    return false;
+  }
+  int w, h;
+  se_screenshot(se_rec.frame,&w,&h);
+  if(w<=0||h<=0)return false;
+  int scale = gui_state.settings.screenshot_scale;
+  if(scale<1||scale>8)scale = 1;
+  uint8_t* data = (uint8_t*)malloc((size_t)w*scale*h*scale*4);
+  if(!data)return false;
+  for(int y=0;y<h*scale;++y)for(int x=0;x<w*scale;++x){
+    memcpy(data+((size_t)y*w*scale+x)*4,se_rec.frame+((size_t)(y/scale)*w+x/scale)*4,4);
+  }
+  char path[SB_FILE_PATH_SIZE];
+  se_rec_new_path("png",path,sizeof(path));
+  bool ok = stbi_write_png(path,w*scale,h*scale,4,data,0)!=0;
+  free(data);
+  if(!ok){
+    se_rec_set_message(true,"Could not save the screenshot to %s",path);
+    return false;
+  }
+  se_rec_set_message(false,"Screenshot saved: %s",se_rec_file_name(path));
+  se_rec_finished(path,1);
+  return true;
+}
+// After every emulated frame
+static void se_rec_on_frame(void){
+  se_frames_emulated++;
+  se_rec_lock();
+  if(emu_state.audio_tap)se_rec_balance_audio();
+  if(se_stream_audio_wanted())se_stream_publish_audio(se_rec.samples,se_rec.sample_frames);
+  bool video = se_rec.video||se_rec.replay.capacity;
+  if(video){
+    int w, h;
+    se_screenshot(se_rec.frame,&w,&h);
+    if(se_rec.video&&(w!=se_rec.video_w||h!=se_rec.video_h))se_rec_stop_video_locked("the screen size changed");
+    if(se_rec.replay.capacity&&(w!=se_rec.replay_w||h!=se_rec.replay_h))se_rec_update_replay(w,h);
+    bool encoded = false;
+    if(se_rec.video){
+      encoded = se_record_encode_frame(se_rec.frame,w,h,se_rec.video_scale,se_rec.video_format.quality,&se_rec.scratch,&se_rec.encoded);
+      bool ok = encoded&&se_avi_add_audio(se_rec.video,se_rec.samples,se_rec.sample_frames)&&
+                se_avi_add_frame(se_rec.video,se_rec.encoded.data,se_rec.encoded.size);
+      if(!ok)se_rec_stop_video_locked(encoded? se_avi_error(se_rec.video) : "not enough memory");
+    }
+    if(se_rec.replay.capacity){
+      // The video's encoding is reused when the formats match
+      se_record_buffer_t* frame = &se_rec.encoded;
+      if(!encoded||se_rec.video_scale!=se_rec.replay_scale||se_rec.video_format.quality!=se_rec.replay.quality){
+        frame = &se_rec.replay_encoded;
+        if(!se_record_encode_frame(se_rec.frame,w,h,se_rec.replay_scale,se_rec.replay.quality,&se_rec.scratch,frame))frame = NULL;
+      }
+      if(frame)se_replay_push(&se_rec.replay,frame->data,frame->size,se_rec.samples,(uint32_t)se_rec.sample_frames);
+    }
+  }
+  if(se_rec.audio&&!se_wav_add_audio(se_rec.audio,se_rec.samples,se_rec.sample_frames))se_rec_stop_audio_locked(se_wav_error(se_rec.audio));
+  se_rec.sample_frames = 0;
+  se_rec_unlock();
+}
+// Finishes the files, for example when another game is loaded or SkyEmu quits
+static void se_rec_stop_all(void){
+  se_rec_lock();
+  se_rec_stop_video_locked(NULL);
+  se_rec_stop_audio_locked(NULL);
+  if(se_rec.replay.capacity)se_replay_clear(&se_rec.replay);
+  se_rec_unlock();
+}
+SKYEMU_API bool se_start_video_recording(void){
+  se_rec_lock();
+  bool ok = se_rec_start_video_locked();
+  se_rec_unlock();
+  return ok;
+}
+SKYEMU_API void se_stop_video_recording(void){
+  se_rec_lock();
+  se_rec_stop_video_locked(NULL);
+  se_rec_unlock();
+}
+SKYEMU_API bool se_is_recording_video(void){return se_rec.video!=NULL;}
+SKYEMU_API bool se_start_audio_recording(void){
+  se_rec_lock();
+  bool ok = se_rec_start_audio_locked();
+  se_rec_unlock();
+  return ok;
+}
+SKYEMU_API void se_stop_audio_recording(void){
+  se_rec_lock();
+  se_rec_stop_audio_locked(NULL);
+  se_rec_unlock();
+}
+SKYEMU_API bool se_is_recording_audio(void){return se_rec.audio!=NULL;}
+SKYEMU_API bool se_save_screenshot(void){
+  se_rec_lock();
+  bool ok = se_rec_screenshot_locked();
+  se_rec_unlock();
+  return ok;
+}
+SKYEMU_API bool se_save_replay(void){
+  se_rec_lock();
+  bool ok = se_rec_save_replay_locked();
+  se_rec_unlock();
+  return ok;
+}
+// Path of the last file saved, and what happened last (both empty at first)
+SKYEMU_API const char* se_get_last_recording_path(void){return se_rec.last_file;}
+SKYEMU_API const char* se_get_recording_message(void){return se_rec.message;}
+SKYEMU_API void se_set_record_scale(int scale){if(scale>=1&&scale<=4)gui_state.settings.record_scale = scale;}
+SKYEMU_API int se_get_record_scale(void){return se_rec_video_scale();}
+SKYEMU_API void se_set_record_format(int format){if(format>=0&&format<=2)gui_state.settings.record_format = format;}
+SKYEMU_API int se_get_record_format(void){return gui_state.settings.record_format%3;}
+SKYEMU_API void se_set_record_audio(int enabled){gui_state.settings.record_no_audio = !enabled;}
+SKYEMU_API int se_get_record_audio(void){return !gui_state.settings.record_no_audio;}
+SKYEMU_API void se_set_replay_seconds(int seconds){
+  for(int i=0;i<5;++i)if(se_rec_replay_seconds[i]==seconds)gui_state.settings.replay_seconds = i;
+}
+SKYEMU_API int se_get_replay_seconds(void){return se_rec_replay_seconds[gui_state.settings.replay_seconds%5];}
+SKYEMU_API void se_set_screenshot_scale(int scale){if(scale>=1&&scale<=8)gui_state.settings.screenshot_scale = scale;}
+SKYEMU_API int se_get_screenshot_scale(void){
+  int scale = gui_state.settings.screenshot_scale;
+  return scale>=1&&scale<=8? scale : 1;
+}
+// Hotkeys and settings changes, once per frame on the main thread
+static void se_rec_update(void){
+  sb_joy_t* curr = &emu_state.joy;
+  sb_joy_t* prev = &emu_state.prev_frame_joy;
+  se_rec_lock();
+  if(curr->inputs[SE_KEY_SCREENSHOT]&&!prev->inputs[SE_KEY_SCREENSHOT])se_rec_screenshot_locked();
+  if(curr->inputs[SE_KEY_RECORD_VIDEO]&&!prev->inputs[SE_KEY_RECORD_VIDEO]){
+    if(se_rec.video)se_rec_stop_video_locked(NULL);
+    else se_rec_start_video_locked();
+  }
+  if(curr->inputs[SE_KEY_SAVE_REPLAY]&&!prev->inputs[SE_KEY_SAVE_REPLAY])se_rec_save_replay_locked();
+  int w = se_rec.replay_w, h = se_rec.replay_h;
+  if(emu_state.rom_loaded&&gui_state.settings.replay_seconds%5&&!se_rec.replay.capacity){
+    // Started before the first frame, the size of the screen is needed
+    se_screenshot(se_rec.frame,&w,&h);
+  }
+  if(w>0&&h>0)se_rec_update_replay(w,h);
+  else if(!(gui_state.settings.replay_seconds%5))se_rec_update_replay(0,0);
+  // The sound stream turns the tap on and off as listeners come and go
+  if((emu_state.audio_tap!=NULL)!=se_rec_capturing())se_rec_update_tap();
+  se_rec_unlock();
+}
+// Length of the video (or audio) recorded so far, paused time is not recorded
+static double se_rec_recorded_seconds(void){
+  if(se_rec.video)return se_avi_frames(se_rec.video)/se_get_sim_fps();
+  if(se_rec.audio)return se_wav_frames(se_rec.audio)/(double)SE_AUDIO_SAMPLE_RATE;
+  return 0;
+}
+static void se_rec_format_time(double seconds, char* out, size_t size){
+  int s = (int)seconds;
+  if(s>=3600)snprintf(out,size,"%d:%02d:%02d",s/3600,(s/60)%60,s%60);
+  else snprintf(out,size,"%d:%02d",s/60,s%60);
+}
+static void se_rec_format_size(uint64_t bytes, char* out, size_t size){
+  if(bytes>=1024ull*1024*1024)snprintf(out,size,"%.2f GB",bytes/(1024.0*1024*1024));
+  else snprintf(out,size,"%.1f MB",bytes/(1024.0*1024));
+}
+// Red "REC 0:12" in the menu bar while recording, clicking it stops the recording
+static void se_rec_draw_menu_bar_indicator(void){
+  se_rec_lock();
+  if(se_rec.video||se_rec.audio){
+    char time[32];
+    double start = se_rec.video? se_rec.video_start : se_rec.audio_start;
+    se_rec_format_time(se_rec_recorded_seconds(),time,sizeof(time));
+    char label[64];
+    snprintf(label,sizeof(label),"%s %s##RecIndicator",se_rec.video? ICON_FK_CIRCLE " REC" : ICON_FK_MICROPHONE " REC",time);
+    // Blinks once a second, like a camera
+    bool on = fmod(se_time()-start,1.0)<0.6;
+    igPushStyleColorU32(ImGuiCol_Text,on? 0xff3b30ff : 0xff6c6cbf);
+    if(se_button(label,(ImVec2){0,SE_MENU_BAR_BUTTON_HEIGHT}))se_rec_stop_video_locked(NULL),se_rec_stop_audio_locked(NULL);
+    igPopStyleColor(1);
+    se_tooltip("Stop recording");
+    igSameLine(0,4);
+  }
+  se_rec_unlock();
+}
+// Short message at the top of the screen when a file was saved or something failed
+static void se_rec_draw_toast(float left, float top, float width){
+  double age = se_time()-se_rec.message_time;
+  if(!se_rec.message[0]||se_rec.message_time==0||age>3.5)return;
+  float alpha = age<3.0? 1.0f : (float)(1.0-(age-3.0)/0.5);
+  ImDrawList* dl = igGetWindowDrawList();
+  const char* icon = se_rec.message_error? ICON_FK_EXCLAMATION_TRIANGLE : ICON_FK_CHECK_CIRCLE;
+  char text[sizeof(se_rec.message)+8];
+  snprintf(text,sizeof(text),"%s  %s",icon,se_rec.message);
+  ImVec2 size;
+  float max_w = width*0.9f;
+  igCalcTextSize(&size,text,NULL,false,max_w);
+  float pad = 10;
+  float x = left+(width-size.x)*0.5f-pad, y = top+12;
+  ImU32 bg = 0xe0202020, fg = se_rec.message_error? 0xff6b6bff : 0xffffffff;
+  if(gui_state.design_active){
+    bg = se_design_u32(se_rec.message_error? gui_state.design.error : gui_state.design.surface_popup);
+    fg = se_design_u32(se_rec.message_error? gui_state.design.on_error : gui_state.design.on_surface);
+  }
+  ImU32 a = (ImU32)(alpha*255.0f);
+  bg = (bg&0x00ffffff)|(((bg>>24)*a/255)<<24);
+  fg = (fg&0x00ffffff)|(((fg>>24)*a/255)<<24);
+  ImDrawList_AddRectFilled(dl,(ImVec2){x,y},(ImVec2){x+size.x+pad*2,y+size.y+pad*1.4f},bg,(size.y+pad*1.4f)*0.5f,ImDrawCornerFlags_All);
+  ImDrawList_AddTextFontPtr(dl,igGetFont(),igGetFontSize(),(ImVec2){x+pad,y+pad*0.7f},fg,text,NULL,max_w,NULL);
+}
+static void se_recording_json(se_string_t* out){
+  se_rec_lock();
+  se_string_printf(out,"{\n  \"video\": {\"recording\": %s",se_rec.video? "true" : "false");
+  if(se_rec.video){
+    se_string_printf(out,", \"file\": \"%s\", \"seconds\": %.1f, \"frames\": %llu, \"bytes\": %llu, \"width\": %d, \"height\": %d",
+                     se_json_escaped(se_rec.video_path),se_avi_frames(se_rec.video)/se_get_sim_fps(),(unsigned long long)se_avi_frames(se_rec.video),
+                     (unsigned long long)se_avi_bytes(se_rec.video),se_rec.video_format.width,se_rec.video_format.height);
+  }
+  se_string_printf(out,"},\n  \"audio\": {\"recording\": %s",se_rec.audio? "true" : "false");
+  if(se_rec.audio){
+    se_string_printf(out,", \"file\": \"%s\", \"seconds\": %.1f",se_json_escaped(se_rec.audio_path),
+                     se_wav_frames(se_rec.audio)/(double)SE_AUDIO_SAMPLE_RATE);
+  }
+  se_string_printf(out,"},\n  \"replay\": {\"seconds\": %d, \"held\": %.1f},\n",se_get_replay_seconds(),
+                   se_rec.replay.count/se_get_sim_fps());
+  se_string_printf(out,"  \"last_file\": \"%s\",\n  \"message\": \"%s\",\n  \"error\": %s\n}",
+                   se_json_escaped(se_rec.last_file),se_json_escaped(se_rec.message),se_rec.message_error? "true" : "false");
+  se_rec_unlock();
+}
+SKYEMU_API const char* se_get_recording_json(void){
+  static se_string_t kept;
+  se_string_t json = {0};
+  se_recording_json(&json);
+  return se_keep_json(&kept,&json);
+}
+static void se_draw_recording_settings(float win_w){
+  if(!se_section(ICON_FK_VIDEO_CAMERA " Recording"))return;
+  se_rec_lock();
+  char time[32], size[32];
+  // Video
+  if(se_rec.video){
+    se_rec_format_time(se_avi_frames(se_rec.video)/se_get_sim_fps(),time,sizeof(time));
+    se_rec_format_size(se_avi_bytes(se_rec.video),size,sizeof(size));
+    igPushStyleColorU32(ImGuiCol_Text,0xff3b30ff);
+    se_text(ICON_FK_CIRCLE " REC %s",time);
+    igPopStyleColor(1);
+    igSameLine(0,6);
+    se_text_disabled("%s",size);
+    if(se_button(ICON_FK_STOP " Stop Video",(ImVec2){0,0}))se_rec_stop_video_locked(NULL);
+  }else if(se_button(ICON_FK_VIDEO_CAMERA " Record Video",(ImVec2){0,0}))se_rec_start_video_locked();
+  igSameLine(0,4);
+  if(se_button(ICON_FK_CAMERA " Screenshot",(ImVec2){0,0}))se_rec_screenshot_locked();
+  // Audio only
+  if(se_rec.audio){
+    se_rec_format_time(se_wav_frames(se_rec.audio)/(double)SE_AUDIO_SAMPLE_RATE,time,sizeof(time));
+    igPushStyleColorU32(ImGuiCol_Text,0xff3b30ff);
+    se_text(ICON_FK_MICROPHONE " REC %s",time);
+    igPopStyleColor(1);
+    if(se_button(ICON_FK_STOP " Stop Audio",(ImVec2){0,0}))se_rec_stop_audio_locked(NULL);
+  }else if(se_button(ICON_FK_MUSIC " Record Audio",(ImVec2){0,0}))se_rec_start_audio_locked();
+  if(se_rec.message[0]){
+    ImU32 color = se_rec.message_error? 0xff0000ff : 0xff00c000;
+    if(gui_state.design_active)color = se_design_u32(se_rec.message_error? gui_state.design.error : gui_state.design.accent_text);
+    igPushStyleColorU32(ImGuiCol_Text,color);
+    se_text("%s",se_rec.message);
+    igPopStyleColor(1);
+  }
+  // Replay buffer
+  int replay = gui_state.settings.replay_seconds%5;
+  se_field_label("Replay Buffer");igSameLine(SE_FIELD_INDENT,0);
+  igPushItemWidth(-1);
+  if(se_combo_str("##ReplayBuffer",&replay,"Off\0""15 seconds\0""30 seconds\0""1 minute\0""2 minutes\0",0)){
+    gui_state.settings.replay_seconds = replay;
+  }
+  igPopItemWidth();
+  if(se_rec.replay.capacity){
+    uint64_t bytes = 0;
+    for(uint32_t i=0;i<se_rec.replay.capacity;++i)bytes+=se_rec.replay.frames[i].video.capacity+se_rec.replay.frames[i].audio_capacity*4;
+    se_rec_format_size(bytes,size,sizeof(size));
+    se_rec_format_time(se_rec.replay.count/se_get_sim_fps(),time,sizeof(time));
+    if(se_button(ICON_FK_HISTORY " Save Replay",(ImVec2){0,0}))se_rec_save_replay_locked();
+    igSameLine(0,6);
+    igAlignTextToFramePadding();
+    se_text_disabled(se_localize_and_cache("%s held, %s of memory"),time,size);
+  }else se_text_disabled("Keeps the last seconds of play, to save them after something happened.");
+  // Options, used by the next recording
+  int scale = se_rec_video_scale()-1;
+  int w = 240, h = 160;
+  if(emu_state.system==SYSTEM_GB){w = 160; h = 144;}
+  if(emu_state.system==SYSTEM_NDS){w = 256; h = 384;}
+  char sizes[256];
+  int off = 0;
+  for(int i=1;i<=4;++i)off+=snprintf(sizes+off,sizeof(sizes)-off,"%dx (%dx%d)",i,w*i,h*i)+1;
+  sizes[off] = 0;
+  se_field_label("Video Size");igSameLine(SE_FIELD_INDENT,0);
+  igPushItemWidth(-1);
+  // Sizes depend on the console, so they are not translated
+  const char* size_items[4];
+  const char* p = sizes;
+  for(int i=0;i<4;++i){size_items[i] = p; p+=strlen(p)+1;}
+  se_design_push_combo_style();
+  if(igComboStr_arr("##VideoSize",&scale,size_items,4,0))gui_state.settings.record_scale = scale+1;
+  se_design_pop_combo_style();
+  igPopItemWidth();
+  int format = gui_state.settings.record_format%3;
+  se_field_label("Video Quality");igSameLine(SE_FIELD_INDENT,0);
+  igPushItemWidth(-1);
+  if(se_combo_str("##VideoQuality",&format,"High\0Standard (smaller files)\0Lossless (very large files)\0",0)){
+    gui_state.settings.record_format = format;
+  }
+  igPopItemWidth();
+  bool sound = !gui_state.settings.record_no_audio;
+  if(se_checkbox("Record Sound in Videos",&sound))gui_state.settings.record_no_audio = !sound;
+  int shot = se_get_screenshot_scale()-1;
+  se_field_label("Screenshot Size");igSameLine(SE_FIELD_INDENT,0);
+  igPushItemWidth(-1);
+  if(se_combo_str("##ScreenshotSize",&shot,"1x\0""2x\0""3x\0""4x\0""5x\0""6x\0""7x\0""8x\0",0))gui_state.settings.screenshot_scale = shot+1;
+  igPopItemWidth();
+  char folder[SB_FILE_PATH_SIZE];
+  se_rec_folder(folder,sizeof(folder));
+#ifdef EMSCRIPTEN
+  se_text_disabled("Recordings and screenshots are downloaded by the browser.");
+#else
+  se_text_disabled(se_localize_and_cache("Saved in %s"),folder);
+#endif
+  se_rec_unlock();
+  (void)win_w;
+}
+
+///////////////////
+// Streaming     //
+///////////////////
+// The HTTP control server streams the game as MJPEG video and WAV sound, and serves a Remote Play
+// page and an overlay for streaming software. Frames are only encoded while someone watches.
+#ifdef ENABLE_HTTP_CONTROL_SERVER
+static struct{
+  se_record_buffer_t scratch, jpeg;
+  uint8_t frame[SE_MAX_SCREENSHOT_SIZE];
+  uint64_t published_frame;
+  double last_publish;
+  bool audio_active;
+  double audio_start;
+  uint64_t audio_published;
+}se_stream;
+static int se_stream_scale(void){
+  uint32_t scale = gui_state.settings.stream_scale;
+  return scale>=1&&scale<=3? (int)scale : 2;
+}
+static bool se_stream_audio_wanted(void){
+  return gui_state.settings.http_control_server_enable&&hcs_stream_audio_clients()>0;
+}
+// Sound for the WAV stream, at most as fast as real time: fast forward would only make the
+// listeners fall behind
+static void se_stream_publish_audio(const int16_t* samples, size_t frames){
+  double now = se_time();
+  if(!se_stream.audio_active){
+    se_stream.audio_active = true;
+    se_stream.audio_start = now;
+    se_stream.audio_published = 0;
+  }
+  double elapsed = now-se_stream.audio_start;
+  // Restart the clock after a pause or a slow down, so the next sound is not dropped
+  if(se_stream.audio_published<(elapsed-0.5)*SE_AUDIO_SAMPLE_RATE){
+    se_stream.audio_start = now-se_stream.audio_published/(double)SE_AUDIO_SAMPLE_RATE;
+    elapsed = now-se_stream.audio_start;
+  }
+  if(se_stream.audio_published+frames>(elapsed+0.25)*SE_AUDIO_SAMPLE_RATE)return;
+  hcs_stream_publish_audio(samples,frames);
+  se_stream.audio_published+=frames;
+}
+// Once per displayed frame on the main thread: the newest frame for the MJPEG viewers
+static void se_stream_update(void){
+  if(!se_stream_audio_wanted())se_stream.audio_active = false;
+  if(!gui_state.settings.http_control_server_enable||hcs_stream_video_clients()<=0||!emu_state.rom_loaded)return;
+  if(se_frames_emulated==se_stream.published_frame)return;
+  double now = se_time();
+  if(gui_state.settings.stream_fps==1&&now-se_stream.last_publish<1.0/30*0.9)return;
+  int w, h;
+  se_screenshot(se_stream.frame,&w,&h);
+  if(w<=0||h<=0)return;
+  if(!se_record_encode_frame(se_stream.frame,w,h,se_stream_scale(),85,&se_stream.scratch,&se_stream.jpeg))return;
+  hcs_stream_publish_frame(se_stream.jpeg.data,se_stream.jpeg.size);
+  se_stream.published_frame = se_frames_emulated;
+  se_stream.last_publish = now;
+}
+static const char* se_stream_system_name(void){
+  switch(emu_state.system){
+    case SYSTEM_GB: return "GB";
+    case SYSTEM_GBA: return "GBA";
+    case SYSTEM_NDS: return "NDS";
+    default: return "";
+  }
+}
+// Console buttons held in the last frame, for the overlay and the Remote Play page
+static void se_input_state_json(se_string_t* out){
+  const char* game = "";
+  if(emu_state.rom_loaded){
+    game = emu_state.save_data_base_path;
+    const char* slash = strrchr(game,'/');
+    const char* backslash = strrchr(game,'\\');
+    if(backslash>slash)slash = backslash;
+    if(slash)game = slash+1;
+  }
+  bool running = emu_state.run_mode==SB_MODE_RUN||emu_state.run_mode==SB_MODE_REWIND;
+  se_string_printf(out,"{\"system\": \"%s\", \"game\": \"%s\", \"running\": %s, \"inputs\": {",se_stream_system_name(),
+                   se_json_escaped(game),running? "true" : "false");
+  // A, B, X, Y, Up, Down, Left, Right, L, R, Start, Select
+  for(int i=0;i<=SE_KEY_SELECT;++i){
+    se_string_printf(out,"%s\"%s\": %d",i? ", " : "",se_keybind_names[i],emu_state.prev_frame_joy.inputs[i]>0.5);
+  }
+  se_string_printf(out,"}}");
+}
+static void se_draw_streaming_settings(float win_w){
+  if(!se_section(ICON_FK_PODCAST " Streaming"))return;
+  bool enabled = gui_state.settings.http_control_server_enable;
+  if(se_checkbox("Streaming and Remote Play",&enabled))gui_state.settings.http_control_server_enable = enabled;
+  if(!enabled){
+    se_text_disabled("Watch and play on another device on your network, or show the game in streaming software such as OBS.");
+    return;
+  }
+  char base[96];
+  snprintf(base,sizeof(base),"http://%s:%d",hcs_local_ip(),gui_state.settings.http_control_server_port);
+  static const char* labels[4] = {"Remote Play","OBS Overlay","Video","Sound"};
+  static const char* paths[4] = {"/remote","/overlay","/stream.mjpg","/stream.wav"};
+  for(int i=0;i<4;++i){
+    char url[160];
+    snprintf(url,sizeof(url),"%s%s",base,paths[i]);
+    igPushIDInt(i);
+    se_field_label(labels[i]);
+    igSameLine(SE_FIELD_INDENT-25,0);
+    igPushFont(gui_state.mono_font);
+    se_text_disabled("%s",paths[i]);
+    igPopFont();
+    igSameLine(win_w-15,0);
+    if(se_button(ICON_FK_CLIPBOARD,(ImVec2){-1,0})){
+      igSetClipboardText(url);
+      se_rec_set_message(false,"Copied %s",url);
+    }
+    if(igIsItemHovered(ImGuiHoveredFlags_None))igSetTooltip("%s %s",se_localize_and_cache("Copy"),url);
+    igPopID();
+  }
+  se_text_disabled(se_localize_and_cache("Open %s/remote in a browser on your phone or computer."),base);
+  int watching = hcs_stream_video_clients(), listening = hcs_stream_audio_clients();
+  if(watching||listening)se_text(se_localize_and_cache("%d watching, %d listening"),watching,listening);
+  int scale = se_stream_scale()-1;
+  se_field_label("Stream Size");igSameLine(SE_FIELD_INDENT,0);
+  igPushItemWidth(-1);
+  if(se_combo_str("##StreamSize",&scale,"1x\0""2x\0""3x\0",0))gui_state.settings.stream_scale = scale+1;
+  igPopItemWidth();
+  int fps = gui_state.settings.stream_fps==1;
+  se_field_label("Frame Rate");igSameLine(SE_FIELD_INDENT,0);
+  igPushItemWidth(-1);
+  if(se_combo_str("##StreamFps",&fps,"60 fps\0""30 fps (less data)\0",0))gui_state.settings.stream_fps = fps;
+  igPopItemWidth();
+  ImU32 warning = gui_state.design_active? se_design_u32(gui_state.design.error) : 0xff0080ff;
+  igPushStyleColorU32(ImGuiCol_Text,warning);
+  se_text(ICON_FK_EXCLAMATION_TRIANGLE " %s",se_localize_and_cache("Devices on your network can open these pages and control SkyEmu. Turn this off on networks you don't trust."));
+  igPopStyleColor(1);
+}
+SKYEMU_API void se_set_stream_scale(int scale){if(scale>=1&&scale<=3)gui_state.settings.stream_scale = scale;}
+SKYEMU_API int se_get_stream_scale(void){return se_stream_scale();}
+SKYEMU_API void se_set_stream_fps(int fps){gui_state.settings.stream_fps = fps==30;}
+SKYEMU_API int se_get_stream_fps(void){return gui_state.settings.stream_fps==1? 30 : 60;}
+#else
+static bool se_stream_audio_wanted(void){return false;}
+static void se_stream_publish_audio(const int16_t* samples, size_t frames){(void)samples; (void)frames;}
+static void se_stream_update(void){}
+SKYEMU_API void se_set_stream_scale(int scale){(void)scale;}
+SKYEMU_API int se_get_stream_scale(void){return 0;}
+SKYEMU_API void se_set_stream_fps(int fps){(void)fps;}
+SKYEMU_API int se_get_stream_fps(void){return 0;}
+#endif
 
 /*
  * SkyEmu Framebuffer Interface for C# / External Applications
@@ -3226,6 +5326,41 @@ void se_draw_lcd_defer(uint8_t *data, int im_width, int im_height,int x, int y, 
   call->is_touch=is_touch;
   ImDrawList_AddCallback(igGetWindowDrawList(),se_draw_lcd_callback,call);
 }
+// Places the game screen for the design systems, which do not draw a skin: centered, above the
+// on-screen controller in portrait when there is room, and between its two halves in landscape
+// when overlap is prevented.
+static void se_draw_screen_around_controller(float x, float y, float w, float h, float min_dim, bool portrait, bool controller){
+  float pad = h*0.025f;
+  float ax = x, ay = y, aw = w, ah = h;
+  bool top_aligned = false;
+  // The overlap options follow the orientation of the window, the controller below the screen
+  // (portrait) or beside it is chosen by whichever gives the larger screen
+  bool avoid = gui_state.settings.avoid_overlaping_touchscreen&(w<h? SE_AVOID_OVERLAP_PORTRAIT : SE_AVOID_OVERLAP_LANDSCAPE);
+  if(controller&&min_dim>0){
+    float controller_h = min_dim*0.5f;
+    if(portrait){
+      int nds_layout = gui_state.settings.nds_layout;
+      float nw = w, nh = h;
+      se_compute_draw_lcd_rect(&nw,&nh,&nds_layout);
+      float top_h = h-controller_h-pad;
+      if(top_h>0&&(avoid||nh<=top_h))ah = top_h;
+      else top_aligned = true;
+    }else if(avoid){
+      float side = fminf(w-pad*2,controller_h)*0.5f+pad;
+      if(w-side*2>0){
+        ax = x+side;
+        aw = w-side*2;
+      }
+    }
+  }
+  int nds_layout = gui_state.settings.nds_layout;
+  float lw = aw, lh = ah;
+  se_compute_draw_lcd_rect(&lw,&lh,&nds_layout);
+  float cx = ax+aw*0.5f;
+  float cy = top_aligned? ay+lh*0.5f : ay+ah*0.5f;
+  float dpi_scale = se_dpi_scale();
+  se_draw_lcd_in_rect(ceilf(cx*dpi_scale)/dpi_scale,ceilf(cy*dpi_scale)/dpi_scale,lw,lh,nds_layout);
+}
 static void se_draw_emulated_system_screen(bool preview){
   float scr_w = igGetWindowWidth();
   float scr_h = igGetWindowHeight();
@@ -3240,7 +5375,9 @@ static void se_draw_emulated_system_screen(bool preview){
   float dims[2]={scr_w/se_dpi_scale(),scr_h/se_dpi_scale()};
   bool portrait = false; 
   float min_dim = se_compute_touchscreen_controls_min_dim(scr_w,scr_h, &portrait);
-  bool touch_controller_active = false;
+  bool editing = gui_state.touch_editor_open&&!preview;
+  // The previews in the settings show the layout whenever the controller is enabled
+  bool touch_controller_active = editing? true : preview? !gui_state.settings.touch_controller_off : se_touch_controller_shown();
   if(!touch_controller_active)min_dim = 0;
 
   float native_w = dims[0], native_h = dims[1];
@@ -3250,7 +5387,11 @@ static void se_draw_emulated_system_screen(bool preview){
   igGetWindowPos(&win_pos);
 
   int result =0;
-  if(!gui_state.settings.show_screen_bezel)result = se_draw_theme_region(SE_REGION_NO_BEZEL, win_pos.x,win_pos.y,dims[0],dims[1]);
+  if(gui_state.design_active){
+    se_draw_screen_around_controller(win_pos.x,win_pos.y,dims[0],dims[1],min_dim,portrait,touch_controller_active);
+    result = SE_THEME_DREW_BACKGROUND|SE_THEME_DREW_SCREEN;
+  }
+  if(!result&&!gui_state.settings.show_screen_bezel)result = se_draw_theme_region(SE_REGION_NO_BEZEL, win_pos.x,win_pos.y,dims[0],dims[1]);
 
   if(!result)result =  se_draw_theme_region(portrait?SE_REGION_BEZEL_PORTRAIT:SE_REGION_BEZEL_LANDSCAPE, win_pos.x,win_pos.y,dims[0],dims[1]);
   if(!result)result = se_draw_theme_region(SE_REGION_BEZEL_PORTRAIT, win_pos.x,win_pos.y,dims[0],dims[1]);
@@ -3274,8 +5415,26 @@ static void se_draw_emulated_system_screen(bool preview){
     
     float adj_w = w;
     if(adj_w>min_dim_adj)adj_w=min_dim_adj;
-    se_draw_onscreen_controller(&emu_state, SE_GAMEPAD_LEFT,x,y,adj_w*0.5,h, preview,false);
-    se_draw_onscreen_controller(&emu_state, SE_GAMEPAD_RIGHT,x+w-adj_w*0.5,y,adj_w*0.5,h, preview,false);
+    gui_state.touch_canvas.x = win_pos.x;
+    gui_state.touch_canvas.y = win_pos.y;
+    gui_state.touch_canvas.w = dims[0];
+    gui_state.touch_canvas.h = dims[1];
+    // Custom layouts are kept per window orientation
+    gui_state.touch_canvas.portrait = dims[1]>dims[0];
+    gui_state.touch_canvas.editor = editing;
+    gui_state.touch_canvas.record = !preview;
+    if(!preview){
+      for(int e=0;e<SE_TOUCH_NUM_ELEMENTS;++e){
+        float* r = gui_state.touch_element_bounds[e];
+        r[0] = r[1] = 1e30f;
+        r[2] = r[3] = -1e30f;
+      }
+    }
+    se_draw_onscreen_controller(&emu_state, SE_GAMEPAD_LEFT,x,y,adj_w*0.5,h, preview||editing,false);
+    se_draw_onscreen_controller(&emu_state, SE_GAMEPAD_RIGHT,x+w-adj_w*0.5,y,adj_w*0.5,h, preview||editing,false);
+    gui_state.touch_canvas.editor = false;
+    gui_state.touch_canvas.record = false;
+    if(editing)se_touch_layout_editor_canvas(win_pos.x,win_pos.y,dims[0],dims[1],gui_state.touch_canvas.portrait);
   }
 }
 static uint8_t gba_byte_read(uint64_t address){return gba_read8_debug(&core.gba,address);}
@@ -3662,38 +5821,44 @@ static float se_draw_debug_panels(float screen_x, float sidebar_w, float y, floa
   }
   return screen_x;
 }
-void se_set_default_keybind(gui_state_t *gui){
-  for(int i=0;i<SE_NUM_KEYBINDS;++i)gui->key.bound_id[i]=-1;
-  gui->key.bound_id[SE_KEY_A]     = SAPP_KEYCODE_J;  
-  gui->key.bound_id[SE_KEY_B]     = SAPP_KEYCODE_K;
-  gui->key.bound_id[SE_KEY_X]     = SAPP_KEYCODE_N;
-  gui->key.bound_id[SE_KEY_Y]     = SAPP_KEYCODE_M;
-  gui->key.bound_id[SE_KEY_UP]     = SAPP_KEYCODE_W;  
-  gui->key.bound_id[SE_KEY_DOWN]   = SAPP_KEYCODE_S;    
-  gui->key.bound_id[SE_KEY_LEFT]   = SAPP_KEYCODE_A;    
-  gui->key.bound_id[SE_KEY_RIGHT]  = SAPP_KEYCODE_D;     
-  gui->key.bound_id[SE_KEY_L]      = SAPP_KEYCODE_U; 
-  gui->key.bound_id[SE_KEY_R]      = SAPP_KEYCODE_I; 
-  gui->key.bound_id[SE_KEY_START]  = SAPP_KEYCODE_ENTER;      
-  gui->key.bound_id[SE_KEY_SELECT] = SAPP_KEYCODE_APOSTROPHE; 
-  gui->key.bound_id[SE_KEY_FOLD_SCREEN]= SAPP_KEYCODE_B;     
-  gui->key.bound_id[SE_KEY_PEN_DOWN]= SAPP_KEYCODE_V; 
-  gui->key.bound_id[SE_KEY_EMU_PAUSE]= SAPP_KEYCODE_V;
+static void se_set_default_keys(int32_t* bound_id){
+  for(int i=0;i<SE_NUM_KEYBINDS;++i)bound_id[i]=-1;
+  bound_id[SE_KEY_A]     = SAPP_KEYCODE_J;  
+  bound_id[SE_KEY_B]     = SAPP_KEYCODE_K;
+  bound_id[SE_KEY_X]     = SAPP_KEYCODE_N;
+  bound_id[SE_KEY_Y]     = SAPP_KEYCODE_M;
+  bound_id[SE_KEY_UP]     = SAPP_KEYCODE_W;  
+  bound_id[SE_KEY_DOWN]   = SAPP_KEYCODE_S;    
+  bound_id[SE_KEY_LEFT]   = SAPP_KEYCODE_A;    
+  bound_id[SE_KEY_RIGHT]  = SAPP_KEYCODE_D;     
+  bound_id[SE_KEY_L]      = SAPP_KEYCODE_U; 
+  bound_id[SE_KEY_R]      = SAPP_KEYCODE_I; 
+  bound_id[SE_KEY_START]  = SAPP_KEYCODE_ENTER;      
+  bound_id[SE_KEY_SELECT] = SAPP_KEYCODE_APOSTROPHE; 
+  bound_id[SE_KEY_FOLD_SCREEN]= SAPP_KEYCODE_B;     
+  bound_id[SE_KEY_PEN_DOWN]= SAPP_KEYCODE_V; 
+  bound_id[SE_KEY_EMU_PAUSE]= SAPP_KEYCODE_V;
 
-  gui->key.bound_id[SE_KEY_EMU_PAUSE]= SAPP_KEYCODE_SPACE;     
-  gui->key.bound_id[SE_KEY_EMU_REWIND]= SAPP_KEYCODE_R;     
-  gui->key.bound_id[SE_KEY_EMU_FF_2X]= SAPP_KEYCODE_F;     
-  gui->key.bound_id[SE_KEY_EMU_FF_MAX]= SAPP_KEYCODE_TAB;     
-  gui->key.bound_id[SE_KEY_SOLAR_M]= SAPP_KEYCODE_MINUS;     
-  gui->key.bound_id[SE_KEY_SOLAR_P]= SAPP_KEYCODE_EQUAL;     
-  gui->key.bound_id[SE_KEY_TOGGLE_FULLSCREEN] = SAPP_KEYCODE_F11;
+  bound_id[SE_KEY_EMU_PAUSE]= SAPP_KEYCODE_SPACE;     
+  bound_id[SE_KEY_EMU_REWIND]= SAPP_KEYCODE_R;     
+  bound_id[SE_KEY_EMU_FF_2X]= SAPP_KEYCODE_F;     
+  bound_id[SE_KEY_EMU_FF_MAX]= SAPP_KEYCODE_TAB;     
+  bound_id[SE_KEY_SOLAR_M]= SAPP_KEYCODE_MINUS;     
+  bound_id[SE_KEY_SOLAR_P]= SAPP_KEYCODE_EQUAL;     
+  bound_id[SE_KEY_TOGGLE_FULLSCREEN] = SAPP_KEYCODE_F11;
+  bound_id[SE_KEY_SCREENSHOT] = SAPP_KEYCODE_F12;
+  bound_id[SE_KEY_RECORD_VIDEO] = SAPP_KEYCODE_F9;
+  bound_id[SE_KEY_SAVE_REPLAY] = SAPP_KEYCODE_F10;
+  bound_id[SE_KEY_SWAP_SCREENS] = SAPP_KEYCODE_F8;
+  bound_id[SE_BIND_FORMAT_SLOT] = SE_BIND_FORMAT;
 
   for(int i=0;i<SE_NUM_SAVE_STATES;++i){
-    gui->key.bound_id[SE_KEY_CAPTURE_STATE(i)]=SAPP_KEYCODE_1+i;
-    gui->key.bound_id[SE_KEY_RESTORE_STATE(i)]=SAPP_KEYCODE_F1+i;
+    bound_id[SE_KEY_CAPTURE_STATE(i)]=SAPP_KEYCODE_1+i;
+    bound_id[SE_KEY_RESTORE_STATE(i)]=SAPP_KEYCODE_F1+i;
   }
 
 }
+void se_set_default_keybind(gui_state_t *gui){se_set_default_keys(gui->key.bound_id);}
 void sb_poll_controller_input(sb_joy_t* joy){
   for(int i=0;i<SE_NUM_KEYBINDS;++i){
     gui_state.key.value[i]=se_key_is_pressed(gui_state.key.bound_id[i]);
@@ -4247,7 +6412,7 @@ bool se_handle_keybind_settings(int keybind_type, se_keybind_state_t * state){
   bool settings_changed = false; 
   for(int k=0;k<num_keybinds;++k){
     igPushIDInt(k);
-    se_text("%s",se_localize_and_cache(button_labels[k]));
+    se_field_label("%s",se_localize_and_cache(button_labels[k]));
     float active = (state->value[k])>0.4;
     igSameLine(SE_FIELD_INDENT,0);
     if(state->bind_being_set==k)active=true;
@@ -4264,7 +6429,11 @@ bool se_handle_keybind_settings(int keybind_type, se_keybind_state_t * state){
             bool is_hat = key&SE_HAT_MASK;
             bool is_joy = key&(SE_JOY_NEG_MASK|SE_JOY_POS_MASK);
         #ifdef USE_SDL
-            if(is_hat){
+            // Use the name printed on the controller when the binding is a known button
+            const char* friendly = se_sdl_key_bind_name(gui_state.controller.sdl_gc,key);
+            if(friendly){
+              snprintf(buff,sizeof(buff),"%s",se_localize_and_cache(friendly));
+            }else if(is_hat){
               int hat_id = SB_BFE(key,8,8);
               int hat_val = SB_BFE(key,0,8);
               const char * dir = "";
@@ -4296,7 +6465,14 @@ bool se_handle_keybind_settings(int keybind_type, se_keybind_state_t * state){
           button_label=buff;
           break;
         case SE_BIND_ANALOG: 
-          snprintf(buff, sizeof(buff),se_localize("Analog %d (%0.2f)"), state->bound_id[k],state->value[k]);button_label=buff;
+          {
+        #ifdef USE_SDL
+            const char* friendly = se_sdl_axis_bind_name(gui_state.controller.sdl_gc,state->bound_id[k]);
+            if(friendly)snprintf(buff,sizeof(buff),"%s (%0.2f)",se_localize_and_cache(friendly),state->value[k]);
+            else
+        #endif
+            snprintf(buff, sizeof(buff),se_localize("Analog %d (%0.2f)"), state->bound_id[k],state->value[k]);
+          }
           button_label=buff;
           break;
         #endif
@@ -4327,11 +6503,145 @@ bool se_handle_keybind_settings(int keybind_type, se_keybind_state_t * state){
   igPopID();
   return settings_changed;
 }
+// Touch controls of the design systems: tonal buttons that fill with the accent while pressed.
+// hold/turbo mark buttons latched by the Hold and Turbo modifiers.
+static void se_design_touch_colors(bool pressed, bool hold, bool turbo, float opacity, ImU32* fill, ImU32* stroke, ImU32* label){
+  const se_design_tokens_t* t = &gui_state.design;
+  bool material = t->design==SE_DESIGN_MATERIAL3;
+  se_color_t f = material? t->secondary_container : se_color_blend(t->background,t->surface_popup);
+  se_color_t l = material? t->on_secondary_container : t->on_surface;
+  float fill_alpha = opacity;
+  if(hold){
+    f = se_color_blend(f,t->tertiary_container);
+    l = t->on_tertiary_container;
+  }
+  if(pressed||turbo){
+    f = t->primary;
+    l = t->on_primary;
+    fill_alpha = fminf(1.f,opacity*1.6f);
+  }
+  f.a*=fill_alpha;
+  l.a*=fminf(1.f,opacity*1.8f);
+  se_color_t s = t->outline_variant;
+  s.a = material? 0 : fminf(1.f,s.a*opacity*4.f);
+  *fill = se_design_u32(f);
+  *stroke = se_design_u32(s);
+  *label = se_design_u32(l);
+}
+static float se_design_touch_rounding(float h){
+  switch(gui_state.design.design){
+    case SE_DESIGN_FLUENT: return fminf(8.f,h*0.5f);
+    case SE_DESIGN_ADWAITA: return fminf(12.f,h*0.5f);
+  }
+  return h*0.5f;
+}
+static void se_design_draw_touch_label(ImDrawList* dl, float cx, float cy, float max_h, float max_w, ImU32 col, const char* label){
+  if(!label||!label[0])return;
+  ImFont* font = igGetFont();
+  float size = fminf(max_h,28.f);
+  ImVec2 ts;
+  ImFont_CalcTextSizeA(&ts,font,size,1e30f,0,label,NULL,NULL);
+  if(ts.x>max_w&&ts.x>0){
+    float k = max_w/ts.x;
+    size*=k; ts.x*=k; ts.y*=k;
+  }
+  ImDrawList_AddTextFontPtr(dl,font,size,(ImVec2){floorf(cx-ts.x*0.5f),floorf(cy-ts.y*0.5f)},col,label,NULL,0,NULL);
+}
+static void se_design_draw_touch_rect(ImDrawList* dl, float x, float y, float w, float h, const char* label, bool pressed, bool hold, bool turbo, float opacity){
+  ImU32 fill, stroke, text;
+  se_design_touch_colors(pressed,hold,turbo,opacity,&fill,&stroke,&text);
+  float r = se_design_touch_rounding(h);
+  ImDrawList_AddRectFilled(dl,(ImVec2){x,y},(ImVec2){x+w,y+h},fill,r,ImDrawCornerFlags_All);
+  ImDrawList_AddRect(dl,(ImVec2){x,y},(ImVec2){x+w,y+h},stroke,r,ImDrawCornerFlags_All,1.0f);
+  se_design_draw_touch_label(dl,x+w*0.5f,y+h*0.5f,h*0.45f,w*0.8f,text,label);
+}
+static void se_design_draw_touch_round(ImDrawList* dl, float cx, float cy, float r, const char* label, bool pressed, bool hold, bool turbo, float opacity){
+  ImU32 fill, stroke, text;
+  se_design_touch_colors(pressed,hold,turbo,opacity,&fill,&stroke,&text);
+  ImDrawList_AddCircleFilled(dl,(ImVec2){cx,cy},r,fill,64);
+  ImDrawList_AddCircle(dl,(ImVec2){cx,cy},r,stroke,64,1.0f);
+  se_design_draw_touch_label(dl,cx,cy,r*0.9f,r*1.4f,text,label);
+}
+// D-pad as a rounded cross. arm is half the width of an arm, len half the size of the pad.
+static void se_design_draw_touch_dpad(ImDrawList* dl, float cx, float cy, float arm, float len, int dpad_code, float opacity){
+  ImU32 fill, stroke, text, pressed_fill, pressed_stroke, pressed_text;
+  se_design_touch_colors(false,false,false,opacity,&fill,&stroke,&text);
+  se_design_touch_colors(true,false,false,opacity,&pressed_fill,&pressed_stroke,&pressed_text);
+  float r = fminf(se_design_touch_rounding(arm*2.f),arm);
+  // Only the outer corners of the side arms are rounded so the pieces join without seams
+  ImDrawList_AddRectFilled(dl,(ImVec2){cx-arm,cy-len},(ImVec2){cx+arm,cy+len},fill,r,ImDrawCornerFlags_All);
+  ImDrawList_AddRectFilled(dl,(ImVec2){cx-len,cy-arm},(ImVec2){cx-arm,cy+arm},fill,r,ImDrawCornerFlags_Left);
+  ImDrawList_AddRectFilled(dl,(ImVec2){cx+arm,cy-arm},(ImVec2){cx+len,cy+arm},fill,r,ImDrawCornerFlags_Right);
+  bool up = dpad_code<3, down = dpad_code>=6, left = dpad_code%3==0, right = dpad_code%3==2;
+  if(up)   ImDrawList_AddRectFilled(dl,(ImVec2){cx-arm,cy-len},(ImVec2){cx+arm,cy-arm},pressed_fill,r,ImDrawCornerFlags_Top);
+  if(down) ImDrawList_AddRectFilled(dl,(ImVec2){cx-arm,cy+arm},(ImVec2){cx+arm,cy+len},pressed_fill,r,ImDrawCornerFlags_Bot);
+  if(left) ImDrawList_AddRectFilled(dl,(ImVec2){cx-len,cy-arm},(ImVec2){cx-arm,cy+arm},pressed_fill,r,ImDrawCornerFlags_Left);
+  if(right)ImDrawList_AddRectFilled(dl,(ImVec2){cx+arm,cy-arm},(ImVec2){cx+len,cy+arm},pressed_fill,r,ImDrawCornerFlags_Right);
+  // Direction chevrons
+  float s = arm*0.4f, d = (len+arm)*0.5f;
+  ImDrawList_AddTriangleFilled(dl,(ImVec2){cx,cy-d-s*0.6f},(ImVec2){cx-s,cy-d+s*0.6f},(ImVec2){cx+s,cy-d+s*0.6f},up? pressed_text:text);
+  ImDrawList_AddTriangleFilled(dl,(ImVec2){cx,cy+d+s*0.6f},(ImVec2){cx+s,cy+d-s*0.6f},(ImVec2){cx-s,cy+d-s*0.6f},down? pressed_text:text);
+  ImDrawList_AddTriangleFilled(dl,(ImVec2){cx-d-s*0.6f,cy},(ImVec2){cx-d+s*0.6f,cy+s},(ImVec2){cx-d+s*0.6f,cy-s},left? pressed_text:text);
+  ImDrawList_AddTriangleFilled(dl,(ImVec2){cx+d+s*0.6f,cy},(ImVec2){cx+d-s*0.6f,cy-s},(ImVec2){cx+d-s*0.6f,cy+s},right? pressed_text:text);
+}
+static const char* se_design_touch_label_for(int input_id, int hold_id, int turbo_id){
+  if(input_id==hold_id)return ICON_FK_SNOWFLAKE_O;
+  if(input_id==turbo_id)return ICON_FK_BOLT;
+  switch(input_id){
+    case SE_KEY_A: return "A";
+    case SE_KEY_B: return "B";
+    case SE_KEY_X: return "X";
+    case SE_KEY_Y: return "Y";
+    case SE_KEY_L: return "L";
+    case SE_KEY_R: return "R";
+    case SE_KEY_START: return "START";
+    case SE_KEY_SELECT: return "SELECT";
+    case SE_KEY_EMU_REWIND: return ICON_FK_BACKWARD;
+    case SE_KEY_EMU_FF_2X: return ICON_FK_FORWARD;
+  }
+  return NULL;
+}
+// The on-screen controller is shown after the screen is touched, or all the time when
+// "Hide when inactive" is off, unless the user turned it off.
+static bool se_touch_controller_shown(){
+  if(gui_state.settings.touch_controller_off)return false;
+  return gui_state.last_touch_time>=0||gui_state.settings.auto_hide_touch_controls==false;
+}
+static const char* se_touch_element_name(int element){
+  switch(element){
+    case SE_TOUCH_DPAD: return "D-Pad";
+    case SE_TOUCH_FACE: return "Face Buttons";
+    case SE_TOUCH_L: return "L";
+    case SE_TOUCH_R: return "R";
+    case SE_TOUCH_START: return "Start";
+    case SE_TOUCH_SELECT: return "Select";
+    case SE_TOUCH_TURBO: return "Turbo";
+    case SE_TOUCH_HOLD: return "Hold";
+    case SE_TOUCH_REWIND: return "Rewind";
+    case SE_TOUCH_FAST_FORWARD: return "Fast Forward";
+  }
+  return "";
+}
+// Offset (fractions of the screen area) and scale of an element in the current orientation,
+// including a drag in progress in the layout editor
+static void se_touch_element_transform(int element, float* dx, float* dy, float* scale){
+  const float* t = gui_state.settings.touch_layout[gui_state.touch_canvas.portrait? 1:0][element];
+  *dx = t[0]; *dy = t[1];
+  *scale = t[2]>0? t[2] : 1.f;
+  if(gui_state.touch_canvas.editor&&gui_state.touch_editor_dragging&&gui_state.touch_editor_selected==element){
+    *dx += gui_state.touch_editor_drag[0];
+    *dy += gui_state.touch_editor_drag[1];
+  }
+}
 void se_draw_onscreen_controller(sb_emu_state_t*state, int mode, float win_x, float win_y, float win_w, float win_h, bool preview, bool center){  
   if (!show_ui)
     return;
-  if(state->run_mode!=SB_MODE_RUN&&preview==false)return;
-  if(gui_state.block_touchscreen && !preview)return; 
+  // The layout editor shows the controller while the game is paused and never presses buttons
+  bool editor = gui_state.touch_canvas.editor;
+  // Also drawn while rewinding, so a held Rewind button keeps rewinding
+  bool running = state->run_mode==SB_MODE_RUN||state->run_mode==SB_MODE_REWIND;
+  if(!running&&preview==false&&!editor)return;
+  if(gui_state.block_touchscreen && !preview && !editor)return;
 
   //Split the region in half if this is a both LEFT/RIGHT command
   float right_x_off = 0; 
@@ -4357,6 +6667,7 @@ void se_draw_onscreen_controller(sb_emu_state_t*state, int mode, float win_x, fl
   if(!gui_state.settings.auto_hide_touch_controls)opacity=1;   
   if(opacity<=0){opacity=0;}
   opacity*=gui_state.settings.touch_controls_opacity;
+  if(editor)opacity = fmaxf(opacity,0.6f);
 
   line_color|=(int)(opacity*0xff)<<24;
   line_color2|=(int)(opacity*0xff)<<24;
@@ -4375,22 +6686,28 @@ void se_draw_onscreen_controller(sb_emu_state_t*state, int mode, float win_x, fl
   float points[max_points][2]={0};
 
   int p = 0;
-  //if(IsMouseButtonDown(0))points[p++] = GetMousePosition();
-  for(int i=0; i<SAPP_MAX_TOUCHPOINTS;++i){
+  for(int i=0; i<SAPP_MAX_TOUCHPOINTS&&!editor;++i){
     if(p<max_points&&gui_state.touch_points[i].active&&!gui_state.block_touchscreen){
       points[p][0]=gui_state.touch_points[i].pos[0]/se_dpi_scale();
       points[p][1]=gui_state.touch_points[i].pos[1]/se_dpi_scale();
       ++p;
     }
   }
+  // While the controller is visible a mouse click works like a touch
+  if(!editor&&!preview&&p<max_points&&opacity>0&&gui_state.mouse_button[0]&&igIsWindowHovered(ImGuiHoveredFlags_None)){
+    points[p][0]=gui_state.mouse_pos[0]/se_dpi_scale();
+    points[p][1]=gui_state.mouse_pos[1]/se_dpi_scale();
+    ++p;
+  }
   ImDrawList*dl= igGetWindowDrawList();
 
   enum {ROUND,DPAD,RECT};
-  typedef struct{int input_id; int theme_region; int mode; bool enable; int type; float pos[2]; float size[2];}se_button_info_t;
+  typedef struct{int input_id; int theme_region; int mode; bool enable; int type; float pos[2]; float size[2]; int element;}se_button_info_t;
 
   bool abxy= emu_state.system==SYSTEM_NDS;
   bool lr_en = emu_state.system!=SYSTEM_GB;
   bool ht_en = gui_state.settings.touch_controls_show_turbo;
+  bool sp_en = gui_state.settings.touch_controls_show_speed;
   const int SE_KEY_HOLD = -1; 
   const int SE_KEY_TURBO = -2; 
   float full_h = win_h/win_w;
@@ -4425,26 +6742,91 @@ void se_draw_onscreen_controller(sb_emu_state_t*state, int mode, float win_x, fl
   float hold_turbo_w = 0.3;
   if(hold_turbo_w>full_row_w)hold_turbo_w = full_row_w; 
   if(start_sel_row_w>full_row_w)start_sel_row_w = full_row_w;
+  // Rewind and Fast Forward share the top row with L and R
+  float lr_w = full_row_w, speed_w = full_row_w;
+  if(sp_en&&lr_en&&full_row_w>0.6f){
+    lr_w = full_row_w*0.6f;
+    speed_w = full_row_w-lr_w-0.02f;
+  }
+  float rewind_x = lr_en? lr_w+0.02f : 0.f;
+  float fast_forward_x = lr_en? 1.f-lr_w-0.02f-speed_w : 1.f-speed_w;
   se_button_info_t buttons[]={
-    {SE_KEY_L      ,SE_REGION_KEY_L,      SE_GAMEPAD_LEFT, lr_en,RECT, {0+rect_offset,lr_y}, {full_row_w,row_h}}, 
-    {SE_KEY_UP     ,SE_REGION_DPAD_CENTER,SE_GAMEPAD_LEFT, true, DPAD, {0.5,dpad_y}, {dpad_r,0.8}},
-    {SE_KEY_SELECT ,SE_REGION_KEY_SELECT, SE_GAMEPAD_LEFT,true, RECT, {0+rect_offset,start_sel_row_y}, {start_sel_row_w,row_h}},
-    {SE_KEY_HOLD   ,SE_REGION_KEY_HOLD,   SE_GAMEPAD_LEFT,ht_en,RECT, {0.68+0.3-hold_turbo_w+rect_offset,start_sel_row_y}, {hold_turbo_w,row_h}},
-    {SE_KEY_R      ,SE_REGION_KEY_R,      SE_GAMEPAD_RIGHT,lr_en,RECT, {0.01+0.99-full_row_w-rect_offset,lr_y}, {full_row_w,row_h}},
-    {SE_KEY_A      ,SE_REGION_KEY_A,      SE_GAMEPAD_RIGHT,true, ROUND,{a_pos[0],a_pos[1]},{button_r,0.2}},
-    {SE_KEY_B      ,SE_REGION_KEY_B,      SE_GAMEPAD_RIGHT,true, ROUND,{b_pos[0],b_pos[1]},{button_r,0.2}},
-    {SE_KEY_X      ,SE_REGION_KEY_X,      SE_GAMEPAD_RIGHT,abxy, ROUND,{0.5,0.5*full_h-button_r*1.5},{button_r,0.2}},
-    {SE_KEY_Y      ,SE_REGION_KEY_Y,      SE_GAMEPAD_RIGHT,abxy, ROUND,{0.5-button_r*1.5,0.5*full_h},{button_r,0.2}},
-    {SE_KEY_START  ,SE_REGION_KEY_START,  SE_GAMEPAD_RIGHT, true, RECT, {(ht_en?0.33:0.00)+(ht_en?0.67:1.01)-start_sel_row_w-rect_offset,start_sel_row_y}, {start_sel_row_w,row_h}},
-    {SE_KEY_TURBO  ,SE_REGION_KEY_TURBO,  SE_GAMEPAD_RIGHT, ht_en,RECT, {0.01-rect_offset,start_sel_row_y}, {hold_turbo_w,row_h}},
+    {SE_KEY_L      ,SE_REGION_KEY_L,      SE_GAMEPAD_LEFT, lr_en,RECT, {0+rect_offset,lr_y}, {lr_w,row_h}, SE_TOUCH_L},
+    {SE_KEY_EMU_REWIND,SE_REGION_KEY_RECT_BLANK,SE_GAMEPAD_LEFT,sp_en,RECT,{rewind_x+rect_offset,lr_y},{speed_w,row_h},SE_TOUCH_REWIND},
+    {SE_KEY_UP     ,SE_REGION_DPAD_CENTER,SE_GAMEPAD_LEFT, true, DPAD, {0.5,dpad_y}, {dpad_r,0.8}, SE_TOUCH_DPAD},
+    {SE_KEY_SELECT ,SE_REGION_KEY_SELECT, SE_GAMEPAD_LEFT,true, RECT, {0+rect_offset,start_sel_row_y}, {start_sel_row_w,row_h}, SE_TOUCH_SELECT},
+    {SE_KEY_HOLD   ,SE_REGION_KEY_HOLD,   SE_GAMEPAD_LEFT,ht_en,RECT, {0.68+0.3-hold_turbo_w+rect_offset,start_sel_row_y}, {hold_turbo_w,row_h}, SE_TOUCH_HOLD},
+    {SE_KEY_R      ,SE_REGION_KEY_R,      SE_GAMEPAD_RIGHT,lr_en,RECT, {0.01+0.99-lr_w-rect_offset,lr_y}, {lr_w,row_h}, SE_TOUCH_R},
+    {SE_KEY_EMU_FF_2X,SE_REGION_KEY_RECT_BLANK,SE_GAMEPAD_RIGHT,sp_en,RECT,{fast_forward_x-rect_offset,lr_y},{speed_w,row_h},SE_TOUCH_FAST_FORWARD},
+    {SE_KEY_A      ,SE_REGION_KEY_A,      SE_GAMEPAD_RIGHT,true, ROUND,{a_pos[0],a_pos[1]},{button_r,0.2}, SE_TOUCH_FACE},
+    {SE_KEY_B      ,SE_REGION_KEY_B,      SE_GAMEPAD_RIGHT,true, ROUND,{b_pos[0],b_pos[1]},{button_r,0.2}, SE_TOUCH_FACE},
+    {SE_KEY_X      ,SE_REGION_KEY_X,      SE_GAMEPAD_RIGHT,abxy, ROUND,{0.5,0.5*full_h-button_r*1.5},{button_r,0.2}, SE_TOUCH_FACE},
+    {SE_KEY_Y      ,SE_REGION_KEY_Y,      SE_GAMEPAD_RIGHT,abxy, ROUND,{0.5-button_r*1.5,0.5*full_h},{button_r,0.2}, SE_TOUCH_FACE},
+    {SE_KEY_START  ,SE_REGION_KEY_START,  SE_GAMEPAD_RIGHT, true, RECT, {(ht_en?0.33:0.00)+(ht_en?0.67:1.01)-start_sel_row_w-rect_offset,start_sel_row_y}, {start_sel_row_w,row_h}, SE_TOUCH_START},
+    {SE_KEY_TURBO  ,SE_REGION_KEY_TURBO,  SE_GAMEPAD_RIGHT, ht_en,RECT, {0.01-rect_offset,start_sel_row_y}, {hold_turbo_w,row_h}, SE_TOUCH_TURBO},
   };
+  enum{num_buttons = sizeof(buttons)/sizeof(buttons[0])};
+
+  // Absolute geometry of the buttons as center and half extents
+  float geo[num_buttons][4];
+  float anchors[SE_TOUCH_NUM_ELEMENTS][3];
+  memset(anchors,0,sizeof(anchors));
+  for(int bi=0;bi<num_buttons;++bi){
+    se_button_info_t* b = &buttons[bi];
+    float x_off = (b->mode&SE_GAMEPAD_RIGHT)? right_x_off : 0;
+    float* g = geo[bi];
+    if(b->type==RECT){
+      g[2] = b->size[0]*win_w*0.5f;
+      g[3] = b->size[1]*win_w*0.5f;
+      g[0] = b->pos[0]*win_w+win_x+x_off+g[2];
+      g[1] = b->pos[1]*win_w+win_y+g[3];
+    }else{
+      g[2] = g[3] = b->size[0]*win_w;
+      g[0] = x_off+win_x+b->pos[0]*win_w;
+      g[1] = win_y+b->pos[1]*win_w;
+    }
+    if(!(mode&b->mode)||!b->enable)continue;
+    anchors[b->element][0]+=g[0];
+    anchors[b->element][1]+=g[1];
+    anchors[b->element][2]+=1;
+  }
+  // Custom layout: each element moves and scales around its center, and is kept on screen
+  float cx0 = gui_state.touch_canvas.x, cy0 = gui_state.touch_canvas.y;
+  float cw = gui_state.touch_canvas.w, ch = gui_state.touch_canvas.h;
+  for(int bi=0;bi<num_buttons&&cw>0&&ch>0;++bi){
+    se_button_info_t* b = &buttons[bi];
+    if(!(mode&b->mode)||!b->enable)continue;
+    float* a = anchors[b->element];
+    float ax = a[0]/a[2], ay = a[1]/a[2];
+    float dx,dy,scale;
+    se_touch_element_transform(b->element,&dx,&dy,&scale);
+    float tx = ax+dx*cw, ty = ay+dy*ch;
+    if(tx<cx0)tx = cx0;
+    if(tx>cx0+cw)tx = cx0+cw;
+    if(ty<cy0)ty = cy0;
+    if(ty>cy0+ch)ty = cy0+ch;
+    float* g = geo[bi];
+    g[0] = tx+(g[0]-ax)*scale;
+    g[1] = ty+(g[1]-ay)*scale;
+    g[2]*= scale;
+    g[3]*= scale;
+    if(gui_state.touch_canvas.record){
+      gui_state.touch_element_anchor[b->element][0] = ax;
+      gui_state.touch_element_anchor[b->element][1] = ay;
+      float* r = gui_state.touch_element_bounds[b->element];
+      r[0] = fminf(r[0],g[0]-g[2]); r[1] = fminf(r[1],g[1]-g[3]);
+      r[2] = fmaxf(r[2],g[0]+g[2]); r[3] = fmaxf(r[3],g[1]+g[3]);
+    }
+  }
   bool touch_only_key_pressed[3] = {0};
 
   int button_pressed_mask = 0;
 
-  for(int bi =0; bi<sizeof(buttons)/sizeof(buttons[0]); ++bi){
+  for(int bi =0; bi<num_buttons; ++bi){
     se_button_info_t * b = &buttons[bi];
     if(!(mode&b->mode)||!b->enable)continue;
+    const float* g = geo[bi];
+    bool speed_button = b->input_id==SE_KEY_EMU_REWIND||b->input_id==SE_KEY_EMU_FF_2X;
 
     ImU32 col = line_color;
     ImU32 pressed_color = col;
@@ -4466,24 +6848,23 @@ void se_draw_onscreen_controller(sb_emu_state_t*state, int mode, float win_x, fl
       col = turbo_color;
       force_pressed= press_turbo;
     }
-    if(b->input_id>=0&&force_pressed){
+    if(b->input_id>=0&&force_pressed&&!editor){
       emu_state.joy.inputs[b->input_id]=1;
     }
-    float x_off = 0;
-    if(b->mode&SE_GAMEPAD_RIGHT)x_off+=right_x_off;
-    bool show_labels = gui_state.settings.touch_screen_show_button_labels;
+    // Rewind and Fast Forward have no artwork in the skins, they always show their icon
+    bool show_labels = gui_state.settings.touch_screen_show_button_labels||speed_button;
     if(b->type ==RECT){
       int region =b->theme_region;
       bool pressed = b->input_id>=0 && emu_state.prev_frame_joy.inputs[b->input_id]>0.1;
       
-      float x = b->pos[0]*win_w+win_x+x_off;
-      float y = b->pos[1]*win_w+win_y;
-      float w = b->size[0]*win_w;
-      float h = b->size[1]*win_w;
+      float x = g[0]-g[2];
+      float y = g[1]-g[3];
+      float w = g[2]*2;
+      float h = g[3]*2;
       for(int i = 0;i<p;++i){
         int dx = points[i][0]-x;
         int dy = points[i][1]-y;
-        if(dx>=-w*0.05 && dx<=w*1.05 && dy>=h*0.05 && dy<=h*1.05 ){
+        if(dx>=-w*0.05 && dx<=w*1.05 && dy>=-h*0.05 && dy<=h*1.05 ){
           col = pressed_color;
           if(b->input_id>=0){
             button_pressed_mask|=1<<bi;
@@ -4504,6 +6885,11 @@ void se_draw_onscreen_controller(sb_emu_state_t*state, int mode, float win_x, fl
         if(pressed){
           se_draw_theme_region_tint(fallback_region,x,y,w,h,sel_color);
         }
+      }else if(gui_state.design_active){
+        bool hold = SB_BFE(gui_state.touch_controls.hold_toggle,bi,1)||(b->input_id==SE_KEY_HOLD&&gui_state.touch_controls.hold_toggle);
+        bool turbo = SB_BFE(gui_state.touch_controls.turbo_toggle,bi,1)||(b->input_id==SE_KEY_TURBO&&gui_state.touch_controls.turbo_toggle);
+        const char* label = show_labels? se_design_touch_label_for(b->input_id,SE_KEY_HOLD,SE_KEY_TURBO) : NULL;
+        se_design_draw_touch_rect(dl,x,y,w,h,label,pressed,hold,turbo&&press_turbo,opacity);
       }else{
         ImDrawList_AddRect(dl,(ImVec2){x,y},(ImVec2){x+w,y+h},line_color2,0,ImDrawCornerFlags_None,line_w1);  
         ImDrawList_AddRect(dl,(ImVec2){x,y},(ImVec2){x+w,y+h},col,0,ImDrawCornerFlags_None,line_w0);  
@@ -4511,16 +6897,16 @@ void se_draw_onscreen_controller(sb_emu_state_t*state, int mode, float win_x, fl
           ImDrawList_AddRectFilled(dl,(ImVec2){x,y},(ImVec2){x+w,y+h},sel_color,0,ImDrawCornerFlags_None);  
         }
       }
+      if(speed_button&&!gui_state.design_active){
+        se_design_draw_touch_label(dl,x+w*0.5f,y+h*0.5f,h*0.5f,w*0.8f,line_color,se_design_touch_label_for(b->input_id,SE_KEY_HOLD,SE_KEY_TURBO));
+      }
     }else if(b->type==ROUND){
       ImU32 col = SB_BFE(gui_state.touch_controls.hold_toggle,bi,1)?hold_color: SB_BFE(gui_state.touch_controls.turbo_toggle,bi,1)? turbo_color: line_color;
       bool pressed = b->input_id>=0 && emu_state.prev_frame_joy.inputs[b->input_id]>0.1;
       int region = b->theme_region; 
       
-      float pos[2] ={
-        x_off+win_x+b->pos[0]*win_w,
-        win_y+b->pos[1]*win_w
-      };
-      float r = win_w*b->size[0];
+      float pos[2] ={g[0],g[1]};
+      float r = g[2];
       
       for(int i = 0;i<p;++i){
         int dx = points[i][0]-pos[0];
@@ -4573,6 +6959,11 @@ void se_draw_onscreen_controller(sb_emu_state_t*state, int mode, float win_x, fl
                                                r*2*themed_scale,
                                                r*2*themed_scale,
                                                sel_color);
+      }else if(gui_state.design_active){
+        bool hold = SB_BFE(gui_state.touch_controls.hold_toggle,bi,1);
+        bool turbo = SB_BFE(gui_state.touch_controls.turbo_toggle,bi,1);
+        const char* label = show_labels? se_design_touch_label_for(b->input_id,SE_KEY_HOLD,SE_KEY_TURBO) : NULL;
+        se_design_draw_touch_round(dl,pos[0],pos[1],r,label,pressed,hold,turbo&&press_turbo,opacity);
       }else{
         if(pressed)  ImDrawList_AddCircleFilled(dl,(ImVec2){pos[0],pos[1]},r,sel_color,128);
         ImDrawList_AddCircle(dl,(ImVec2){pos[0],pos[1]},r,line_color2,128,line_w1);
@@ -4580,11 +6971,8 @@ void se_draw_onscreen_controller(sb_emu_state_t*state, int mode, float win_x, fl
       }
 
     }else if(b->type==DPAD){
-      float dpad_pos[2]={
-        x_off+win_x+b->pos[0]*win_w,
-        win_y+b->pos[1]*win_w
-      };
-      float dpad_sz1 = b->size[0]*win_w;
+      float dpad_pos[2]={g[0],g[1]};
+      float dpad_sz1 = g[2];
       float dpad_sz0 = dpad_sz1*0.29;
       bool up = false, down= false, left = false, right = false; 
       for(int i = 0;i<p;++i){
@@ -4616,6 +7004,9 @@ void se_draw_onscreen_controller(sb_emu_state_t*state, int mode, float win_x, fl
                                       dpad_sz1*2*themed_scale,
                                       dpad_sz1*2*themed_scale,
                                       line_color)){
+          if(gui_state.design_active){
+            se_design_draw_touch_dpad(dl,dpad_pos[0],dpad_pos[1],dpad_sz0,dpad_sz1,draw_dpad_code,opacity);
+          }else{
           ImVec2 dpad_points[12]={
             //Up
             {dpad_pos[0]-dpad_sz0,dpad_pos[1]+dpad_sz0},
@@ -4636,16 +7027,19 @@ void se_draw_onscreen_controller(sb_emu_state_t*state, int mode, float win_x, fl
           };
           ImDrawList_AddPolyline(dl,dpad_points,12,line_color2,true,line_w1);
           ImDrawList_AddPolyline(dl,dpad_points,12,line_color,true,line_w0);
+          }
         }
         
         
+        if(!gui_state.design_active){
         if(draw_dpad_code>=6) ImDrawList_AddRectFilled(dl,(ImVec2){dpad_pos[0]-dpad_sz0,dpad_pos[1]+dpad_sz0},(ImVec2){dpad_pos[0]+dpad_sz0,dpad_pos[1]+dpad_sz1},sel_color,0,ImDrawCornerFlags_None);
         if(draw_dpad_code<3)   ImDrawList_AddRectFilled(dl,(ImVec2){dpad_pos[0]-dpad_sz0,dpad_pos[1]-dpad_sz1},(ImVec2){dpad_pos[0]+dpad_sz0,dpad_pos[1]-dpad_sz0},sel_color,0,ImDrawCornerFlags_None);
         
         if((draw_dpad_code%3)==0) ImDrawList_AddRectFilled(dl,(ImVec2){dpad_pos[0]-dpad_sz1,dpad_pos[1]-dpad_sz0},(ImVec2){dpad_pos[0]-dpad_sz0,dpad_pos[1]+dpad_sz0},sel_color,0,ImDrawCornerFlags_None);
         if((draw_dpad_code%3)==2)ImDrawList_AddRectFilled(dl,(ImVec2){dpad_pos[0]+dpad_sz0,dpad_pos[1]-dpad_sz0},(ImVec2){dpad_pos[0]+dpad_sz1,dpad_pos[1]+dpad_sz0},sel_color,0,ImDrawCornerFlags_None);
+        }
       }
-      if(dpad_code!=4){
+      if(dpad_code!=4&&!editor){
         if((dpad_code%3)==0)state->joy.inputs[SE_KEY_LEFT]+=1.0;
         if((dpad_code%3)==2)state->joy.inputs[SE_KEY_RIGHT]+=1.0;
         if(dpad_code<3)state->joy.inputs[SE_KEY_UP]+=1.0;
@@ -4698,7 +7092,13 @@ void se_text_centered_in_box(ImVec2 p, ImVec2 size, const char* text){
   curr_cursor_screen.x+=p.x;
   curr_cursor_screen.y+=p.y;
   ImU32 color = igColorConvertFloat4ToU32(igGetStyle()->Colors[ImGuiCol_ButtonActive]);
-  if(se_draw_theme_region(SE_REGION_BLANK,curr_cursor_screen.x,curr_cursor_screen.y,size.x,size.y)==0){
+  if(gui_state.design_active){
+    // Leading icon container of a list item
+    const se_design_tokens_t* t = &gui_state.design;
+    ImDrawList_AddRectFilled(igGetWindowDrawList(),curr_cursor_screen,(ImVec2){curr_cursor_screen.x+size.x,curr_cursor_screen.y+size.y},
+                             se_design_u32(t->primary_container),fminf(t->card_rounding,size.y*0.3f),ImDrawCornerFlags_All);
+    se_design_push_color(ImGuiCol_Text,t->on_primary_container);
+  }else if(se_draw_theme_region(SE_REGION_BLANK,curr_cursor_screen.x,curr_cursor_screen.y,size.x,size.y)==0){
     ImDrawList_AddRectFilled(igGetWindowDrawList(),curr_cursor_screen,(ImVec2){curr_cursor_screen.x+size.x,curr_cursor_screen.y+size.y},color,0,ImDrawCornerFlags_None);
   }
 
@@ -4709,6 +7109,7 @@ void se_text_centered_in_box(ImVec2 p, ImVec2 size, const char* text){
   curr_cursor.y+=(size.y-text_sz.y)*0.5;
   igSetCursorPos(curr_cursor);
   se_text(text);
+  if(gui_state.design_active)igPopStyleColor(1);
   igSetCursorPos(backup_cursor);
 }
 bool se_selectable_with_box(const char * first_label, const char* second_label, const char* box, bool force_hover, int reduce_width){
@@ -4835,8 +7236,8 @@ void se_boxed_image_triple_label(const char * first_label, const char* second_la
   igPushStyleVarVec2(ImGuiStyleVar_ItemSpacing, (ImVec2){spacing,spacing});
   igPushStyleColorU32(ImGuiCol_Text,third_label_color);
 
-  int vert_start = ig->VtxBuffer.Size+4;
   se_section("%s", first_label);
+  int vert_start = gui_state.section_text_vtx_start;
   if (third_label_color == 0xff000000) { // black means rainbow
     int vert_end = ig->VtxBuffer.Size;
     int h = (uint64_t)(stm_now() / 10000000.0) % 360;
@@ -4964,6 +7365,59 @@ void se_android_get_visible_rect(float * top, float * bottom){
     // Finished with the JVM.
     (*pJavaVM)->DetachCurrentThread(pJavaVM);
   }
+}
+// Light/dark mode, the Material You palette (Android 12+) and high contrast from
+// EnhancedNativeActivity.getSystemAppearance().
+// Layout: [dark (1 dark, 0 light, -1 unknown), accent ARGB (0 unknown), palette count (0 or 5),
+//          accent1, accent2, accent3, neutral1, neutral2 at tones 100,99,95,90,80,70,60,50,40,30,20,10,0
+//          (zeros when the count is 0), high contrast (1 on, 0 off, -1 unknown; optional, index 68)]
+static void se_android_get_system_appearance(se_system_appearance_t* out){
+  memset(out,0,sizeof(*out));
+  out->dark = -1;
+  out->accent = SE_ACCENT_NONE;
+  out->high_contrast = -1;
+  ANativeActivity* activity =(ANativeActivity*)sapp_android_get_native_activity();
+  if(!activity)return;
+  JavaVM *pJavaVM = activity->vm;
+  JNIEnv *pJNIEnv = activity->env;
+  jint nResult = (*pJavaVM)->AttachCurrentThread(pJavaVM, &pJNIEnv, NULL );
+  if(nResult==JNI_ERR)return;
+  jobject nativeActivity = activity->clazz;
+  jclass ClassNativeActivity = (*pJNIEnv)->GetObjectClass(pJNIEnv, nativeActivity );
+  jmethodID method = (*pJNIEnv)->GetMethodID(pJNIEnv, ClassNativeActivity, "getSystemAppearance", "()[I" );
+  if(!method){
+    // Host activities that embed SkyEmu may not implement it
+    (*pJNIEnv)->ExceptionClear(pJNIEnv);
+  }else{
+    jintArray array = (jintArray)(*pJNIEnv)->CallObjectMethod(pJNIEnv, nativeActivity, method);
+    if((*pJNIEnv)->ExceptionCheck(pJNIEnv))(*pJNIEnv)->ExceptionClear(pJNIEnv);
+    else if(array){
+      enum{num_palette_values = 5*SE_NUM_STANDARD_TONES, max_values = 3+num_palette_values+1};
+      jint values[max_values]={0};
+      jsize len = (*pJNIEnv)->GetArrayLength(pJNIEnv,array);
+      if(len>max_values)len = max_values;
+      (*pJNIEnv)->GetIntArrayRegion(pJNIEnv,array,0,len,values);
+      if(len>=2){
+        out->dark = values[0];
+        if(values[1])out->accent = ((uint32_t)values[1])&0xffffff;
+      }
+      if(len==max_values)out->high_contrast = values[max_values-1];
+      if(len>=3+num_palette_values&&values[2]==5){
+        se_tonal_palette_t* palettes[5]={&out->core_palette.primary,&out->core_palette.secondary,&out->core_palette.tertiary,
+                                         &out->core_palette.neutral,&out->core_palette.neutral_variant};
+        for(int p=0;p<5;++p){
+          uint32_t tones[SE_NUM_STANDARD_TONES];
+          for(int t=0;t<SE_NUM_STANDARD_TONES;++t)tones[t]=((uint32_t)values[3+p*SE_NUM_STANDARD_TONES+t])&0xffffff;
+          se_tonal_palette_from_tones(tones,palettes[p]);
+        }
+        out->has_core_palette = true;
+      }
+      (*pJNIEnv)->DeleteLocalRef(pJNIEnv,array);
+    }
+  }
+  (*pJNIEnv)->DeleteLocalRef(pJNIEnv,ClassNativeActivity);
+  // Finished with the JVM.
+  (*pJavaVM)->DetachCurrentThread(pJavaVM);
 }
 void se_android_get_language(char* language_buffer, size_t buffer_size){
 
@@ -5618,8 +8072,17 @@ void se_load_rom_overlay(bool visible){
   w_size.y/=se_dpi_scale();
   igSetNextWindowSize((ImVec2){w_size.x,w_size.y},ImGuiCond_Always);
   igSetNextWindowPos((ImVec2){w_pos.x,w_pos.y},ImGuiCond_Always,(ImVec2){0,0});
-  igSetNextWindowBgAlpha(gui_state.settings.hardcore_mode? 1.0: SE_TRANSPARENT_BG_ALPHA);
+  float bg_alpha = gui_state.settings.hardcore_mode? 1.0: SE_TRANSPARENT_BG_ALPHA;
+  // The sheet is translucent to show the paused game, without one the design systems keep it opaque
+  if(gui_state.design_active&&!emu_state.rom_loaded)bg_alpha = 1.0;
+  igSetNextWindowBgAlpha(bg_alpha);
+  if(gui_state.design_active){
+    se_design_push_color(ImGuiCol_WindowBg,gui_state.design.surface_content);
+    se_design_push_color(ImGuiCol_TitleBgActive,gui_state.design.surface_content);
+    se_design_push_color(ImGuiCol_TitleBg,gui_state.design.surface_content);
+  }
   igBegin(se_localize_and_cache(ICON_FK_FILE_O " Load Game"),(gui_state.settings.hardcore_mode&&gui_state.ra_logged_in)?NULL:&gui_state.overlay_open,ImGuiWindowFlags_NoCollapse|ImGuiWindowFlags_NoResize);
+  if(gui_state.design_active)igPopStyleColor(3);
   
   float list_y_off = igGetWindowHeight(); 
   int x, y, w,  h;
@@ -5860,8 +8323,24 @@ void se_update_frame() {
   }
   hcs_suspend_callbacks();
   #endif
+#ifdef ENABLE_RETRO_ACHIEVEMENTS
+  // Options changed by the API or the HTTP server thread are applied on the main thread, which
+  // also draws the achievements panel
+  if(gui_state.ra_apply_options){
+    gui_state.ra_apply_options = false;
+    rc_client_t* client = retro_achievements_get_client();
+    if((rc_client_get_hardcore_enabled(client)!=0)!=(gui_state.settings.hardcore_mode!=0)){
+      rc_client_set_hardcore_enabled(client,gui_state.settings.hardcore_mode!=0);
+    }
+    if(retro_achievements_set_options(gui_state.settings.ra_unofficial,gui_state.settings.ra_spectator))gui_state.ra_needs_reload = true;
+  }
+#endif
   se_update_key_turbo(&emu_state);
   se_update_solar_sensor(&emu_state);
+  se_rec_update();
+  if(emu_state.joy.inputs[SE_KEY_SWAP_SCREENS]&&!emu_state.prev_frame_joy.inputs[SE_KEY_SWAP_SCREENS]){
+    gui_state.settings.nds_swap_screens = !gui_state.settings.nds_swap_screens;
+  }
 
   if(emu_state.run_mode == SB_MODE_RESET){
     se_reset_core();
@@ -5908,7 +8387,7 @@ void se_update_frame() {
       // On steps emulate all frames, but only render the last frame of the step
       // and don't allow screen ghosting
       if(emu_state.run_mode==SB_MODE_STEP){
-        emu_state.render_frame = max_frames_per_tick==0;
+        emu_state.render_frame = max_frames_per_tick==0||se_rec.video||se_rec.replay.capacity;
         emu_state.screen_ghosting_strength=0; 
       }else{
         if(unlocked_mode){
@@ -5934,7 +8413,8 @@ void se_update_frame() {
         simulation_time+=sim_time_increment;
       }
       emu_state.frame++;
-      emu_state.render_frame = false;
+      // Recordings need every frame drawn, also the ones fast forward skips
+      emu_state.render_frame = se_rec.video||se_rec.replay.capacity;
       curr_time = se_time();
       if(emu_state.run_mode==SB_MODE_PAUSE)break;
     }
@@ -5944,6 +8424,7 @@ void se_update_frame() {
   if(emu_state.run_mode==SB_MODE_PAUSE)emu_state.frame = 0; 
   if(emu_state.run_mode==SB_MODE_REWIND)emu_state.frame = - emu_state.frame*frames_per_rewind_state;
 
+  se_stream_update();
   emu_state.prev_frame_joy = emu_state.joy; 
   se_reset_joy(&emu_state.joy);
 
@@ -5951,8 +8432,201 @@ void se_update_frame() {
     hcs_resume_callbacks();
   #endif
 }
+#if defined(EMSCRIPTEN)
+EM_JS(int, se_em_prefers_dark, (), {
+  if(!window.matchMedia)return -1;
+  return window.matchMedia('(prefers-color-scheme: dark)').matches? 1 : 0;
+});
+EM_JS(int, se_em_prefers_contrast, (), {
+  if(!window.matchMedia)return -1;
+  return window.matchMedia('(prefers-contrast: more)').matches||window.matchMedia('(forced-colors: active)').matches? 1 : 0;
+});
+#endif
+#ifdef SE_PLATFORM_ANDROID
+static void se_android_get_system_appearance(se_system_appearance_t* out);
+#endif
+static void se_query_system_appearance(se_system_appearance_t* sys){
+#if defined(SE_PLATFORM_ANDROID)
+  se_android_get_system_appearance(sys);
+#else
+  se_design_query_system_appearance(sys);
+#endif
+#if defined(EMSCRIPTEN)
+  sys->dark = se_em_prefers_dark();
+  sys->high_contrast = se_em_prefers_contrast();
+#endif
+  if(gui_state.host_appearance_set){
+    if(gui_state.host_dark>=0)sys->dark = gui_state.host_dark;
+    if(gui_state.host_accent!=SE_ACCENT_NONE)sys->accent = gui_state.host_accent;
+  }
+  if(gui_state.host_high_contrast>=0)sys->high_contrast = gui_state.host_high_contrast;
+}
+// Matches the native window frame (title bar / decorations) to the GUI
+static void se_design_style_window(){
+  bool dark = gui_state.settings.theme!=SE_THEME_LIGHT;
+  uint32_t caption = SE_ACCENT_NONE, caption_text = SE_ACCENT_NONE;
+  if(gui_state.design_active){
+    const se_design_tokens_t* t = &gui_state.design;
+    se_color_t bar = se_color_blend(t->background,t->surface_bar);
+    caption = se_color_to_rgb(bar);
+    caption_text = se_color_to_rgb(se_color_blend(bar,t->on_surface));
+    dark = t->dark;
+  }
+#if defined(SE_PLATFORM_WINDOWS)
+  se_design_style_native_window(sapp_win32_get_hwnd(),NULL,0,dark,caption,caption_text);
+#elif defined(SE_PLATFORM_LINUX) || defined(SE_PLATFORM_FREEBSD)
+  se_design_style_native_window(NULL,sapp_x11_get_display(),sapp_x11_get_window(),dark,caption,caption_text);
+#endif
+}
+// Keeps the design tokens in sync with the settings and the appearance of the OS
+static void se_update_design(){
+  int design = se_design_resolve(gui_state.settings.design_system);
+  bool active = design!=SE_DESIGN_CLASSIC;
+  uint32_t accent = gui_state.settings.use_custom_accent? (gui_state.settings.custom_accent&0xffffff) : SE_ACCENT_NONE;
+  bool follows_system = gui_state.settings.color_scheme==SE_COLOR_SCHEME_SYSTEM||accent==SE_ACCENT_NONE||
+                        gui_state.settings.contrast==SE_CONTRAST_SYSTEM;
+  // The query is cheap everywhere except on Linux, where it runs gdbus/gsettings. There it
+  // is not repeated while a game runs, changes are picked up when the emulator is paused.
+  double interval = 2.0;
+#if defined(SE_PLATFORM_LINUX) || defined(SE_PLATFORM_FREEBSD)
+  interval = emu_state.run_mode==SB_MODE_RUN? -1.0 : 5.0;
+#endif
+  double now = se_time();
+  bool never_queried = gui_state.last_appearance_query==0;
+  if(active&&follows_system&&(never_queried||(interval>0&&now-gui_state.last_appearance_query>interval))){
+    se_query_system_appearance(&gui_state.system_appearance);
+    gui_state.last_appearance_query = now>0? now : 1e-6;
+  }
+
+  typedef struct{bool active; int design; uint32_t theme, scheme, contrast, accent; se_system_appearance_t sys;}se_design_key_t;
+  static se_design_key_t last_key;
+  static bool has_key = false;
+  se_design_key_t key;
+  memset(&key,0,sizeof(key));
+  key.active = active;
+  key.design = design;
+  key.theme = active? 0 : gui_state.settings.theme;
+  key.scheme = gui_state.settings.color_scheme;
+  key.contrast = gui_state.settings.contrast;
+  key.accent = accent;
+  key.sys = gui_state.system_appearance;
+  if(!has_key||memcmp(&key,&last_key,sizeof(key))!=0){
+    if(active)se_design_build_tokens(design,key.scheme,key.contrast,key.accent,&key.sys,&gui_state.design);
+    gui_state.design_active = active;
+    se_design_style_window();
+    last_key = key;
+    has_key = true;
+  }
+  // The design systems only use the layout (bezel) regions of the default skin
+  int skin_key = active? -1 : (int)gui_state.settings.theme;
+  if(skin_key!=gui_state.loaded_skin_key)se_reload_theme();
+  int font_key = active? design*2+(gui_state.settings.use_bundled_font? 1:0) : -1;
+  if(font_key!=gui_state.font_design_key){
+    gui_state.font_design_key = font_key;
+    gui_state.update_font_atlas = true;
+  }
+}
+static void se_apply_design_style(){
+  const se_design_tokens_t* t = &gui_state.design;
+  ImGuiStyle* style = igGetStyle();
+  ImVec4* colors = style->Colors;
+  se_color_t clear = {0,0,0,0};
+  se_color_t input_hover = se_color_blend(t->surface_input,t->state_hover);
+  se_color_t input_press = se_color_blend(t->surface_input,t->state_press);
+  colors[ImGuiCol_Text]                  = se_design_vec4(t->on_surface);
+  colors[ImGuiCol_TextDisabled]          = se_design_vec4(t->on_surface_variant);
+  colors[ImGuiCol_WindowBg]              = se_design_vec4(t->surface_panel);
+  colors[ImGuiCol_ChildBg]               = se_design_vec4(t->surface_card);
+  colors[ImGuiCol_PopupBg]               = se_design_vec4(t->surface_popup);
+  colors[ImGuiCol_Border]                = se_design_vec4(t->outline_variant);
+  colors[ImGuiCol_BorderShadow]          = se_design_vec4(clear);
+  colors[ImGuiCol_FrameBg]               = se_design_vec4(t->surface_input);
+  colors[ImGuiCol_FrameBgHovered]        = se_design_vec4(input_hover);
+  colors[ImGuiCol_FrameBgActive]         = se_design_vec4(input_press);
+  colors[ImGuiCol_TitleBg]               = se_design_vec4(t->surface_panel);
+  colors[ImGuiCol_TitleBgActive]         = se_design_vec4(t->surface_panel);
+  colors[ImGuiCol_TitleBgCollapsed]      = se_design_vec4(t->surface_panel);
+  colors[ImGuiCol_MenuBarBg]             = se_design_vec4(t->surface_bar);
+  colors[ImGuiCol_ScrollbarBg]           = se_design_vec4(clear);
+  colors[ImGuiCol_ScrollbarGrab]         = se_design_vec4(se_design_over(clear,t->on_surface_variant,0.45f));
+  colors[ImGuiCol_ScrollbarGrabHovered]  = se_design_vec4(se_design_over(clear,t->on_surface_variant,0.7f));
+  colors[ImGuiCol_ScrollbarGrabActive]   = se_design_vec4(t->on_surface_variant);
+  colors[ImGuiCol_CheckMark]             = se_design_vec4(t->on_primary);
+  colors[ImGuiCol_SliderGrab]            = se_design_vec4(t->primary);
+  colors[ImGuiCol_SliderGrabActive]      = se_design_vec4(se_design_over(t->primary,t->on_primary,0.12f));
+  colors[ImGuiCol_Button]                = se_design_vec4(t->control);
+  colors[ImGuiCol_ButtonHovered]         = se_design_vec4(t->control_hover);
+  colors[ImGuiCol_ButtonActive]          = se_design_vec4(t->control_active);
+  colors[ImGuiCol_Header]                = se_design_vec4(t->secondary_container);
+  colors[ImGuiCol_HeaderHovered]         = se_design_vec4(t->state_hover);
+  colors[ImGuiCol_HeaderActive]          = se_design_vec4(t->state_press);
+  colors[ImGuiCol_Separator]             = se_design_vec4(t->outline_variant);
+  colors[ImGuiCol_SeparatorHovered]      = se_design_vec4(se_design_over(clear,t->primary,0.6f));
+  colors[ImGuiCol_SeparatorActive]       = se_design_vec4(t->primary);
+  colors[ImGuiCol_ResizeGrip]            = se_design_vec4(clear);
+  colors[ImGuiCol_ResizeGripHovered]     = se_design_vec4(se_design_over(clear,t->primary,0.5f));
+  colors[ImGuiCol_ResizeGripActive]      = se_design_vec4(t->primary);
+  colors[ImGuiCol_Tab]                   = se_design_vec4(t->control);
+  colors[ImGuiCol_TabHovered]            = se_design_vec4(t->control_hover);
+  colors[ImGuiCol_TabActive]             = se_design_vec4(t->secondary_container);
+  colors[ImGuiCol_TabUnfocused]          = se_design_vec4(t->control);
+  colors[ImGuiCol_TabUnfocusedActive]    = se_design_vec4(t->secondary_container);
+  colors[ImGuiCol_PlotLines]             = se_design_vec4(t->primary);
+  colors[ImGuiCol_PlotLinesHovered]      = se_design_vec4(t->on_surface);
+  colors[ImGuiCol_PlotHistogram]         = se_design_vec4(t->primary);
+  colors[ImGuiCol_PlotHistogramHovered]  = se_design_vec4(t->on_surface);
+  colors[ImGuiCol_TableHeaderBg]         = se_design_vec4(t->surface_card);
+  colors[ImGuiCol_TableBorderStrong]     = se_design_vec4(t->outline_variant);
+  colors[ImGuiCol_TableBorderLight]      = se_design_vec4(se_design_over(clear,t->outline_variant,0.5f));
+  colors[ImGuiCol_TableRowBg]            = se_design_vec4(clear);
+  colors[ImGuiCol_TableRowBgAlt]         = se_design_vec4(se_design_over(clear,t->on_surface,0.04f));
+  colors[ImGuiCol_TextSelectedBg]        = se_design_vec4(se_design_over(clear,t->primary,0.35f));
+  colors[ImGuiCol_DragDropTarget]        = se_design_vec4(t->primary);
+  colors[ImGuiCol_NavHighlight]          = se_design_vec4(t->primary);
+  colors[ImGuiCol_NavWindowingHighlight] = se_design_vec4(se_design_over(clear,t->primary,0.7f));
+  colors[ImGuiCol_NavWindowingDimBg]     = se_design_vec4(t->scrim);
+  colors[ImGuiCol_ModalWindowDimBg]      = se_design_vec4(t->scrim);
+
+  style->WindowPadding     = (ImVec2){t->window_padding,t->window_padding};
+  style->FramePadding      = (ImVec2){t->frame_padding_x,t->frame_padding_y};
+  style->ItemSpacing       = (ImVec2){t->item_spacing_x,t->item_spacing_y};
+  style->ItemInnerSpacing  = (ImVec2){6,4};
+  style->TouchExtraPadding = (ImVec2){2,4};
+  style->IndentSpacing     = 20;
+  style->ScrollbarSize     = t->scrollbar_size;
+  style->GrabMinSize       = t->grab_min_size;
+  style->WindowBorderSize  = 0;
+  style->ChildBorderSize   = t->control_border;
+  style->PopupBorderSize   = t->popup_border;
+  style->FrameBorderSize   = t->control_border;
+  style->TabBorderSize     = 0;
+  // Side panels are docked to the window edges, only floating surfaces get rounded
+  style->WindowRounding    = 0;
+  style->ChildRounding     = t->card_rounding;
+  style->FrameRounding     = t->input_rounding;
+  style->PopupRounding     = t->popup_rounding;
+  style->ScrollbarRounding = t->scrollbar_rounding;
+  style->GrabRounding      = 100;
+  style->TabRounding       = t->input_rounding;
+  style->LogSliderDeadzone = 4;
+  style->ButtonTextAlign   = (ImVec2){0.5,0.5};
+  // Hairline strokes are part of these designs. Textured AA lines are sampled from the font
+  // atlas with nearest filtering and break up at fractional DPI scales, use geometric AA.
+  style->AntiAliasedLinesUseTex = false;
+  // GNOME header bars center their title
+  style->WindowTitleAlign  = (ImVec2){t->design==SE_DESIGN_ADWAITA? 0.5f : 0.0f,0.5f};
+}
 void se_imgui_theme()
 {
+  se_update_design();
+  // Window background around the emulated screen, applied from the next frame
+  se_color_t clear = {0,0,0,1};
+  if(gui_state.design_active)clear = se_color_blend(clear,gui_state.design.background);
+  gui_state.pass_action.colors[0].value = (sg_color){clear.r,clear.g,clear.b,1.0f};
+  if(gui_state.design_active){
+    se_apply_design_style();
+    return;
+  }
   ImVec4* colors = igGetStyle()->Colors;
   colors[ImGuiCol_Text]                   = (ImVec4){1.00f, 1.00f, 1.00f, 1.00f};
   colors[ImGuiCol_TextDisabled]           = (ImVec4){0.6f, 0.6f, 0.6f, 0.5f};
@@ -6109,6 +8783,9 @@ void se_imgui_theme()
   style->LogSliderDeadzone                 = 4;
   style->TabRounding                       = 4;
   style->ButtonTextAlign = (ImVec2){0.5,0.5};
+  style->ItemInnerSpacing = (ImVec2){4,4};
+  style->WindowTitleAlign = (ImVec2){0,0.5};
+  style->AntiAliasedLinesUseTex = true;
 }
 #if defined(EMSCRIPTEN)
   //Setup the offline file system
@@ -6124,13 +8801,18 @@ void se_imgui_theme()
   });
 #endif
 #ifdef SE_PLATFORM_ANDROID
+// Binds the face buttons for the chosen layout. Android reports A as the bottom face button.
+static void se_set_controller_face_binds(se_controller_state_t* cont){
+  bool position = gui_state.settings.controller_face_layout==SE_FACE_LAYOUT_POSITION;
+  cont->key.bound_id[SE_KEY_A]= position? AKEYCODE_BUTTON_B : AKEYCODE_BUTTON_A;
+  cont->key.bound_id[SE_KEY_B]= position? AKEYCODE_BUTTON_A : AKEYCODE_BUTTON_B;
+  cont->key.bound_id[SE_KEY_X]= position? AKEYCODE_BUTTON_Y : AKEYCODE_BUTTON_X;
+  cont->key.bound_id[SE_KEY_Y]= position? AKEYCODE_BUTTON_X : AKEYCODE_BUTTON_Y;
+}
 void se_set_default_controller_binds(se_controller_state_t* cont){
   if(!cont)return;
   for(int i=0;i<SE_NUM_KEYBINDS;++i)cont->key.bound_id[i]=-1;
-  cont->key.bound_id[SE_KEY_A]= AKEYCODE_BUTTON_A;
-  cont->key.bound_id[SE_KEY_B]= AKEYCODE_BUTTON_B;
-  cont->key.bound_id[SE_KEY_X]= AKEYCODE_BUTTON_X;
-  cont->key.bound_id[SE_KEY_Y]= AKEYCODE_BUTTON_Y;
+  se_set_controller_face_binds(cont);
   cont->key.bound_id[SE_KEY_L]= AKEYCODE_BUTTON_L1;
   cont->key.bound_id[SE_KEY_R]= AKEYCODE_BUTTON_R1;
   cont->key.bound_id[SE_KEY_UP]= AKEYCODE_DPAD_UP;
@@ -6183,6 +8865,12 @@ bool se_load_controller_settings(se_controller_state_t * cont){
       cont->key.bound_id[i]=bind_map[i];
       cont->analog.bound_id[i]=bind_map[i+SE_NUM_BINDS_ALLOC];
     }
+    // Saved before the recording and swap hotkeys existed: their slots are unbound, but a 0
+    // would be a real button
+    if(cont->key.bound_id[SE_BIND_FORMAT_SLOT]<SE_BIND_FORMAT){
+      for(int i=SE_KEY_SCREENSHOT;i<=SE_KEY_SWAP_SCREENS;++i)if(cont->key.bound_id[i]==0)cont->key.bound_id[i]=-1;
+      cont->key.bound_id[SE_BIND_FORMAT_SLOT]=SE_BIND_FORMAT;
+    }
   }
   return load_old_settings;
 }
@@ -6211,15 +8899,114 @@ int se_get_sdl_axis_bind(SDL_GameController* gc, int button){
   if(bind.bindType!=SDL_CONTROLLER_BINDTYPE_AXIS)return -1;
   else return bind.value.axis;
 }
+static bool se_sdl_is_playstation(SDL_GameControllerType type){
+  return type==SDL_CONTROLLER_TYPE_PS3||type==SDL_CONTROLLER_TYPE_PS4||type==SDL_CONTROLLER_TYPE_PS5;
+}
+static bool se_sdl_is_nintendo(SDL_GameControllerType type){
+  return type==SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_PRO;
+}
+static const char* se_sdl_controller_type_name(SDL_GameControllerType type){
+  switch(type){
+    case SDL_CONTROLLER_TYPE_XBOX360: return "Xbox 360 Controller";
+    case SDL_CONTROLLER_TYPE_XBOXONE: return "Xbox Controller";
+    case SDL_CONTROLLER_TYPE_PS3: return "PlayStation 3 Controller";
+    case SDL_CONTROLLER_TYPE_PS4: return "PlayStation 4 Controller";
+    case SDL_CONTROLLER_TYPE_PS5: return "PlayStation 5 Controller";
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_PRO: return "Nintendo Switch Controller";
+    case SDL_CONTROLLER_TYPE_AMAZON_LUNA: return "Amazon Luna Controller";
+    case SDL_CONTROLLER_TYPE_GOOGLE_STADIA: return "Stadia Controller";
+    default: return NULL;
+  }
+}
+// Names of the controller's buttons as printed on it
+static const char* se_sdl_button_name(SDL_GameControllerType type, int button){
+  bool ps = se_sdl_is_playstation(type), nin = se_sdl_is_nintendo(type);
+  bool xbox_one = type==SDL_CONTROLLER_TYPE_XBOXONE;
+  switch(button){
+    case SDL_CONTROLLER_BUTTON_A: return ps? "Cross" : "A";
+    case SDL_CONTROLLER_BUTTON_B: return ps? "Circle" : "B";
+    case SDL_CONTROLLER_BUTTON_X: return ps? "Square" : "X";
+    case SDL_CONTROLLER_BUTTON_Y: return ps? "Triangle" : "Y";
+    case SDL_CONTROLLER_BUTTON_BACK:
+      if(ps)return type==SDL_CONTROLLER_TYPE_PS5? "Create" : type==SDL_CONTROLLER_TYPE_PS4? "Share" : "Select";
+      return nin? "Minus" : xbox_one? "View" : "Back";
+    case SDL_CONTROLLER_BUTTON_GUIDE: return ps? "PS" : nin? "Home" : "Guide";
+    case SDL_CONTROLLER_BUTTON_START:
+      if(ps)return type==SDL_CONTROLLER_TYPE_PS3? "Start" : "Options";
+      return nin? "Plus" : xbox_one? "Menu" : "Start";
+    case SDL_CONTROLLER_BUTTON_LEFTSTICK: return ps? "L3" : "Left Stick";
+    case SDL_CONTROLLER_BUTTON_RIGHTSTICK: return ps? "R3" : "Right Stick";
+    case SDL_CONTROLLER_BUTTON_LEFTSHOULDER: return ps? "L1" : nin? "L" : "LB";
+    case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: return ps? "R1" : nin? "R" : "RB";
+    case SDL_CONTROLLER_BUTTON_DPAD_UP: return "D-Pad Up";
+    case SDL_CONTROLLER_BUTTON_DPAD_DOWN: return "D-Pad Down";
+    case SDL_CONTROLLER_BUTTON_DPAD_LEFT: return "D-Pad Left";
+    case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: return "D-Pad Right";
+    case SDL_CONTROLLER_BUTTON_MISC1: return ps? "Mute" : nin? "Capture" : "Share";
+    case SDL_CONTROLLER_BUTTON_PADDLE1: return "Paddle 1";
+    case SDL_CONTROLLER_BUTTON_PADDLE2: return "Paddle 2";
+    case SDL_CONTROLLER_BUTTON_PADDLE3: return "Paddle 3";
+    case SDL_CONTROLLER_BUTTON_PADDLE4: return "Paddle 4";
+    case SDL_CONTROLLER_BUTTON_TOUCHPAD: return "Touchpad";
+  }
+  return NULL;
+}
+static const char* se_sdl_axis_name(SDL_GameControllerType type, int axis, int direction){
+  bool ps = se_sdl_is_playstation(type), nin = se_sdl_is_nintendo(type);
+  switch(axis){
+    case SDL_CONTROLLER_AXIS_LEFTX: return direction<0? "Left Stick Left" : direction>0? "Left Stick Right" : "Left Stick X";
+    case SDL_CONTROLLER_AXIS_LEFTY: return direction<0? "Left Stick Up" : direction>0? "Left Stick Down" : "Left Stick Y";
+    case SDL_CONTROLLER_AXIS_RIGHTX: return direction<0? "Right Stick Left" : direction>0? "Right Stick Right" : "Right Stick X";
+    case SDL_CONTROLLER_AXIS_RIGHTY: return direction<0? "Right Stick Up" : direction>0? "Right Stick Down" : "Right Stick Y";
+    case SDL_CONTROLLER_AXIS_TRIGGERLEFT: return ps? "L2" : nin? "ZL" : "LT";
+    case SDL_CONTROLLER_AXIS_TRIGGERRIGHT: return ps? "R2" : nin? "ZR" : "RT";
+  }
+  return NULL;
+}
+// Name of a key binding (joystick button, hat or axis direction) as the controller labels it
+static const char* se_sdl_key_bind_name(SDL_GameController* gc, int key){
+  if(!gc||key<0)return NULL;
+  SDL_GameControllerType type = SDL_GameControllerGetType(gc);
+  if(key&(SE_JOY_POS_MASK|SE_JOY_NEG_MASK)){
+    int axis = SB_BFE(key,0,16);
+    for(int a=0;a<SDL_CONTROLLER_AXIS_MAX;++a){
+      if(se_get_sdl_axis_bind(gc,a)==axis)return se_sdl_axis_name(type,a,(key&SE_JOY_NEG_MASK)? -1 : 1);
+    }
+    return NULL;
+  }
+  // Only buttons and hat directions, a button mapped to half an axis has no unique name
+  for(int b=0;b<SDL_CONTROLLER_BUTTON_MAX;++b){
+    SDL_GameControllerButtonBind bind = SDL_GameControllerGetBindForButton(gc,(SDL_GameControllerButton)b);
+    if(bind.bindType!=SDL_CONTROLLER_BINDTYPE_BUTTON&&bind.bindType!=SDL_CONTROLLER_BINDTYPE_HAT)continue;
+    if(se_get_sdl_key_bind(gc,b,0)==key)return se_sdl_button_name(type,b);
+  }
+  return NULL;
+}
+static const char* se_sdl_axis_bind_name(SDL_GameController* gc, int axis){
+  if(!gc||axis<0)return NULL;
+  SDL_GameControllerType type = SDL_GameControllerGetType(gc);
+  for(int a=0;a<SDL_CONTROLLER_AXIS_MAX;++a){
+    if(se_get_sdl_axis_bind(gc,a)==axis)return se_sdl_axis_name(type,a,0);
+  }
+  return NULL;
+}
+// Binds the face buttons for the chosen layout. SDL reports Nintendo controllers by their
+// labels, where A already is the right button like on the GBA and DS.
+static void se_set_controller_face_binds(se_controller_state_t* cont){
+  SDL_GameController * gc = cont->sdl_gc;
+  if(!gc)return;
+  bool swap = gui_state.settings.controller_face_layout==SE_FACE_LAYOUT_POSITION&&!se_sdl_is_nintendo(SDL_GameControllerGetType(gc));
+  cont->key.bound_id[SE_KEY_A]= se_get_sdl_key_bind(gc,swap? SDL_CONTROLLER_BUTTON_B : SDL_CONTROLLER_BUTTON_A,SE_JOY_POS_MASK);
+  cont->key.bound_id[SE_KEY_B]= se_get_sdl_key_bind(gc,swap? SDL_CONTROLLER_BUTTON_A : SDL_CONTROLLER_BUTTON_B,SE_JOY_POS_MASK);
+  cont->key.bound_id[SE_KEY_X]= se_get_sdl_key_bind(gc,swap? SDL_CONTROLLER_BUTTON_Y : SDL_CONTROLLER_BUTTON_X,SE_JOY_POS_MASK);
+  cont->key.bound_id[SE_KEY_Y]= se_get_sdl_key_bind(gc,swap? SDL_CONTROLLER_BUTTON_X : SDL_CONTROLLER_BUTTON_Y,SE_JOY_POS_MASK);
+}
 void se_set_default_controller_binds(se_controller_state_t* cont){
   if(!cont ||!cont->sdl_gc)return;
   SDL_GameController * gc = cont->sdl_gc;
   SDL_GameControllerUpdate();
   for(int i=0;i<SE_NUM_KEYBINDS;++i)cont->key.bound_id[i]=-1;
-  cont->key.bound_id[SE_KEY_A]= se_get_sdl_key_bind(gc,SDL_CONTROLLER_BUTTON_A,SE_JOY_POS_MASK);
-  cont->key.bound_id[SE_KEY_B]= se_get_sdl_key_bind(gc,SDL_CONTROLLER_BUTTON_B,SE_JOY_POS_MASK);
-  cont->key.bound_id[SE_KEY_X]= se_get_sdl_key_bind(gc,SDL_CONTROLLER_BUTTON_X,SE_JOY_POS_MASK);
-  cont->key.bound_id[SE_KEY_Y]= se_get_sdl_key_bind(gc,SDL_CONTROLLER_BUTTON_Y,SE_JOY_POS_MASK);
+  se_set_controller_face_binds(cont);
   cont->key.bound_id[SE_KEY_L]= se_get_sdl_key_bind(gc,SDL_CONTROLLER_BUTTON_LEFTSHOULDER,SE_JOY_POS_MASK);
   cont->key.bound_id[SE_KEY_R]= se_get_sdl_key_bind(gc,SDL_CONTROLLER_BUTTON_RIGHTSHOULDER,SE_JOY_POS_MASK);
   cont->key.bound_id[SE_KEY_UP]= se_get_sdl_key_bind(gc,SDL_CONTROLLER_BUTTON_DPAD_UP,SE_JOY_POS_MASK);
@@ -6257,17 +9044,59 @@ void se_set_new_controller(se_controller_state_t* cont, int index){
 }
 #endif
 
+static void se_save_controller_bindings(se_controller_state_t* cont, const char* name){
+  int32_t bind_map[SE_NUM_BINDS_ALLOC*2];
+  for(int i=0;i<SE_NUM_BINDS_ALLOC;++i){
+    bind_map[i]= cont->key.bound_id[i];
+    bind_map[i+SE_NUM_BINDS_ALLOC]= cont->analog.bound_id[i];
+  }
+  bind_map[SE_BIND_FORMAT_SLOT]=SE_BIND_FORMAT;
+  char settings_path[SB_FILE_PATH_SIZE];
+  snprintf(settings_path,SB_FILE_PATH_SIZE,"%s%s-bindings.bin",se_get_pref_path(),name);
+  sb_save_file_data(settings_path,(uint8_t*)bind_map,sizeof(bind_map));
+  se_emscripten_flush_fs();
+}
+// Changes which button of a game controller is A and rebinds the face buttons of the
+// connected controller
+SKYEMU_API void se_set_controller_face_layout(uint32_t layout){
+  if(layout>=SE_FACE_LAYOUT_COUNT||layout==gui_state.settings.controller_face_layout)return;
+  gui_state.settings.controller_face_layout = layout;
+  se_controller_state_t* cont = &gui_state.controller;
+#if defined(USE_SDL)
+  if(!cont->sdl_gc||!cont->sdl_joystick)return;
+  se_set_controller_face_binds(cont);
+  se_save_controller_bindings(cont,SDL_JoystickName(cont->sdl_joystick));
+#elif defined(SE_PLATFORM_ANDROID)
+  se_set_controller_face_binds(cont);
+  se_save_controller_bindings(cont,SE_ANDROID_CONTROLLER_NAME);
+#else
+  (void)cont;
+#endif
+}
+SKYEMU_API uint32_t se_get_controller_face_layout(void){
+  return gui_state.settings.controller_face_layout;
+}
 void se_draw_controller_config(gui_state_t* gui){
-  se_section(ICON_FK_GAMEPAD " Controllers");
+  if(!se_section(ICON_FK_GAMEPAD " Controllers"))return;
   ImGuiStyle* style = igGetStyle();
   se_controller_state_t *cont = &gui->controller;
+  // Can be chosen before a controller is connected, it is used for its default bindings
+  int face_layout = gui_state.settings.controller_face_layout;
+  se_field_label("Face Buttons");igSameLine(SE_FIELD_INDENT,0);
+  igPushItemWidth(-1);
+  se_combo_str("##FaceButtons",&face_layout,"Match the Labels\0Match GBA Positions\0",0);
+  igPopItemWidth();
+  se_set_controller_face_layout(face_layout);
 #if USE_SDL
   const char* cont_name = "No Controller";
   if(cont->sdl_joystick){
     cont_name = SDL_JoystickName(cont->sdl_joystick);
   }
   igPushItemWidth(-1);
-  if(igBeginCombo("##Controller", se_localize_and_cache(cont_name), ImGuiComboFlags_None)){
+  se_design_push_combo_style();
+  bool controller_combo_open = igBeginCombo("##Controller", se_localize_and_cache(cont_name), ImGuiComboFlags_None);
+  se_design_pop_combo_style();
+  if(controller_combo_open){
     {
       bool is_selected=cont->sdl_joystick==NULL;
       if(igSelectableBool(se_localize_and_cache("No Controller"),is_selected,ImGuiSelectableFlags_None, (ImVec2){0,0})){
@@ -6293,6 +9122,10 @@ void se_draw_controller_config(gui_state_t* gui){
 #else
   const char* cont_name = SE_ANDROID_CONTROLLER_NAME;
 #endif
+#ifdef USE_SDL
+  const char* type_name = cont->sdl_gc? se_sdl_controller_type_name(SDL_GameControllerGetType(cont->sdl_gc)) : NULL;
+  if(type_name)se_text_disabled("%s",se_localize_and_cache(type_name));
+#endif
   bool modified = se_handle_keybind_settings(SE_BIND_KEY,&(cont->key));
   modified |= se_handle_keybind_settings(SE_BIND_ANALOG,&(cont->analog));
   if(se_button("Reset Default Controller Bindings",(ImVec2){0,0})){
@@ -6301,17 +9134,7 @@ void se_draw_controller_config(gui_state_t* gui){
 #endif // TARGET_OS_MACCATALYST
     modified=true;
   }
-  if(modified){
-    int32_t bind_map[SE_NUM_BINDS_ALLOC*2];
-    for(int i=0;i<SE_NUM_BINDS_ALLOC;++i){
-      bind_map[i]= cont->key.bound_id[i];
-      bind_map[i+SE_NUM_BINDS_ALLOC]= cont->analog.bound_id[i];
-    }
-    char settings_path[SB_FILE_PATH_SIZE];
-    snprintf(settings_path,SB_FILE_PATH_SIZE,"%s%s-bindings.bin",se_get_pref_path(),cont_name);
-    sb_save_file_data(settings_path,(uint8_t*)bind_map,sizeof(bind_map));
-    se_emscripten_flush_fs();
-  }
+  if(modified)se_save_controller_bindings(cont,cont_name);
 #ifdef USE_SDL
   if(SDL_JoystickHasRumble(cont->sdl_joystick)){se_text("Rumble Supported");
   }else se_text("Rumble Not Supported");
@@ -6335,16 +9158,193 @@ SKYEMU_API void se_restore_state_slot(int slot){
 }
 void se_push_disabled(){
   ImGuiStyle *style = igGetStyle();
-  igPushStyleColorVec4(ImGuiCol_Text, style->Colors[ImGuiCol_TextDisabled]);
+  // The design systems fade the whole control (TextDisabled is their secondary text color)
+  if(gui_state.design_active)igPushStyleVarFloat(ImGuiStyleVar_Alpha, style->Alpha*0.45f);
+  else igPushStyleColorVec4(ImGuiCol_Text, style->Colors[ImGuiCol_TextDisabled]);
   igPushItemFlag(ImGuiItemFlags_Disabled, true);
 }
 void se_pop_disabled(){
-   igPopStyleColor(1);
+   if(gui_state.design_active)igPopStyleVar(1);
+   else igPopStyleColor(1);
    igPopItemFlag();
 }
+static float* se_touch_layout_element(bool portrait, int element){
+  return gui_state.settings.touch_layout[portrait? 1:0][element];
+}
+// Moves the dragged element by the drag in progress, keeping its center on screen
+static void se_touch_layout_commit_drag(){
+  if(!gui_state.touch_editor_dragging)return;
+  int e = gui_state.touch_editor_selected;
+  const float* c = gui_state.touch_editor_canvas;
+  if(e>=0&&c[2]>0&&c[3]>0){
+    float* t = se_touch_layout_element(gui_state.touch_editor_portrait,e);
+    float ax = gui_state.touch_element_anchor[e][0], ay = gui_state.touch_element_anchor[e][1];
+    float x = ax+(t[0]+gui_state.touch_editor_drag[0])*c[2];
+    float y = ay+(t[1]+gui_state.touch_editor_drag[1])*c[3];
+    x = fminf(fmaxf(x,c[0]),c[0]+c[2]);
+    y = fminf(fmaxf(y,c[1]),c[1]+c[3]);
+    t[0] = (x-ax)/c[2];
+    t[1] = (y-ay)/c[3];
+  }
+  gui_state.touch_editor_dragging = false;
+  gui_state.touch_editor_drag[0] = gui_state.touch_editor_drag[1] = 0;
+}
+static void se_open_touch_layout_editor(){
+  gui_state.touch_editor_open = true;
+  gui_state.touch_editor_selected = -1;
+  gui_state.touch_editor_dragging = false;
+  gui_state.touch_editor_reopen_menu = gui_state.sidebar_open;
+  gui_state.sidebar_open = false;
+  gui_state.touch_editor_prev_run_mode = emu_state.run_mode;
+  if(emu_state.run_mode==SB_MODE_RUN||emu_state.run_mode==SB_MODE_REWIND)emu_state.run_mode = SB_MODE_PAUSE;
+}
+static void se_close_touch_layout_editor(){
+  se_touch_layout_commit_drag();
+  gui_state.touch_editor_open = false;
+  if(gui_state.touch_editor_reopen_menu)gui_state.sidebar_open = true;
+  int prev = gui_state.touch_editor_prev_run_mode;
+  if((prev==SB_MODE_RUN||prev==SB_MODE_REWIND)&&emu_state.run_mode==SB_MODE_PAUSE&&emu_state.rom_loaded){
+    emu_state.run_mode = SB_MODE_RUN;
+    emu_state.step_frames = 1;
+  }
+}
+// Layout editor input over the screen: press an element to select it, drag to move it and
+// use the mouse wheel to resize it
+static void se_touch_layout_editor_canvas(float x, float y, float w, float h, bool portrait){
+  ImDrawList* dl = igGetWindowDrawList();
+  ImGuiIO* io = igGetIO();
+  gui_state.touch_editor_portrait = portrait;
+  gui_state.touch_editor_canvas[0] = x; gui_state.touch_editor_canvas[1] = y;
+  gui_state.touch_editor_canvas[2] = w; gui_state.touch_editor_canvas[3] = h;
+  ImU32 accent = gui_state.design_active? se_design_u32(gui_state.design.primary) : 0xff00a0ff;
+  for(int e=0;e<SE_TOUCH_NUM_ELEMENTS;++e){
+    const float* r = gui_state.touch_element_bounds[e];
+    if(r[0]>r[2])continue;
+    bool selected = e==gui_state.touch_editor_selected;
+    ImDrawList_AddRect(dl,(ImVec2){r[0]-4,r[1]-4},(ImVec2){r[2]+4,r[3]+4},selected? accent : 0x90ffffff,8,ImDrawCornerFlags_All,selected? 3.f:1.f);
+  }
+  igSetCursorScreenPos((ImVec2){x,y});
+  igInvisibleButton("##touch-layout-editor",(ImVec2){w,h},ImGuiButtonFlags_None);
+  if(igIsItemActivated()){
+    // The smallest element under the pointer wins, so small buttons stay reachable
+    int best = -1;
+    float best_area = 1e30f;
+    for(int e=0;e<SE_TOUCH_NUM_ELEMENTS;++e){
+      const float* r = gui_state.touch_element_bounds[e];
+      if(r[0]>r[2])continue;
+      if(io->MousePos.x<r[0]-8||io->MousePos.x>r[2]+8||io->MousePos.y<r[1]-8||io->MousePos.y>r[3]+8)continue;
+      float area = (r[2]-r[0])*(r[3]-r[1]);
+      if(area<best_area){best_area = area; best = e;}
+    }
+    gui_state.touch_editor_selected = best;
+    gui_state.touch_editor_dragging = best>=0;
+    gui_state.touch_editor_drag[0] = gui_state.touch_editor_drag[1] = 0;
+  }
+  if(gui_state.touch_editor_dragging){
+    if(igIsItemActive()&&w>0&&h>0){
+      gui_state.touch_editor_drag[0]+=io->MouseDelta.x/w;
+      gui_state.touch_editor_drag[1]+=io->MouseDelta.y/h;
+    }else se_touch_layout_commit_drag();
+  }
+  int sel = gui_state.touch_editor_selected;
+  if(sel>=0&&igIsItemHovered(ImGuiHoveredFlags_None)&&io->MouseWheel!=0){
+    float* t = se_touch_layout_element(portrait,sel);
+    float scale = t[2]>0? t[2] : 1.f;
+    scale*= 1.f+io->MouseWheel*0.08f;
+    t[2] = fminf(fmaxf(scale,0.5f),2.5f);
+  }
+}
+// Toolbar of the layout editor, shown at the top of the screen while editing
+static void se_draw_touch_layout_editor_toolbar(float top){
+  if(!gui_state.touch_editor_open)return;
+  // Opening the menu leaves the editor
+  if(gui_state.sidebar_open){
+    gui_state.touch_editor_reopen_menu = false;
+    se_close_touch_layout_editor();
+    return;
+  }
+  ImGuiIO* io = igGetIO();
+  float w = fminf(440.f,io->DisplaySize.x-16.f);
+  igSetNextWindowPos((ImVec2){io->DisplaySize.x*0.5f,top+8.f},ImGuiCond_Always,(ImVec2){0.5f,0.f});
+  igSetNextWindowSize((ImVec2){w,0},ImGuiCond_Always);
+  igBegin("##TouchLayoutEditor",NULL,ImGuiWindowFlags_NoDecoration|ImGuiWindowFlags_NoSavedSettings|ImGuiWindowFlags_NoMove);
+  bool portrait = gui_state.touch_editor_portrait;
+  se_text(portrait? ICON_FK_ARROWS " Customize the Portrait Layout" : ICON_FK_ARROWS " Customize the Landscape Layout");
+  int sel = gui_state.touch_editor_selected;
+  if(sel<0){
+    se_text_disabled("Drag a button to move it, then change its size here. Portrait and landscape layouts are saved separately.");
+  }else{
+    float* t = se_touch_layout_element(portrait,sel);
+    if(t[2]<=0)t[2] = 1.f;
+    se_field_label("%s",se_localize_and_cache(se_touch_element_name(sel)));
+    igSameLine(SE_FIELD_INDENT,0);
+    igPushItemWidth(-1);
+    se_slider_float("##TouchElementSize",&t[2],0.5f,2.5f,"Size: %.2fx");
+    igPopItemWidth();
+  }
+  float bw = (igGetWindowContentRegionWidth()-igGetStyle()->ItemSpacing.x*2)/3.f;
+  if(sel<0)se_push_disabled();
+  if(se_button("Reset Button",(ImVec2){bw,0})&&sel>=0){
+    float* t = se_touch_layout_element(portrait,sel);
+    t[0] = t[1] = t[2] = 0;
+  }
+  if(sel<0)se_pop_disabled();
+  igSameLine(0,-1);
+  if(se_button("Reset Layout",(ImVec2){bw,0})){
+    memset(gui_state.settings.touch_layout[portrait? 1:0],0,sizeof(gui_state.settings.touch_layout[0]));
+  }
+  igSameLine(0,-1);
+  if(se_button(ICON_FK_CHECK " Done",(ImVec2){bw,0}))se_close_touch_layout_editor();
+  igEnd();
+}
+// ROM patches of the loaded game (ROM hacks, translations, fixes)
+static void se_draw_patch_settings(void){
+  if(!se_section(ICON_FK_PUZZLE_PIECE " ROM Patches"))return;
+  bool apply = !gui_state.settings.soft_patching_off;
+  if(se_checkbox("Apply Patches",&apply)){
+    gui_state.settings.soft_patching_off = !apply;
+    char rom_file[SB_FILE_PATH_SIZE];
+    snprintf(rom_file,sizeof(rom_file),"%s",gui_state.patch.rom_file);
+    if(rom_file[0])se_load_rom(rom_file);
+  }
+  ImU32 ok_color = 0xff00c000, error_color = 0xff0000ff;
+  if(gui_state.design_active){
+    ok_color = se_design_u32(gui_state.design.accent_text);
+    error_color = se_design_u32(gui_state.design.error);
+  }
+  if(gui_state.patch.applied){
+    igPushStyleColorU32(ImGuiCol_Text,ok_color);
+    se_text(ICON_FK_CHECK_CIRCLE " %s",gui_state.patch.status);
+    igPopStyleColor(1);
+    if(gui_state.patch.original_size!=gui_state.patch.patched_size){
+      se_text_disabled(se_localize_and_cache("ROM size changed from %zu KB to %zu KB"),
+                       gui_state.patch.original_size/1024,gui_state.patch.patched_size/1024);
+    }
+  }else if(gui_state.patch.failed){
+    igPushStyleColorU32(ImGuiCol_Text,error_color);
+    se_text(ICON_FK_EXCLAMATION_TRIANGLE " %s",gui_state.patch.status);
+    igPopStyleColor(1);
+    se_text_disabled("The game was loaded without it.");
+  }else if(gui_state.patch.path[0]&&gui_state.settings.soft_patching_off){
+    se_text_disabled("%s",se_localize_and_cache("A patch was found but patches are turned off"));
+  }else{
+    se_text_disabled("No patch for this game. Add an IPS, UPS or BPS patch below, or drop one on the window.");
+  }
+  if(gui_state.patch.add_error[0]){
+    igPushStyleColorU32(ImGuiCol_Text,error_color);
+    se_text(ICON_FK_EXCLAMATION_TRIANGLE " %s",gui_state.patch.add_error);
+    igPopStyleColor(1);
+  }
+  bool clicked = se_button(ICON_FK_FOLDER_OPEN " Add Patch",(ImVec2){0,0});
+  if(igIsItemVisible()){
+    ImVec2 min, max;
+    igGetItemRectMin(&min);
+    igGetItemRectMax(&max);
+    se_open_file_browser(clicked,min.x,min.y,max.x-min.x,max.y-min.y,se_load_patch_from_browser,valid_patch_file_types,NULL);
+  }
+}
 void se_draw_touch_controls_settings(){
-
-  se_section(ICON_FK_HAND_O_RIGHT " Touch Control Settings");
+  if(!se_section(ICON_FK_HAND_O_RIGHT " Touch Control Settings"))return;
   float aspect_ratio = gui_state.screen_width/(float)gui_state.screen_height;
   float scale = (igGetWindowContentRegionWidth()-2)/(aspect_ratio+1.0/aspect_ratio);
 
@@ -6361,11 +9361,23 @@ void se_draw_touch_controls_settings(){
   igEndChildFrame();
   igDummy((ImVec2){0,(igGetWindowContentRegionWidth()*0.5-2-scale)*0.5});
 
-  se_text("Scale");igSameLine(SE_FIELD_INDENT,0);
+  bool shown = !gui_state.settings.touch_controller_off;
+  se_checkbox("Show On-screen Controller",&shown);
+  gui_state.settings.touch_controller_off = !shown;
+  if(!shown)se_push_disabled();
+
+  float half_w = (igGetWindowContentRegionWidth()-igGetStyle()->ItemSpacing.x)*0.5f;
+  if(se_button(ICON_FK_ARROWS " Customize Layout",(ImVec2){half_w,0}))se_open_touch_layout_editor();
+  igSameLine(0,-1);
+  if(se_button(ICON_FK_REPEAT " Reset Layouts",(ImVec2){half_w,0})){
+    memset(gui_state.settings.touch_layout,0,sizeof(gui_state.settings.touch_layout));
+  }
+
+  se_field_label("Scale");igSameLine(SE_FIELD_INDENT,0);
   igPushItemWidth(-1);
   se_slider_float("##TouchControlsScale",&gui_state.settings.touch_controls_scale,0.3,1.2,"Scale: %.2f");
 
-  se_text("Opacity");igSameLine(SE_FIELD_INDENT,0);
+  se_field_label("Opacity");igSameLine(SE_FIELD_INDENT,0);
   se_slider_float("##TouchControlsOpacity",&gui_state.settings.touch_controls_opacity,0,1.0,"Opacity: %.2f");
   bool auto_hide = gui_state.settings.auto_hide_touch_controls;
   se_checkbox("Hide when inactive",&auto_hide);
@@ -6374,6 +9386,10 @@ void se_draw_touch_controls_settings(){
   bool show_turbo = gui_state.settings.touch_controls_show_turbo;
   se_checkbox("Enable Turbo and Hold Button Modifiers",&show_turbo);
   gui_state.settings.touch_controls_show_turbo = show_turbo;
+
+  bool show_speed = gui_state.settings.touch_controls_show_speed;
+  se_checkbox("Show Rewind and Fast Forward Buttons",&show_speed);
+  gui_state.settings.touch_controls_show_speed = show_speed;
   
   bool avoid_portrait = gui_state.settings.avoid_overlaping_touchscreen & SE_AVOID_OVERLAP_PORTRAIT;
   bool avoid_landscape = gui_state.settings.avoid_overlaping_touchscreen & SE_AVOID_OVERLAP_LANDSCAPE;
@@ -6391,6 +9407,7 @@ void se_draw_touch_controls_settings(){
   se_checkbox("Button Labels",&button_labels);
   gui_state.settings.touch_screen_show_button_labels = button_labels;
   igPopItemWidth();
+  if(!shown)se_pop_disabled();
 }
 void se_draw_save_states(bool cloud){
   ImGuiStyle *style = igGetStyle();
@@ -6406,7 +9423,8 @@ void se_draw_save_states(bool cloud){
     int slot_x = 0;
     int slot_y = i;
     int slot_w = (win_w-style->FramePadding.x)*0.5;
-    int slot_h = 64; 
+    // Label and two buttons, the design systems use taller controls than the classic skin
+    int slot_h = fmax(64,style->FramePadding.y*2+igGetTextLineHeight()+igGetFrameHeight()*2+style->ItemSpacing.y*2); 
     if(i%2)igSameLine(0,style->FramePadding.x);
 
     igBeginChildFrame(i+100, (ImVec2){slot_w,slot_h},ImGuiWindowFlags_NoDecoration|ImGuiWindowFlags_NoScrollWithMouse);
@@ -6417,6 +9435,16 @@ void se_draw_save_states(bool cloud){
     int screen_w = 64;
     int screen_h = 64+style->FramePadding.y*2; 
     int button_w = 55; 
+    // The design systems use larger text, the slot title gets its own row and the
+    // preview is fitted next to the buttons below it
+    float title_h = 0;
+    float preview_rounding = 0;
+    if(gui_state.design_active){
+      title_h = igGetTextLineHeightWithSpacing();
+      screen_w = fminf(screen_w,slot_w-button_w-style->FramePadding.x*3);
+      screen_h = fminf(screen_h,slot_h-title_h-style->FramePadding.y*2);
+      preview_rounding = fminf(gui_state.design.input_rounding,6);
+    }
     igSetCursorPosY(igGetCursorPosY()+1.0);
     se_text(se_localize_and_cache("Save Slot %d"),i);
     igSetCursorPosY(igGetCursorPosY()-2.0);
@@ -6443,9 +9471,9 @@ void se_draw_save_states(bool cloud){
       float w_scale = 1.0;
       float h_scale = 1.0;
       float border_screen_x=screen_x+button_w+(slot_w-screen_w-button_w)*0.5;
-      float border_screen_y=screen_y+(slot_h-screen_h)*0.5-style->FramePadding.y;
+      float border_screen_y=screen_y+(slot_h-screen_h+title_h)*0.5-style->FramePadding.y;
       ImU32 color = igColorConvertFloat4ToU32(style->Colors[ImGuiCol_MenuBarBg]);
-      ImDrawList_AddRectFilled(igGetWindowDrawList(),(ImVec2){border_screen_x-2,border_screen_y},(ImVec2){border_screen_x+screen_w+2,border_screen_y+screen_h},color,0,ImDrawCornerFlags_None);
+      ImDrawList_AddRectFilled(igGetWindowDrawList(),(ImVec2){border_screen_x-2,border_screen_y},(ImVec2){border_screen_x+screen_w+2,border_screen_y+screen_h},color,preview_rounding,ImDrawCornerFlags_All);
       if(states[i].screenshot_width>states[i].screenshot_height){
         h_scale = (float)states[i].screenshot_height/(float)states[i].screenshot_width;
       }else{
@@ -6454,7 +9482,7 @@ void se_draw_save_states(bool cloud){
       screen_w*=w_scale;
       screen_h*=h_scale;
       screen_x+=button_w+(slot_w-screen_w-button_w)*0.5;
-      screen_y+=(slot_h-screen_h)*0.5-style->FramePadding.y;
+      screen_y+=(slot_h-screen_h+title_h)*0.5-style->FramePadding.y;
    
       se_draw_image(states[i].screenshot,states[i].screenshot_width,states[i].screenshot_height,
                     screen_x*se_dpi_scale(),screen_y*se_dpi_scale(),screen_w*se_dpi_scale(),screen_h*se_dpi_scale(), true);
@@ -6466,9 +9494,9 @@ void se_draw_save_states(bool cloud){
     }else{
       screen_h*=0.85;
       screen_x+=button_w+(slot_w-screen_w-button_w)*0.5;
-      screen_y+=(slot_h-screen_h)*0.5-style->FramePadding.y;
+      screen_y+=(slot_h-screen_h+title_h)*0.5-style->FramePadding.y;
       ImU32 color = igColorConvertFloat4ToU32(style->Colors[ImGuiCol_MenuBarBg]);
-      ImDrawList_AddRectFilled(igGetWindowDrawList(),(ImVec2){screen_x,screen_y},(ImVec2){screen_x+screen_w,screen_y+screen_h},color,0,ImDrawCornerFlags_None);
+      ImDrawList_AddRectFilled(igGetWindowDrawList(),(ImVec2){screen_x,screen_y},(ImVec2){screen_x+screen_w,screen_y+screen_h},color,preview_rounding,ImDrawCornerFlags_All);
       ImVec2 anchor;
       igSetCursorScreenPos((ImVec2){screen_x+screen_w*0.5-5,screen_y+screen_h*0.5-5});
       if(cloud_busy){
@@ -6486,31 +9514,156 @@ void se_draw_save_states(bool cloud){
   #endif 
   if(!emu_state.rom_loaded)se_pop_disabled();
 }
+// Color scheme, accent and font options of the platform design systems
+static void se_draw_design_settings(){
+  const se_design_tokens_t* t = &gui_state.design;
+  int scheme = gui_state.settings.color_scheme;
+  if(scheme<0||scheme>=SE_COLOR_SCHEME_COUNT)scheme = SE_COLOR_SCHEME_SYSTEM;
+  se_field_label("Color Scheme");igSameLine(SE_FIELD_INDENT,0);
+  igPushItemWidth(-1);
+  se_combo_str("##ColorScheme",&scheme,"Follow System\0Light\0Dark\0Black (AMOLED)\0",0);
+  igPopItemWidth();
+  gui_state.settings.color_scheme = scheme;
+
+  int contrast = gui_state.settings.contrast;
+  if(contrast<0||contrast>=SE_CONTRAST_COUNT)contrast = SE_CONTRAST_SYSTEM;
+  se_field_label("Contrast");igSameLine(SE_FIELD_INDENT,0);
+  igPushItemWidth(-1);
+  se_combo_str("##Contrast",&contrast,"Follow System\0Standard\0High\0",0);
+  igPopItemWidth();
+  gui_state.settings.contrast = contrast;
+
+  bool custom = gui_state.settings.use_custom_accent;
+  se_checkbox("Custom Accent Color",&custom);
+  // Start from the accent in use so enabling the option does not change the colors
+  if(custom&&!gui_state.settings.use_custom_accent)gui_state.settings.custom_accent = t->accent;
+  gui_state.settings.use_custom_accent = custom;
+  if(custom){
+    // Material baseline, Windows blue and the GNOME accent palette, followed by a free color picker
+    static const uint32_t presets[]={0x6750A4,0x0078D4,0x3584E4,0x2190A4,0x3A944A,0xC88800,0xED5B00,0xE62D42,0xD56199};
+    int num_presets = sizeof(presets)/sizeof(presets[0]);
+    ImVec2 avail;
+    igGetContentRegionAvail(&avail);
+    float spacing = 4;
+    float size = floorf((avail.x-spacing*num_presets)/(num_presets+1));
+    if(size>32)size = 32;
+    float rounding = t->design==SE_DESIGN_FLUENT? 4 : size*0.5f;
+    igPushStyleVarFloat(ImGuiStyleVar_FrameRounding,rounding);
+    igPushStyleVarFloat(ImGuiStyleVar_FrameBorderSize,0);
+    uint32_t current = gui_state.settings.custom_accent&0xffffff;
+    bool matched = false;
+    ImGuiColorEditFlags flags = ImGuiColorEditFlags_NoTooltip|ImGuiColorEditFlags_NoDragDrop|ImGuiColorEditFlags_NoBorder;
+    for(int i=0;i<=num_presets;++i){
+      bool picker = i==num_presets;
+      uint32_t rgb = picker? current : presets[i];
+      bool selected = picker? !matched : rgb==current;
+      matched|=selected;
+      igPushIDInt(i);
+      if(i)igSameLine(0,spacing);
+      ImVec2 p;
+      igGetCursorScreenPos(&p);
+      se_color_t c = se_color_from_rgb(rgb,1);
+      if(igColorButton("##accent",se_design_vec4(c),flags,(ImVec2){size,size})){
+        if(picker)igOpenPopup("##accent-picker",ImGuiPopupFlags_None);
+        else gui_state.settings.custom_accent = rgb;
+      }
+      if(selected){
+        ImDrawList_AddRect(igGetWindowDrawList(),(ImVec2){p.x-2,p.y-2},(ImVec2){p.x+size+2,p.y+size+2},se_design_u32(t->on_surface),rounding+2,ImDrawCornerFlags_All,2.0f);
+      }
+      if(picker){
+        // A '+' marks the free color picker
+        ImDrawList* dl = igGetWindowDrawList();
+        float cx = p.x+size*0.5f, cy = p.y+size*0.5f, arm = size*0.22f;
+        ImU32 fg = se_color_tone(rgb)>60? 0xff000000 : 0xffffffff;
+        ImDrawList_AddLine(dl,(ImVec2){cx-arm,cy},(ImVec2){cx+arm,cy},fg,2.0f);
+        ImDrawList_AddLine(dl,(ImVec2){cx,cy-arm},(ImVec2){cx,cy+arm},fg,2.0f);
+        if(igBeginPopup("##accent-picker",ImGuiWindowFlags_None)){
+          float col[3]={c.r,c.g,c.b};
+          if(igColorPicker3("##picker",col,ImGuiColorEditFlags_NoSidePreview|ImGuiColorEditFlags_NoSmallPreview)){
+            gui_state.settings.custom_accent = se_color_to_rgb((se_color_t){col[0],col[1],col[2],1});
+          }
+          igEndPopup();
+        }
+      }
+      igPopID();
+    }
+    igPopStyleVar(2);
+  }else{
+    const char* source = "Using the default accent color";
+    if(t->design==SE_DESIGN_MATERIAL3&&gui_state.system_appearance.has_core_palette)source = "Using your wallpaper colors (Material You)";
+    else if(gui_state.system_appearance.accent!=SE_ACCENT_NONE)source = "Using the system accent color";
+    se_text_disabled(source);
+  }
+
+  bool system_font = !gui_state.settings.use_bundled_font;
+  se_checkbox("Use System Font",&system_font);
+  gui_state.settings.use_bundled_font = !system_font;
+  if(system_font){
+    if(gui_state.system_font_path[0]){
+      const char *base, *file_name, *ext;
+      sb_breakup_path(gui_state.system_font_path,&base,&file_name,&ext);
+      se_text_disabled("%s.%s",file_name,ext);
+    }else se_text_disabled("Not found, using the bundled font");
+  }
+}
+// Search field of the menu, with a button that clears it or collapses / expands every section
+static void se_draw_menu_search(void){
+  ImGuiStyle* style = igGetStyle();
+  ImVec2 avail;
+  igGetContentRegionAvail(&avail);
+  float bw = igGetFrameHeight();
+  char hint[96];
+  snprintf(hint,sizeof(hint),ICON_FK_SEARCH " %s",se_localize_and_cache("Search settings"));
+  igSetNextItemWidth(avail.x-bw-style->ItemSpacing.x);
+  igInputTextWithHint("##MenuSearch",hint,gui_state.menu_search,sizeof(gui_state.menu_search),ImGuiInputTextFlags_AutoSelectAll,NULL,NULL);
+  igSameLine(0,style->ItemSpacing.x);
+  if(se_menu_search_query()[0]){
+    if(se_button(ICON_FK_TIMES "##ClearMenuSearch",(ImVec2){bw,bw}))gui_state.menu_search[0]=0;
+    se_tooltip("Clear the search");
+    return;
+  }
+  // Sections drawn in the last frame
+  bool any_open = false;
+  for(int i=0;i<gui_state.menu_section_count;++i)any_open|=!se_menu_section_collapsed(gui_state.menu_section_ids[i]);
+  if(se_button(any_open? ICON_FK_COMPRESS "##CollapseMenu" : ICON_FK_EXPAND "##CollapseMenu",(ImVec2){bw,bw})){
+    for(int i=0;i<gui_state.menu_section_count;++i)se_menu_section_set_collapsed(gui_state.menu_section_ids[i],any_open);
+  }
+  se_tooltip(any_open? "Collapse all sections" : "Expand all sections");
+}
 void se_draw_menu_panel(){
     if (!show_ui)
         return;
   ImGuiStyle *style = igGetStyle();
   int win_w = igGetWindowContentRegionWidth();
-  se_section(ICON_FK_FLOPPY_O " Save States");
-  if(gui_state.settings.hardcore_mode&&gui_state.ra_logged_in)se_text("Disabled in Hardcore Mode");
-  else{
-    if (cloud_state.drive){
-      if (igBeginTabBar("Saves",ImGuiTabBarFlags_None)){
-        if (igBeginTabItem("Local",NULL,ImGuiTabItemFlags_None)){
-          se_draw_save_states(false);
-          igEndTabItem();
+  se_draw_menu_search();
+  gui_state.menu_sections = true;
+  gui_state.menu_sections_shown = 0;
+  gui_state.menu_section_count = 0;
+  if(se_section(ICON_FK_FLOPPY_O " Save States")){
+    if(gui_state.settings.hardcore_mode&&gui_state.ra_logged_in)se_text("Disabled in Hardcore Mode");
+    else{
+      if (cloud_state.drive){
+        if (igBeginTabBar("Saves",ImGuiTabBarFlags_None)){
+          if (igBeginTabItem("Local",NULL,ImGuiTabItemFlags_None)){
+            se_draw_save_states(false);
+            igEndTabItem();
+          }
+          if (igBeginTabItem("Cloud",NULL,ImGuiTabItemFlags_None)){
+            se_draw_save_states(true);
+            igEndTabItem();
+          }
+          igEndTabBar();
         }
-        if (igBeginTabItem("Cloud",NULL,ImGuiTabItemFlags_None)){
-          se_draw_save_states(true);
-          igEndTabItem();
-        }
-        igEndTabBar();
+      }else{
+        se_draw_save_states(false);
       }
-    }else{
-      se_draw_save_states(false);
     }
   }
-  se_section(ICON_FK_CLOUD " Google Drive");
+  if(emu_state.rom_loaded)se_draw_recording_settings(win_w);
+#ifdef ENABLE_HTTP_CONTROL_SERVER
+  if(emu_state.rom_loaded)se_draw_streaming_settings(win_w);
+#endif
+  if(se_section(ICON_FK_CLOUD " Google Drive")){
   if (!cloud_state.drive){
     bool pending_login = cloud_drive_pending_login();
     if (pending_login) se_push_disabled();
@@ -6557,10 +9710,12 @@ void se_draw_menu_panel(){
     if (pending_logout) se_pop_disabled();
     igEndGroup();
   }
+  }
 
   if(emu_state.system==SYSTEM_NDS || emu_state.system == SYSTEM_GBA || emu_state.system == SYSTEM_GB){
-    se_section(ICON_FK_KEY " Action Replay Codes");
-    if(gui_state.settings.hardcore_mode&&gui_state.ra_logged_in) se_text("Disabled in Hardcore Mode");
+    bool cheats_blocked = gui_state.settings.hardcore_mode&&gui_state.ra_logged_in;
+    if(!se_section(ICON_FK_KEY " Action Replay Codes")){}
+    else if(cheats_blocked) se_text("Disabled in Hardcore Mode");
     else{
       int free_cheat_index = -1; 
       for(int i=0;i<SE_NUM_CHEATS;i++){
@@ -6619,11 +9774,13 @@ void se_draw_menu_panel(){
           strcpy(cheat->name,"Untitled Code");
           memset(cheat->buffer,0,sizeof(cheat->buffer));
         }
-      }
+      }else se_text_disabled(se_localize_and_cache("All %d code slots are used"),SE_NUM_CHEATS);
     }
+    if(!cheats_blocked)se_draw_cheat_finder(win_w);
   }
+  if(emu_state.rom_loaded)se_draw_patch_settings();
   #ifdef ENABLE_RETRO_ACHIEVEMENTS
-  se_section(ICON_FK_TROPHY " RetroAchievements");
+  if(se_section(ICON_FK_TROPHY " RetroAchievements")){
   const rc_client_user_t* user = rc_client_get_user_info(retro_achievements_get_client());
   igPushIDStr("RetroAchievements");
   if (!user)
@@ -6632,7 +9789,7 @@ void se_draw_menu_panel(){
       static char password[256] = {0};
       bool pending_login = retro_achievements_is_pending_login();
       igPushItemWidth(-1);
-      se_text("Username");
+      se_field_label("Username");
       igSameLine(win_w - 150, 0);
       if (pending_login)
           se_push_disabled();
@@ -6640,7 +9797,7 @@ void se_draw_menu_panel(){
                         ImGuiInputTextFlags_EnterReturnsTrue, NULL, NULL);
       if (pending_login)
           se_pop_disabled();
-      se_text("Password");
+      se_field_label("Password");
       igSameLine(win_w - 150, 0);
       if (pending_login)
           se_push_disabled();
@@ -6712,12 +9869,7 @@ void se_draw_menu_panel(){
         igSameLine(0,5);
         igBeginGroup();
         se_text(se_localize_and_cache("%s (Points: %d)"), user->display_name,hardcore ? user->score : user->score_softcore);
-        if (se_button(ICON_FK_SIGN_OUT " Logout",(ImVec2){0,0})){
-          char buffer[SB_FILE_PATH_SIZE];
-          snprintf(buffer, SB_FILE_PATH_SIZE, "%sra_token.txt", se_get_pref_path());
-          remove(buffer);
-          rc_client_logout(retro_achievements_get_client());
-        }
+        if (se_button(ICON_FK_SIGN_OUT " Logout",(ImVec2){0,0}))se_ra_logout();
         igEndGroup();
       }
       bool draw_checkboxes_bool[6] = {
@@ -6740,6 +9892,10 @@ void se_draw_menu_panel(){
       {
         se_reset_core();
       }
+      bool unofficial = gui_state.settings.ra_unofficial, spectator = gui_state.settings.ra_spectator;
+      if (se_checkbox("Unofficial Achievements", &unofficial)) se_set_ra_unofficial(unofficial);
+      if (se_checkbox("Spectator Mode", &spectator)) se_set_ra_spectator(spectator);
+      if (spectator) se_text_disabled("Unlocks are shown but not sent to RetroAchievements.");
 
       se_checkbox("Notifications", &draw_checkboxes_bool[1]);
       if (!gui_state.settings.draw_notifications) se_push_disabled();
@@ -6768,11 +9924,11 @@ void se_draw_menu_panel(){
       }
   }
   igPopID();
+  }
   #endif
   {
     se_bios_info_t * info = &gui_state.bios_info;
-    if(emu_state.rom_loaded){
-      se_section(ICON_FK_CROSSHAIRS " Located Files");
+    if(emu_state.rom_loaded&&se_section(ICON_FK_CROSSHAIRS " Located Files")){
       static const char* wildcard_types[]={NULL};
       if(sb_file_exists(emu_state.save_file_path)){
         igPushStyleColorU32(ImGuiCol_Text,0xff00ff00);
@@ -6811,10 +9967,13 @@ void se_draw_menu_panel(){
       }
     }
   }
-  se_section(ICON_FK_TEXT_HEIGHT " GUI");
-  se_text("Language");igSameLine(SE_FIELD_INDENT,0);
+  if(se_section(ICON_FK_TEXT_HEIGHT " GUI")){
+  se_field_label("Language");igSameLine(SE_FIELD_INDENT,0);
   igPushItemWidth(-1);
-  if(igBeginCombo("##Language", se_language_string(gui_state.settings.language), ImGuiComboFlags_HeightLargest)){
+  se_design_push_combo_style();
+  bool language_combo_open = igBeginCombo("##Language", se_language_string(gui_state.settings.language), ImGuiComboFlags_HeightLargest);
+  se_design_pop_combo_style();
+  if(language_combo_open){
     int lang_id = 0; 
     for(int lang_id=0;lang_id<SE_MAX_LANG_VALUE;++lang_id){
       const char* lang = se_language_string(lang_id);
@@ -6826,8 +9985,20 @@ void se_draw_menu_panel(){
     igEndCombo();
   }
   igPopItemWidth();
+  {
+    int design = gui_state.settings.design_system;
+    if(design<0||design>=SE_DESIGN_COUNT)design = SE_DESIGN_AUTO;
+    se_field_label("Design");igSameLine(SE_FIELD_INDENT,0);
+    igPushItemWidth(-1);
+    se_combo_str("##Design",&design,"Platform Native\0SkyEmu Classic\0Material 3\0Fluent (Windows 11)\0Adwaita (GNOME)\0",0);
+    igPopItemWidth();
+    se_tooltip("Platform Native uses Material 3 on Android, Fluent on Windows and Adwaita on Linux");
+    gui_state.settings.design_system = design;
+  }
+  if(gui_state.design_active)se_draw_design_settings();
+  else{
   int theme = gui_state.settings.theme; 
-  se_text("Theme");igSameLine(SE_FIELD_INDENT,0);
+  se_field_label("Theme");igSameLine(SE_FIELD_INDENT,0);
   igPushItemWidth(-1);
   bool load = se_combo_str("##Theme",&theme,"Dark\0Light\0Black\0Custom\0",0);
   igPopItemWidth();
@@ -6852,7 +10023,7 @@ void se_draw_menu_panel(){
     }
     igPushItemWidth(-1);
     float old_scale = gui_state.settings.custom_font_scale;
-    se_text("Font Scale");igSameLine(SE_FIELD_INDENT,0);
+    se_field_label("Font Scale");igSameLine(SE_FIELD_INDENT,0);
     se_slider_float("##FontScale",&gui_state.settings.custom_font_scale,0.5,1.5,"Scale: %0.2fx");
     if(old_scale!=gui_state.settings.custom_font_scale)gui_state.update_font_atlas=true;
     igPopItemWidth();
@@ -6908,10 +10079,11 @@ void se_draw_menu_panel(){
   }else{
     if(load)se_reload_theme();
   }
+  }
 
 
   {
-    se_text("GUI Scale");igSameLine(SE_FIELD_INDENT,0);
+    se_field_label("GUI Scale");igSameLine(SE_FIELD_INDENT,0);
     static double last_edit_time = 0; 
     static float curr_slider_scale = -1;
     if(curr_slider_scale<0)curr_slider_scale = gui_state.settings.gui_scale_factor;
@@ -6937,21 +10109,22 @@ void se_draw_menu_panel(){
     se_checkbox("Full Screen",&fullscreen);
     if(fullscreen!=sapp_is_fullscreen())sapp_toggle_fullscreen();
   }
-  
-  se_section(ICON_FK_DESKTOP " Display Settings");
+  }
+
+  if(se_section(ICON_FK_DESKTOP " Display Settings")){
   int v = gui_state.settings.screen_shader;
   igPushItemWidth(-1);
-  se_text("Screen Shader");igSameLine(SE_FIELD_INDENT,0);
-  se_combo_str("##Screen Shader",&v,"Pixelate\0Bilinear\0LCD\0LCD & Subpixels\0Smooth Upscale (xBRZ)\0",0);
+  se_field_label("Screen Shader");igSameLine(SE_FIELD_INDENT,0);
+  se_combo_str("##Screen Shader",&v,"Pixelate\0Bilinear\0LCD\0LCD & Subpixels\0Smooth Upscale (xBRZ)\0CRT\0Scanlines\0",0);
   gui_state.settings.screen_shader=v;
   v = gui_state.settings.screen_rotation;
-  se_text("Screen Rotation");igSameLine(SE_FIELD_INDENT,0);
+  se_field_label("Screen Rotation");igSameLine(SE_FIELD_INDENT,0);
   se_combo_str("##Screen Rotation",&v,"0 degrees\00090 degrees\000180 degrees\000270 degrees\0",0);
   gui_state.settings.screen_rotation=v;
-  se_text("Color Correction");igSameLine(SE_FIELD_INDENT,0);
+  se_field_label("Color Correction");igSameLine(SE_FIELD_INDENT,0);
   se_slider_float("##Color Correction",&gui_state.settings.color_correction,0,1.0,"Strength: %.2f");
   int color_correct = gui_state.settings.gba_color_correction_mode;
-  se_text("GBA Color Correction Type");igSameLine(180,0);
+  se_field_label("GBA Color Correction Type");igSameLine(180,0);
   se_combo_str("##ColorAlgorithm",&color_correct,"SkyEmu\0Higan\0",0);
   gui_state.settings.gba_color_correction_mode=color_correct;
   {
@@ -6977,11 +10150,24 @@ void se_draw_menu_panel(){
     }
   }
   {
-    se_text("NDS Screen Layout");
+    se_field_label("NDS Screen Layout");
     int layout = gui_state.settings.nds_layout;
     igSameLine(SE_FIELD_INDENT,0);
-    se_combo_str("##NDSLayout",&layout,"Auto\0Vertical\0Horizontal\0Hybrid Large Top\0Hybrid Large Bottom\0Vertical Large Top\0Vertical Large Bottom\0Horizontal Large Top\0Horizontal Large Bottom\0\0",0);
+    se_combo_str("##NDSLayout",&layout,"Auto\0Vertical\0Horizontal\0Hybrid Large Top\0Hybrid Large Bottom\0Vertical Large Top\0Vertical Large Bottom\0Horizontal Large Top\0Horizontal Large Bottom\0Top Screen Only\0Bottom Screen Only\0\0",0);
     gui_state.settings.nds_layout=layout; 
+    bool swap = gui_state.settings.nds_swap_screens;
+    se_checkbox("Swap Screens",&swap);
+    gui_state.settings.nds_swap_screens = swap;
+    float gap = gui_state.settings.nds_screen_gap;
+    se_field_label("Screen Gap");igSameLine(SE_FIELD_INDENT,0);
+    se_slider_float("##NDSScreenGap",&gap,0,96,"%.0f px");
+    gui_state.settings.nds_screen_gap = gap+0.5f;
+    if(layout==SE_NDS_LAYOUT_AUTO||(layout>=SE_NDS_LAYOUT_HYBRID_LARGE_TOP&&layout<=SE_NDS_LAYOUT_HORIZONTAL_LARGE_BOTTOM)){
+      float small = gui_state.settings.nds_small_screen? gui_state.settings.nds_small_screen : 50;
+      se_field_label("Small Screen Size");igSameLine(SE_FIELD_INDENT,0);
+      se_slider_float("##NDSSmallScreen",&small,25,100,"%.0f%%");
+      gui_state.settings.nds_small_screen = small+0.5f;
+    }
   }
   igPopItemWidth();
   se_text("Game Boy Color Palette");
@@ -7009,11 +10195,11 @@ void se_draw_menu_panel(){
   }
   igSameLine(0,2);
   if(se_button(ICON_FK_REPEAT,(ImVec2){20,20}))se_reset_default_gb_palette();
+  }
 
   se_draw_touch_controls_settings();
 
-  if(gui_state.ui_type!=SE_UI_ANDROID&&gui_state.ui_type!=SE_UI_IOS){
-    se_section(ICON_FK_KEYBOARD_O " Keybinds");
+  if(gui_state.ui_type!=SE_UI_ANDROID&&gui_state.ui_type!=SE_UI_IOS&&se_section(ICON_FK_KEYBOARD_O " Keybinds")){
     bool value= true; 
     bool modified = se_handle_keybind_settings(SE_BIND_KEYBOARD,&gui_state.key);
     if(se_button("Reset Default Keybinds",(ImVec2){0,0})){
@@ -7024,6 +10210,7 @@ void se_draw_menu_panel(){
     if(modified){
       char settings_path[SB_FILE_PATH_SIZE];
       snprintf(settings_path,SB_FILE_PATH_SIZE,"%skeyboard-bindings.bin",se_get_pref_path());
+      gui_state.key.bound_id[SE_BIND_FORMAT_SLOT]=SE_BIND_FORMAT;
       sb_save_file_data(settings_path,(uint8_t*)gui_state.key.bound_id,sizeof(gui_state.key.bound_id));
       se_emscripten_flush_fs();
     }
@@ -7031,21 +10218,22 @@ void se_draw_menu_panel(){
   #if defined( USE_SDL) ||defined(SE_PLATFORM_ANDROID)
   se_draw_controller_config(&gui_state);
   #endif
-  if(gui_state.ui_type==SE_UI_DESKTOP){
-    se_section(ICON_FK_CODE_FORK " Additional Search Paths");
+  if(gui_state.ui_type==SE_UI_DESKTOP&&se_section(ICON_FK_CODE_FORK " Additional Search Paths")){
     se_input_path("Save File/State Path", gui_state.paths.save,ImGuiInputTextFlags_None);
     se_input_path("BIOS/Firmware Path", gui_state.paths.bios,ImGuiInputTextFlags_None);
     se_input_path("Cheat Code Path", gui_state.paths.cheat_codes,ImGuiInputTextFlags_None);
+    se_input_path("Patch Path", gui_state.paths.patches,ImGuiInputTextFlags_None);
+    se_input_path("Recording Path", gui_state.paths.recordings,ImGuiInputTextFlags_None);
     bool save_to_path=gui_state.settings.save_to_path;
     se_checkbox("Create new files in paths",&save_to_path);
     gui_state.settings.save_to_path=save_to_path;
-    if(memcmp(&gui_state.last_saved_paths, &gui_state.paths,sizeof(gui_state.paths))){
-      se_save_search_paths();
-      gui_state.last_saved_paths=gui_state.paths;
-    }
   }
-  se_section(ICON_FK_WRENCH " Advanced");
-  se_text("Solar Sensor");igSameLine(SE_FIELD_INDENT,0);
+  if(memcmp(&gui_state.last_saved_paths, &gui_state.paths,sizeof(gui_state.paths))){
+    se_save_search_paths();
+    gui_state.last_saved_paths=gui_state.paths;
+  }
+  if(se_section(ICON_FK_WRENCH " Advanced")){
+  se_field_label("Solar Sensor");igSameLine(SE_FIELD_INDENT,0);
   igPushItemWidth(-1);
   se_slider_float("##Solar Sensor",&emu_state.joy.solar_sensor,0.,1.,"Brightness: %.2f");
   bool force_dmg_mode = gui_state.settings.force_dmg_mode;
@@ -7058,10 +10246,10 @@ void se_draw_menu_panel(){
 #ifdef ENABLE_HTTP_CONTROL_SERVER
   bool enable_hcs = gui_state.settings.http_control_server_enable;
   se_checkbox("Enable HTTP Control Server",&enable_hcs);
-  gui_state.settings.http_control_server_enable = true;
+  gui_state.settings.http_control_server_enable = enable_hcs;
   if(enable_hcs){
     int port = gui_state.settings.http_control_server_port;
-    se_text("Server Port");igSameLine(SE_FIELD_INDENT,0);
+    se_field_label("Server Port");igSameLine(SE_FIELD_INDENT,0);
     igPushItemWidth(-1);
     se_input_int("##Server Port",&port,1,10,ImGuiInputTextFlags_None);
     if(igIsItemDeactivated())gui_state.settings.http_control_server_port=port; 
@@ -7095,6 +10283,11 @@ void se_draw_menu_panel(){
     https_clear_cache();
   }
   if (!enable_download_cache)se_pop_disabled();
+  }
+  gui_state.menu_sections = false;
+  if(se_menu_search_query()[0]&&!gui_state.menu_sections_shown){
+    se_text_disabled("%s",se_localize_and_cache("No settings match the search"));
+  }
 
   float bottom_padding =0;
   #ifdef SE_PLATFORM_IOS
@@ -7137,7 +10330,9 @@ bool se_begin_menu_bar(){
   igPushStyleVarFloat(ImGuiStyleVar_WindowRounding, 0.0f);
   igPushStyleVarVec2(ImGuiStyleVar_WindowMinSize, (ImVec2){0, 0});
   ImGuiWindowFlags window_flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoSavedSettings;
+  if(gui_state.design_active)se_design_push_color(ImGuiCol_WindowBg,gui_state.design.surface_bar);
   bool is_open = igBegin("##MainMenuBar", NULL, window_flags);
+  if(gui_state.design_active)igPopStyleColor(1);
   igPopStyleVar(2);
   g->NextWindowData.MenuBarOffsetMinVal = (ImVec2){0.0f, 0.0f};
   if (!is_open){
@@ -7147,6 +10342,11 @@ bool se_begin_menu_bar(){
   igSetCursorPosY(0);
   igSetCursorPosX(style->DisplaySafeAreaPadding.x);
   se_draw_theme_region(SE_REGION_MENUBAR,0,y_off,menu_bar_size.x,menu_bar_size.y);
+  if(gui_state.design_active&&gui_state.design.bar_divider){
+    // Title bar / header bar bottom stroke
+    float y = y_off+menu_bar_size.y-0.5f;
+    ImDrawList_AddLine(igGetWindowDrawList(),(ImVec2){0,y},(ImVec2){menu_bar_size.x,y},se_design_u32(gui_state.design.outline_variant),1.0f);
+  }
   return true; //-V1020
 }
 
@@ -7191,7 +10391,61 @@ uint8_t* se_hcs_callback(const char* cmd, const char** params, uint64_t* result_
   *mime_type = "text/html";
   printf("Got HCS Cmd: %s\n",cmd);
   const char* str_result = NULL;
-  if(gui_state.settings.hardcore_mode&& gui_state.ra_logged_in){
+  if(strcmp(cmd,"/stream.mjpg")==0||strcmp(cmd,"/stream.wav")==0){
+    // Read only, also in Hardcore Mode. http_control_server.cpp turns the request into a stream.
+    *mime_type = strcmp(cmd,"/stream.mjpg")==0? "x-skyemu/stream-mjpeg" : "x-skyemu/stream-wav";
+    char* marker = strdup("stream");
+    *result_size = strlen(marker);
+    return (uint8_t*)marker;
+  }
+  if(strcmp(cmd,"/remote")==0||strcmp(cmd,"/overlay")==0){
+    const unsigned char* page = strcmp(cmd,"/remote")==0? se_web_remote_html : se_web_overlay_html;
+    size_t size = strcmp(cmd,"/remote")==0? se_web_remote_html_size : se_web_overlay_html_size;
+    uint8_t* data = (uint8_t*)malloc(size);
+    if(!data)return NULL;
+    memcpy(data,page,size);
+    *mime_type = "text/html; charset=utf-8";
+    *result_size = size;
+    return data;
+  }
+  if(strcmp(cmd,"/input_state")==0){
+    *mime_type = "application/json";
+    se_string_t out = {0};
+    se_input_state_json(&out);
+    if(!out.data)return NULL;
+    *result_size = out.size;
+    return (uint8_t*)out.data;
+  }
+  bool capture_cmd = strcmp(cmd,"/record")==0||strcmp(cmd,"/recording")==0||strcmp(cmd,"/save_screenshot")==0||
+                     strcmp(cmd,"/save_replay")==0;
+  if(capture_cmd){
+    // Recording only captures what the game shows, so it is also available in Hardcore Mode
+    bool ok = true;
+    if(strcmp(cmd,"/save_screenshot")==0)ok = se_save_screenshot();
+    else if(strcmp(cmd,"/save_replay")==0)ok = se_save_replay();
+    else if(strcmp(cmd,"/record")==0){
+      for(const char** p=params;*p;p+=2){
+        bool on = atoi(p[1])!=0;
+        if(strcmp(p[0],"video")==0)ok&=on? se_start_video_recording() : (se_stop_video_recording(),true);
+        else if(strcmp(p[0],"audio")==0)ok&=on? se_start_audio_recording() : (se_stop_audio_recording(),true);
+      }
+    }
+    *mime_type = "application/json";
+    se_string_t out = {0};
+    se_recording_json(&out);
+    (void)ok;
+    if(!out.data)return NULL;
+    *result_size = out.size;
+    return (uint8_t*)out.data;
+  }else if(strcmp(cmd,"/achievements")==0){
+    // Read only and it does not touch the game, so it also answers in Hardcore Mode
+    *mime_type = "application/json";
+    se_string_t out = {0};
+    se_achievements_json(&out);
+    if(!out.data)return NULL;
+    *result_size = out.size;
+    return (uint8_t*)out.data;
+  }else if(gui_state.settings.hardcore_mode&& gui_state.ra_logged_in){
     str_result="Error: The HTTP Control Server is unavailable in Hardcore Mode";
   }
   else if (strcmp(cmd, "/ping") == 0) { 
@@ -7215,6 +10469,14 @@ uint8_t* se_hcs_callback(const char* cmd, const char** params, uint64_t* result_
       params+=2;
     }
     str_result=emu_state.rom_loaded?"ok":"Failed to load ROM";
+  }
+  else if(strcmp(cmd,"/load_patch")==0){
+    bool applied = false;
+    while(*params){
+      if(strcmp(params[0],"path")==0)applied = se_load_patch(params[1]);
+      params+=2;
+    }
+    str_result = applied? "ok" : gui_state.patch.add_error[0]? gui_state.patch.add_error : "Failed to load the patch";
   }
   else if(strcmp(cmd, "/external_menu") == 0) {
 #ifdef SE_PLATFORM_ANDROID
@@ -7283,12 +10545,25 @@ uint8_t* se_hcs_callback(const char* cmd, const char** params, uint64_t* result_
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"language\": %d,\n",gui_state.settings.language);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"touch_controls_scale\": %f,\n",gui_state.settings.touch_controls_scale);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"touch_controls_show_turbo\": %d,\n",gui_state.settings.touch_controls_show_turbo);
+    off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"touch_controller\": %d,\n",!gui_state.settings.touch_controller_off);
+    off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"touch_controls_show_speed\": %d,\n",gui_state.settings.touch_controls_show_speed);
+    off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"controller_face_layout\": %d,\n",gui_state.settings.controller_face_layout);
+    off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"soft_patching\": %d,\n",!gui_state.settings.soft_patching_off);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"save_to_path\": %d,\n",gui_state.settings.save_to_path);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"force_dmg_mode\": %d,\n",gui_state.settings.force_dmg_mode);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"gba_color_correction_mode\": %d,\n",gui_state.settings.gba_color_correction_mode);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"avoid_overlapping_touchscreen\": %d,\n",gui_state.settings.avoid_overlaping_touchscreen);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"custom_font_scale\": %f,\n",gui_state.settings.custom_font_scale);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"hardcore_mode\": %d,\n",gui_state.settings.hardcore_mode);
+    off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"ra_unofficial\": %d,\n",gui_state.settings.ra_unofficial);
+    off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"ra_spectator\": %d,\n",gui_state.settings.ra_spectator);
+    off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"record_scale\": %d,\n",se_get_record_scale());
+    off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"record_format\": %d,\n",se_get_record_format());
+    off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"record_audio\": %d,\n",se_get_record_audio());
+    off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"replay_seconds\": %d,\n",se_get_replay_seconds());
+    off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"screenshot_scale\": %d,\n",se_get_screenshot_scale());
+    off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"stream_scale\": %d,\n",se_get_stream_scale());
+    off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"stream_fps\": %d,\n",se_get_stream_fps());
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"draw_challenge_indicators\": %d,\n",gui_state.settings.draw_challenge_indicators);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"draw_progress_indicators\": %d,\n",gui_state.settings.draw_progress_indicators);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"draw_leaderboard_trackers\": %d,\n",gui_state.settings.draw_leaderboard_trackers);
@@ -7297,8 +10572,17 @@ uint8_t* se_hcs_callback(const char* cmd, const char** params, uint64_t* result_
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"only_one_notification\": %d,\n",gui_state.settings.only_one_notification);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"enable_download_cache\": %d,\n",gui_state.settings.enable_download_cache);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"nds_layout\": %d,\n",gui_state.settings.nds_layout);
+    off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"nds_swap_screens\": %d,\n",se_get_nds_swap_screens());
+    off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"nds_screen_gap\": %d,\n",se_get_nds_screen_gap());
+    off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"nds_small_screen\": %d,\n",se_get_nds_small_screen());
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"touch_screen_show_button_labels\": %d,\n",gui_state.settings.touch_screen_show_button_labels);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"show_screen_bezel\": %d,\n",gui_state.settings.show_screen_bezel);
+    off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"design_system\": %d,\n",gui_state.settings.design_system);
+    off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"color_scheme\": %d,\n",gui_state.settings.color_scheme);
+    off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"contrast\": %d,\n",gui_state.settings.contrast);
+    off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"use_custom_accent\": %d,\n",gui_state.settings.use_custom_accent);
+    off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"custom_accent\": \"%06x\",\n",gui_state.settings.custom_accent&0xffffff);
+    off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"use_bundled_font\": %d,\n",gui_state.settings.use_bundled_font);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"http_control_server_enable\": %d,\n",gui_state.settings.http_control_server_enable);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"http_control_server_port\": %d\n",gui_state.settings.http_control_server_port);
     off+=snprintf(buffer+off,sizeof(buffer)-off,"}");
@@ -7318,13 +10602,22 @@ uint8_t* se_hcs_callback(const char* cmd, const char** params, uint64_t* result_
       else if(strcmp(params[0],"dpi")==0)gui_state.dpi_override=atof(params[1]);
       else if(strcmp(params[0],"touch_controls_scale")==0)gui_state.settings.touch_controls_scale=atof(params[1]);
       else if(strcmp(params[0],"language")==0)gui_state.settings.language=se_convert_locale_to_enum(params[1]);
-      else if(strcmp(params[0],"shader")==0)gui_state.settings.screen_shader=atof(params[1]);
+      else if(strcmp(params[0],"shader")==0)se_set_screen_shader(atoi(params[1]));
       else if(strcmp(params[0],"load_slot")==0)se_restore_state_slot(atoi(params[1]));
       else if(strcmp(params[0],"capture_slot")==0)se_capture_state_slot(atoi(params[1]));
       else if(strcmp(params[0],"edit_cheat_index")==0)gui_state.editing_cheat_index = atoi(params[1]);
       else if(strcmp(params[0],"debug_tools")==0)gui_state.settings.draw_debug_menu = atoi(params[1]);
       else if(strcmp(params[0],"fake_paths")==0)gui_state.fake_paths = atoi(params[1]);
       else if(strcmp(params[0],"theme")==0)gui_state.settings.theme = atoi(params[1]);
+      else if(strcmp(params[0],"design")==0)gui_state.settings.design_system = atoi(params[1]);
+      else if(strcmp(params[0],"color_scheme")==0)gui_state.settings.color_scheme = atoi(params[1]);
+      else if(strcmp(params[0],"contrast")==0)se_set_contrast(atoi(params[1]));
+      else if(strcmp(params[0],"accent")==0){
+        // Hex RRGGBB, or "system" to follow the accent of the OS
+        gui_state.settings.use_custom_accent = strcmp(params[1],"system")!=0&&params[1][0];
+        if(gui_state.settings.use_custom_accent)gui_state.settings.custom_accent = strtoul(params[1],NULL,16)&0xffffff;
+      }
+      else if(strcmp(params[0],"system_font")==0)gui_state.settings.use_bundled_font = !atoi(params[1]);
       else if(strcmp(params[0],"menu_bar")==0){
         if(atoi(params[1])){
           gui_state.settings.always_show_menubar=true;
@@ -7345,12 +10638,30 @@ uint8_t* se_hcs_callback(const char* cmd, const char** params, uint64_t* result_
       else if(strcmp(params[0],"auto_hide_touch_controls")==0)gui_state.settings.auto_hide_touch_controls=atoi(params[1]);
       else if(strcmp(params[0],"touch_controls_opacity")==0)gui_state.settings.touch_controls_opacity=atof(params[1]);
       else if(strcmp(params[0],"touch_controls_show_turbo")==0)gui_state.settings.touch_controls_show_turbo=atoi(params[1]);
+      else if(strcmp(params[0],"touch_controller")==0)gui_state.settings.touch_controller_off=!atoi(params[1]);
+      else if(strcmp(params[0],"soft_patching")==0)gui_state.settings.soft_patching_off=!atoi(params[1]);
+      else if(strcmp(params[0],"touch_controls_show_speed")==0)gui_state.settings.touch_controls_show_speed=atoi(params[1]);
+      else if(strcmp(params[0],"touch_layout_editor")==0){
+        if(atoi(params[1])&&!gui_state.touch_editor_open)se_open_touch_layout_editor();
+        else if(!atoi(params[1])&&gui_state.touch_editor_open)se_close_touch_layout_editor();
+      }
+      else if(strcmp(params[0],"reset_touch_layout")==0)memset(gui_state.settings.touch_layout,0,sizeof(gui_state.settings.touch_layout));
+      else if(strcmp(params[0],"controller_face_layout")==0)se_set_controller_face_layout(atoi(params[1]));
       else if(strcmp(params[0],"save_to_path")==0)gui_state.settings.save_to_path=atoi(params[1]);
       else if(strcmp(params[0],"force_dmg_mode")==0)gui_state.settings.force_dmg_mode=atoi(params[1]);
       else if(strcmp(params[0],"gba_color_correction_mode")==0)gui_state.settings.gba_color_correction_mode=atoi(params[1]);
       else if(strcmp(params[0],"avoid_overlapping_touchscreen")==0)gui_state.settings.avoid_overlaping_touchscreen=atoi(params[1]);
       else if(strcmp(params[0],"custom_font_scale")==0)gui_state.settings.custom_font_scale=atof(params[1]);
-      else if(strcmp(params[0],"hardcore_mode")==0)gui_state.settings.hardcore_mode=atoi(params[1]);
+      else if(strcmp(params[0],"hardcore_mode")==0)se_set_hardcore_mode(atoi(params[1]));
+      else if(strcmp(params[0],"ra_unofficial")==0)se_set_ra_unofficial(atoi(params[1]));
+      else if(strcmp(params[0],"ra_spectator")==0)se_set_ra_spectator(atoi(params[1]));
+      else if(strcmp(params[0],"record_scale")==0)se_set_record_scale(atoi(params[1]));
+      else if(strcmp(params[0],"record_format")==0)se_set_record_format(atoi(params[1]));
+      else if(strcmp(params[0],"record_audio")==0)se_set_record_audio(atoi(params[1]));
+      else if(strcmp(params[0],"replay_seconds")==0)se_set_replay_seconds(atoi(params[1]));
+      else if(strcmp(params[0],"screenshot_scale")==0)se_set_screenshot_scale(atoi(params[1]));
+      else if(strcmp(params[0],"stream_scale")==0)se_set_stream_scale(atoi(params[1]));
+      else if(strcmp(params[0],"stream_fps")==0)se_set_stream_fps(atoi(params[1]));
       else if(strcmp(params[0],"draw_challenge_indicators")==0)gui_state.settings.draw_challenge_indicators=atoi(params[1]);
       else if(strcmp(params[0],"draw_progress_indicators")==0)gui_state.settings.draw_progress_indicators=atoi(params[1]);
       else if(strcmp(params[0],"draw_leaderboard_trackers")==0)gui_state.settings.draw_leaderboard_trackers=atoi(params[1]);
@@ -7358,7 +10669,13 @@ uint8_t* se_hcs_callback(const char* cmd, const char** params, uint64_t* result_
       else if(strcmp(params[0],"gui_scale_factor")==0)gui_state.settings.gui_scale_factor=atof(params[1]);
       else if(strcmp(params[0],"only_one_notification")==0)gui_state.settings.only_one_notification=atoi(params[1]);
       else if(strcmp(params[0],"enable_download_cache")==0)gui_state.settings.enable_download_cache=atoi(params[1]);
-      else if(strcmp(params[0],"nds_layout")==0)gui_state.settings.nds_layout=atoi(params[1]);
+      else if(strcmp(params[0],"nds_layout")==0){
+        int layout = atoi(params[1]);
+        if(layout>=0&&layout<SE_NDS_NUM_LAYOUTS)gui_state.settings.nds_layout=layout;
+      }
+      else if(strcmp(params[0],"nds_swap_screens")==0)se_set_nds_swap_screens(atoi(params[1]));
+      else if(strcmp(params[0],"nds_screen_gap")==0)se_set_nds_screen_gap(atoi(params[1]));
+      else if(strcmp(params[0],"nds_small_screen")==0)se_set_nds_small_screen(atoi(params[1]));
       else if(strcmp(params[0],"touch_screen_show_button_labels")==0)gui_state.settings.touch_screen_show_button_labels=atoi(params[1]);
       else if(strcmp(params[0],"show_screen_bezel")==0)gui_state.settings.show_screen_bezel=atoi(params[1]);
       params+=2;
@@ -7502,8 +10819,10 @@ uint8_t* se_hcs_callback(const char* cmd, const char** params, uint64_t* result_
     }
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"rom-loaded\" : %s,\n",emu_state.rom_loaded?"true":"false");
     if(emu_state.rom_loaded){
-      off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"rom-path\": \"%s\",\n",emu_state.rom_path);
-      off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"save-path\": \"%s\",\n",emu_state.save_file_path);
+      off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"rom-path\": \"%s\",\n",se_json_escaped(emu_state.rom_path));
+      off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"save-path\": \"%s\",\n",se_json_escaped(emu_state.save_file_path));
+      off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"patch\": {\"path\": \"%s\", \"applied\": %s, \"status\": \"%s\"},\n",
+                    se_json_escaped(gui_state.patch.path),gui_state.patch.applied?"true":"false",se_json_escaped(gui_state.patch.status));
     }
     off+=snprintf(buffer+off,sizeof(buffer)-off,"  \"rewind-info\" : {\n");
     off+=snprintf(buffer+off,sizeof(buffer)-off,"    \"entries-used\" : %d,\n",rewind_buffer.size);
@@ -7552,41 +10871,25 @@ uint8_t* se_hcs_callback(const char* cmd, const char** params, uint64_t* result_
     }
     str_result=okay? "ok":"failed";
   }else if(strcmp(cmd,"/cheats")==0){
-    *mime_type = "text/plain";
-    size_t cheat_count = 0;
-    for(int i=0; i<SE_NUM_CHEATS;++i){
-      if(cheats[i].state!=-1) cheat_count++;
-    }
-    if(cheat_count==0){
-      str_result = "No cheats enabled";
+    bool json = false;
+    for(const char** p=params;*p;p+=2)if(strcmp(p[0],"format")==0&&strcmp(p[1],"json")==0)json = true;
+    se_string_t out = {0};
+    if(json){
+      *mime_type = "application/json";
+      se_cheats_json(&out);
     }else{
-      size_t max_size = SE_MAX_CHEAT_CODE_SIZE*cheat_count + SE_MAX_CHEAT_NAME_SIZE*cheat_count + 64*cheat_count;
-      char* max_buffer = (char*)calloc(max_size,sizeof(char));
-      int off = 0;
-
+      *mime_type = "text/plain";
       for(int i=0; i<SE_NUM_CHEATS;++i){
-        if(cheats[i].state!=-1){
-          off+=snprintf(max_buffer+off,max_size-off,"%d - %s:",i,cheats[i].name);
-          for(int j=0;j<cheats[i].size;++j){
-            off+=snprintf(max_buffer+off,max_size-off," %08x",cheats[i].buffer[j]);
-          }
-          if(cheats[i].state==0){
-            off+=snprintf(max_buffer+off,max_size-off," (disabled)");
-          }else{
-            off+=snprintf(max_buffer+off,max_size-off," (enabled)");
-          }
-          off+=snprintf(max_buffer+off,max_size-off,"\n");
-        }
+        if(cheats[i].state==-1)continue;
+        se_string_printf(&out,"%d - %s:",i,cheats[i].name);
+        for(uint32_t j=0;j<cheats[i].size;++j)se_string_printf(&out," %08x",cheats[i].buffer[j]);
+        se_string_printf(&out,"%s\n",cheats[i].state==0? " (disabled)" : " (enabled)");
       }
-
-      size_t actual_size = off+1;
-      char* buffer = (char*)malloc(actual_size);
-      memcpy(buffer,max_buffer,actual_size);
-      buffer[actual_size-1]='\0';
-      free(max_buffer);
-      *result_size = actual_size;
-      return (uint8_t*)buffer;
+      if(!out.size)se_string_printf(&out,"No cheats enabled");
     }
+    if(!out.data)return NULL;
+    *result_size = out.size;
+    return (uint8_t*)out.data;
   }else if(strcmp(cmd,"/remove_cheat")==0){
     bool okay=false;
     while(*params){
@@ -7594,7 +10897,9 @@ uint8_t* se_hcs_callback(const char* cmd, const char** params, uint64_t* result_
         int id=-1;
         int result=sscanf(params[1],"%d",&id);
         if(result!=EOF&&id>=0&&id<SE_NUM_CHEATS){
+          if(gui_state.editing_cheat_index==id)gui_state.editing_cheat_index=-1;
           cheats[id].state=-1;
+          se_save_cheats_if_loaded();
           okay=true;
         }else{
           okay=false;
@@ -7652,7 +10957,7 @@ uint8_t* se_hcs_callback(const char* cmd, const char** params, uint64_t* result_
           okay=false;
         }else{
           if(name_changed){
-            strncpy(cheats[editing_id].name,new_name,SE_MAX_CHEAT_NAME_SIZE);
+            snprintf(cheats[editing_id].name,SE_MAX_CHEAT_NAME_SIZE,"%s",new_name);
           }
           if(code_changed){
             se_convert_cheat_code(new_code,editing_id);
@@ -7663,11 +10968,75 @@ uint8_t* se_hcs_callback(const char* cmd, const char** params, uint64_t* result_
           if(cheats[editing_id].state==-1){
             cheats[editing_id].state=1;
           }
+          se_save_cheats_if_loaded();
         }
       }
     }
 
     str_result=okay? "ok":"failed";
+  }else if(strcmp(cmd,"/cheat_search")==0){
+    // Cheat finder: start=1 (size, signed), compare+value, reset=1, then the results from offset
+    bool start = false, reset = false, is_signed = false, error = false;
+    int value_size = 1, compare = -1;
+    uint32_t value = 0, first = 0, count = 50;
+    for(const char** p=params;*p;p+=2){
+      if(strcmp(p[0],"start")==0)start = atoi(p[1]);
+      else if(strcmp(p[0],"reset")==0)reset = atoi(p[1]);
+      else if(strcmp(p[0],"size")==0)value_size = atoi(p[1]);
+      else if(strcmp(p[0],"signed")==0)is_signed = atoi(p[1]);
+      else if(strcmp(p[0],"offset")==0)first = strtoul(p[1],NULL,0);
+      else if(strcmp(p[0],"count")==0)count = strtoul(p[1],NULL,0);
+      else if(strcmp(p[0],"value")==0)error|=!se_cheat_parse_value(p[1],&value);
+      else if(strcmp(p[0],"compare")==0){
+        for(int c=0;c<SE_SEARCH_NUM_COMPARES;++c)if(strcmp(p[1],se_cheat_compare_names[c])==0)compare = c;
+        if(compare<0)error = true;
+      }
+    }
+    *mime_type = "application/json";
+    if(!se_cheat_finder_supported())str_result = "{\"error\": \"No game is loaded\"}";
+    else if(error)str_result = "{\"error\": \"Invalid compare or value\"}";
+    else if(start&&value_size!=1&&value_size!=2&&value_size!=4)str_result = "{\"error\": \"size must be 1, 2 or 4\"}";
+    else{
+      se_string_t out = {0};
+      se_cheat_finder_lock();
+      if(reset)se_cheat_finder_reset();
+      if(start&&!se_cheat_finder_start(value_size,is_signed))str_result = "{\"error\": \"Could not start the search\"}";
+      else if(compare>=0&&!se_search_active(&se_cheat_finder.search))str_result = "{\"error\": \"Start a search first\"}";
+      else{
+        if(compare>=0)se_cheat_finder_filter(compare,value);
+        se_cheat_search_json(&out,first,count);
+      }
+      se_cheat_finder_unlock();
+      if(!str_result){
+        if(!out.data)return NULL;
+        *result_size = out.size;
+        return (uint8_t*)out.data;
+      }
+    }
+  }else if(strcmp(cmd,"/make_cheat")==0){
+    // Code that keeps a value at an address: address, value, size (default: the search's), name
+    uint32_t address = 0, value = 0;
+    int value_size = se_cheat_finder_value_size();
+    bool has_address = false, has_value = false;
+    const char* name = NULL;
+    for(const char** p=params;*p;p+=2){
+      if(strcmp(p[0],"address")==0)has_address = se_cheat_parse_value(p[1],&address);
+      else if(strcmp(p[0],"value")==0)has_value = se_cheat_parse_value(p[1],&value);
+      else if(strcmp(p[0],"size")==0)value_size = atoi(p[1]);
+      else if(strcmp(p[0],"name")==0)name = p[1];
+    }
+    *mime_type = "application/json";
+    int index = has_address&&has_value? se_make_cheat(address,value,value_size,name) : -1;
+    if(index<0)str_result = "{\"error\": \"No code can write that address, or all code slots are used\"}";
+    else{
+      se_string_t out = {0};
+      se_string_printf(&out,"{\"id\": %d, \"name\": \"%s\", \"code\": \"",index,se_json_escaped(cheats[index].name));
+      for(uint32_t w=0;w<cheats[index].size;++w)se_string_printf(&out,"%s%08X",w? " " : "",cheats[index].buffer[w]);
+      se_string_printf(&out,"\"}");
+      if(!out.data)return NULL;
+      *result_size = out.size;
+      return (uint8_t*)out.data;
+    }
   }
   if(str_result){
     const char * result = strdup(str_result);
@@ -7761,7 +11130,7 @@ static void frame(void) {
 
 
     if(gui_state.settings.draw_debug_menu)se_draw_debug_menu();
-    
+    if(show_ui)se_rec_draw_menu_bar_indicator();
 
     int orig_x = igGetCursorPosX();
     int v = (gui_state.settings.volume*100);
@@ -7896,7 +11265,9 @@ static void frame(void) {
       bool active_button = i==curr_toggle;
       if(active_button)igPushStyleColorVec4(ImGuiCol_Button, style->Colors[ImGuiCol_ButtonActive]);
       if (show_ui) {
-          if (se_button_themed(SE_REGION_BLANK + (active_button ? 2 : 0), toggle_labels[i], (ImVec2) { sel_width, show_ui ? SE_MENU_BAR_HEIGHT : 0 }, true))next_toggle_id = i;
+          if(gui_state.design_active){
+            if(se_design_segment(toggle_labels[i],(ImVec2){sel_width,SE_MENU_BAR_HEIGHT},active_button,i,num_toggles,1))next_toggle_id = i;
+          }else if (se_button_themed(SE_REGION_BLANK + (active_button ? 2 : 0), toggle_labels[i], (ImVec2) { sel_width, show_ui ? SE_MENU_BAR_HEIGHT : 0 }, true))next_toggle_id = i;
       }
       igSameLine(0,1);
       if(hardcore_disabled) se_tooltip("Disabled in Hardcore Mode");
@@ -8019,8 +11390,9 @@ static void frame(void) {
       screen_width = width;
       igPopStyleColor(1);
     }
-    bool draw_click_region = emu_state.run_mode!=SB_MODE_RUN&&emu_state.run_mode!=SB_MODE_REWIND && !draw_sidebars_over_screen&& (gui_state.overlay_open||!emu_state.rom_loaded);
-    gui_state.block_touchscreen = draw_sidebars_over_screen;
+    bool draw_click_region = emu_state.run_mode!=SB_MODE_RUN&&emu_state.run_mode!=SB_MODE_REWIND && !draw_sidebars_over_screen&& (gui_state.overlay_open||!emu_state.rom_loaded)
+                             && !gui_state.touch_editor_open;
+    gui_state.block_touchscreen = draw_sidebars_over_screen||gui_state.touch_editor_open;
     // The menubar shouldn't resize the screen when it autohides as it re-layouts the controls. 
     if(gui_state.settings.always_show_menubar==false&&screen_width==width&&draw_sidebars_over_screen==false&&draw_click_region==false)menu_height=0;
     igSetNextWindowPos((ImVec2){screen_x,menu_height}, ImGuiCond_Always, (ImVec2){0,0});
@@ -8035,6 +11407,9 @@ static void frame(void) {
     se_update_frame();
 
     se_draw_emulated_system_screen(false);
+    se_rec_lock();
+    se_rec_draw_toast(screen_x,menu_height,screen_width/se_dpi_scale());
+    se_rec_unlock();
 
 #ifdef ENABLE_RETRO_ACHIEVEMENTS
     float left = screen_x;
@@ -8063,6 +11438,7 @@ static void frame(void) {
     igPopStyleVar(2);
     igPopStyleColor(1);
     igEnd();
+    se_draw_touch_layout_editor_toolbar(menu_height);
     if(draw_click_region){
       igSetNextWindowPos((ImVec2){screen_x,menu_height}, ImGuiCond_Always, (ImVec2){0,0});
       igSetNextWindowSize((ImVec2){screen_width, height-menu_height*se_dpi_scale()}, ImGuiCond_Always);
@@ -8089,8 +11465,23 @@ static void frame(void) {
 
     ImFont *font = NULL;
     float font_scale=1.0;
+    float font_size = 13;
+    gui_state.system_font_path[0] = 0;
    
-    if(gui_state.settings.theme==SE_THEME_CUSTOM){
+    if(gui_state.design_active){
+      // Use the UI font of the platform: Roboto, Segoe UI Variable, Adwaita Sans/Cantarell
+      font_size = gui_state.design.font_size;
+      char path[SB_FILE_PATH_SIZE];
+      if(!gui_state.settings.use_bundled_font&&se_design_find_system_font(gui_state.design.design,path,sizeof(path))){
+        size_t size = 0;
+        uint8_t* data = sb_load_file_data(path,&size);
+        // A font Dear ImGui can not parse would fail the whole atlas, check it again after loading
+        if(data&&se_design_font_is_supported(data,size)){
+          font =ImFontAtlas_AddFontFromMemoryTTF(atlas,data,size,font_size*se_dpi_scale(),NULL,NULL);
+          strncpy(gui_state.system_font_path,path,sizeof(gui_state.system_font_path)-1);
+        }else free(data);
+      }
+    }else if(gui_state.settings.theme==SE_THEME_CUSTOM){
       size_t size =0; 
       font_scale = gui_state.settings.custom_font_scale;
       uint8_t* data = sb_load_file_data(gui_state.paths.custom_font,&size);
@@ -8104,7 +11495,7 @@ static void frame(void) {
       uint64_t karla_compressed_size; 
       const uint8_t* karla_compressed_data = se_get_resource(SE_KARLA,&karla_compressed_size);
       font =ImFontAtlas_AddFontFromMemoryCompressedTTF(
-        atlas,karla_compressed_data,karla_compressed_size,13*se_dpi_scale()*font_scale,NULL,NULL);
+        atlas,karla_compressed_data,karla_compressed_size,font_size*se_dpi_scale()*font_scale,NULL,NULL);
     }
     
     uint64_t forkawesome_compressed_size; 
@@ -8113,9 +11504,9 @@ static void frame(void) {
     static const ImWchar icons_ranges[] = { ICON_MIN_FK, ICON_MAX_FK, 0 }; // Will not be copied by AddFont* so keep in scope.
     ImFontConfig* config=ImFontConfig_ImFontConfig();
     config->MergeMode = true;
-    config->GlyphMinAdvanceX = 13.0f;
+    config->GlyphMinAdvanceX = font_size;
     ImFont* font2 =ImFontAtlas_AddFontFromMemoryCompressedTTF(atlas,
-      forkawesome_compressed_data,forkawesome_compressed_size,13*se_dpi_scale()*font_scale,config,icons_ranges);
+      forkawesome_compressed_data,forkawesome_compressed_size,font_size*se_dpi_scale()*font_scale,config,icons_ranges);
     ImFontConfig_destroy(config);
     igGetIO()->FontDefault=font2;
   
@@ -8136,13 +11527,13 @@ static void frame(void) {
           index++;
         }
       }
-      ImFont* font3 =ImFontAtlas_AddFontFromMemoryCompressedTTF(atlas,notosans_cjksc_compressed_data,notosans_cjksc_compressed_size,14*se_dpi_scale()*font_scale,config3,ranges);
+      ImFont* font3 =ImFontAtlas_AddFontFromMemoryCompressedTTF(atlas,notosans_cjksc_compressed_data,notosans_cjksc_compressed_size,(font_size+1)*se_dpi_scale()*font_scale,config3,ranges);
       uint64_t noto_armenian_size;
       const uint8_t *noto_armenian = se_get_resource(SE_NOTO_ARMENIAN,&noto_armenian_size);
-      ImFont* font4 =ImFontAtlas_AddFontFromMemoryCompressedTTF(atlas,noto_armenian,noto_armenian_size,14*se_dpi_scale()*font_scale,config3,ranges);
+      ImFont* font4 =ImFontAtlas_AddFontFromMemoryCompressedTTF(atlas,noto_armenian,noto_armenian_size,(font_size+1)*se_dpi_scale()*font_scale,config3,ranges);
       uint64_t noto_sans_size=0;
       const uint8_t *noto_sans = se_get_resource(SE_NOTO_SANS,&noto_sans_size);
-      ImFont* font5 =ImFontAtlas_AddFontFromMemoryCompressedTTF(atlas,noto_sans,noto_sans_size,14*se_dpi_scale()*font_scale,config3,ranges);
+      ImFont* font5 =ImFontAtlas_AddFontFromMemoryCompressedTTF(atlas,noto_sans,noto_sans_size,(font_size+1)*se_dpi_scale()*font_scale,config3,ranges);
       ImFontConfig_destroy(config3);
       igGetIO()->FontDefault=font3;
     #endif
@@ -8151,7 +11542,7 @@ static void frame(void) {
       uint64_t karla_compressed_size; 
       const uint8_t* karla_compressed_data = se_get_resource(SE_SV_BASIC_MANUAL,&karla_compressed_size);
       gui_state.mono_font =ImFontAtlas_AddFontFromMemoryCompressedTTF(
-        atlas,karla_compressed_data,karla_compressed_size,13*se_dpi_scale()*font_scale,NULL,NULL);
+        atlas,karla_compressed_data,karla_compressed_size,font_size*se_dpi_scale()*font_scale,NULL,NULL);
     }
     
 
@@ -8235,6 +11626,14 @@ void se_load_settings(){
     snprintf(keybind_path,SB_FILE_PATH_SIZE,"%skeyboard-bindings.bin",se_get_pref_path());
     if(!sb_load_file_data_into_buffer(keybind_path,(uint8_t*)gui_state.key.bound_id,sizeof(gui_state.key.bound_id))){
       se_set_default_keybind(&gui_state);
+    }else if(gui_state.key.bound_id[SE_BIND_FORMAT_SLOT]<SE_BIND_FORMAT){
+      // Saved before the recording and swap hotkeys existed: give them their default keys
+      int32_t defaults[SE_NUM_BINDS_ALLOC];
+      se_set_default_keys(defaults);
+      for(int i=SE_KEY_SCREENSHOT;i<=SE_KEY_SWAP_SCREENS;++i){
+        if(gui_state.key.bound_id[i]<=0)gui_state.key.bound_id[i]=defaults[i];
+      }
+      gui_state.key.bound_id[SE_BIND_FORMAT_SLOT]=SE_BIND_FORMAT;
     }
   }
 #if defined(USE_SDL) || defined(SE_PLATFORM_ANDROID)
@@ -8246,7 +11645,7 @@ void se_load_settings(){
     char settings_path[SB_FILE_PATH_SIZE];
     snprintf(settings_path,SB_FILE_PATH_SIZE,"%suser_settings.bin",se_get_pref_path());
     if(!sb_load_file_data_into_buffer(settings_path,(void*)&gui_state.settings,sizeof(gui_state.settings))){gui_state.settings.settings_file_version=-1;}
-    int max_settings_version_supported =3;
+    int max_settings_version_supported =4;
     if(gui_state.settings.settings_file_version>max_settings_version_supported){
       gui_state.settings.volume=0.8;
       gui_state.settings.draw_debug_menu = false; 
@@ -8262,7 +11661,7 @@ void se_load_settings(){
       gui_state.settings.screen_rotation=0;
       gui_state.settings.stretch_to_fit = 0; 
     }
-    if(gui_state.settings.screen_shader>4)gui_state.settings.screen_shader=4;
+    if(gui_state.settings.screen_shader>=SE_SCREEN_SHADER_COUNT)gui_state.settings.screen_shader=3;
     if(gui_state.settings.settings_file_version<2){
       gui_state.settings.settings_file_version = 2; 
       gui_state.settings.auto_hide_touch_controls=true;
@@ -8295,6 +11694,20 @@ void se_load_settings(){
       gui_state.settings.nds_layout = 0; 
       gui_state.settings.touch_screen_show_button_labels= true;
     }
+    if(gui_state.settings.settings_file_version<4){
+      gui_state.settings.settings_file_version = 4;
+      // Custom skins are image based and keep the classic design, the Light and Black
+      // themes carry over as the color scheme of the platform design.
+      gui_state.settings.design_system = gui_state.settings.theme==SE_THEME_CUSTOM? SE_DESIGN_CLASSIC : SE_DESIGN_AUTO;
+      gui_state.settings.color_scheme = gui_state.settings.theme==SE_THEME_LIGHT? SE_COLOR_SCHEME_LIGHT :
+                                        gui_state.settings.theme==SE_THEME_BLACK? SE_COLOR_SCHEME_BLACK : SE_COLOR_SCHEME_SYSTEM;
+      gui_state.settings.use_custom_accent = false;
+      gui_state.settings.custom_accent = 0;
+      gui_state.settings.use_bundled_font = false;
+    }
+    if(gui_state.settings.design_system>=SE_DESIGN_COUNT)gui_state.settings.design_system=SE_DESIGN_AUTO;
+    if(gui_state.settings.color_scheme>=SE_COLOR_SCHEME_COUNT)gui_state.settings.color_scheme=SE_COLOR_SCHEME_SYSTEM;
+    if(gui_state.settings.contrast>=SE_CONTRAST_COUNT)gui_state.settings.contrast=SE_CONTRAST_SYSTEM;
     if(gui_state.settings.gui_scale_factor<0.5)gui_state.settings.gui_scale_factor=1.0;
     if(gui_state.settings.gui_scale_factor>4.0)gui_state.settings.gui_scale_factor=1.0;
 
@@ -8309,6 +11722,8 @@ void se_load_settings(){
   {
     memset(&cloud_state,0,sizeof(se_cloud_state_t));
     cloud_state.save_states_mutex = mutex_create();
+    se_cheat_finder_mutex = mutex_create();
+    se_rec_mutex = mutex_create();
     char refresh_token_path[SB_FILE_PATH_SIZE];
     snprintf(refresh_token_path,SB_FILE_PATH_SIZE,"%srefresh_token.txt",se_get_pref_path());
     if(sb_file_exists(refresh_token_path)){
@@ -8318,7 +11733,15 @@ void se_load_settings(){
 #ifdef ENABLE_RETRO_ACHIEVEMENTS
   bool is_mobile = gui_state.ui_type == SE_UI_ANDROID || gui_state.ui_type == SE_UI_IOS;
   retro_achievements_initialize(&emu_state,gui_state.settings.hardcore_mode);
+  retro_achievements_set_options(gui_state.settings.ra_unofficial,gui_state.settings.ra_spectator);
 #endif
+}
+// Places the DS screens with the gap, small screen size and swap settings
+static int se_nds_layout_places(int layout, se_screen_place_t places[3], float* box_w, float* box_h){
+  float gap = gui_state.settings.nds_screen_gap;
+  if(gap>96)gap = 96;
+  float small = gui_state.settings.nds_small_screen? gui_state.settings.nds_small_screen/100.f : 0.5f;
+  return se_nds_layout_place(layout,gap,small,gui_state.settings.nds_swap_screens,places,box_w,box_h);
 }
 static void se_compute_draw_lcd_rect(float *lcd_render_w, float *lcd_render_h, int* nds_layout){
   float rotation = gui_state.settings.screen_rotation*0.5*3.14159;
@@ -8327,38 +11750,20 @@ static void se_compute_draw_lcd_rect(float *lcd_render_w, float *lcd_render_h, i
     float scr_h = *lcd_render_h;
     float native_w = SB_LCD_W;
     float native_h = SB_LCD_H;
-    bool touch_controller_active = gui_state.last_touch_time>=0||gui_state.settings.auto_hide_touch_controls==false;
+    bool touch_controller_active = se_touch_controller_shown()||gui_state.touch_editor_open;
     *nds_layout= gui_state.settings.nds_layout;
     if(emu_state.system==SYSTEM_GBA){native_w = GBA_LCD_W; native_h = GBA_LCD_H;}
     else if(emu_state.system==SYSTEM_NDS){
+      if(*nds_layout<SE_NDS_LAYOUT_AUTO||*nds_layout>=SE_NDS_NUM_LAYOUTS){
+        gui_state.settings.nds_layout = SE_NDS_LAYOUT_AUTO;
+        *nds_layout = SE_NDS_LAYOUT_AUTO;
+      }
       if(*nds_layout==SE_NDS_LAYOUT_AUTO){
         *nds_layout = SE_NDS_LAYOUT_VERTICAL;
         if(scr_w/scr_h>1&&!touch_controller_active)*nds_layout = SE_NDS_LAYOUT_HYBRID_LARGE_TOP;
       }
-      switch(*nds_layout){
-        case SE_NDS_LAYOUT_VERTICAL: 
-          native_w = NDS_LCD_W; native_h = NDS_LCD_H*2;
-          break; 
-        case SE_NDS_LAYOUT_HORIZONTAL: 
-          native_w = NDS_LCD_W*2; native_h = NDS_LCD_H;
-          break; 
-        case SE_NDS_LAYOUT_HYBRID_LARGE_TOP:  
-        case SE_NDS_LAYOUT_HYBRID_LARGE_BOTTOM: 
-         native_w = NDS_LCD_W+NDS_LCD_W*0.5;
-         native_h = NDS_LCD_H;
-          break; 
-        case SE_NDS_LAYOUT_VERTICAL_LARGE_BOTTOM: 
-        case SE_NDS_LAYOUT_VERTICAL_LARGE_TOP: 
-          native_w = NDS_LCD_W; native_h = NDS_LCD_H*1.5;
-          break;
-        case SE_NDS_LAYOUT_HORIZONTAL_LARGE_BOTTOM: 
-        case SE_NDS_LAYOUT_HORIZONTAL_LARGE_TOP: 
-          native_w = NDS_LCD_W*1.5; native_h = NDS_LCD_H;
-          break; 
-        default:
-          gui_state.settings.nds_layout = SE_NDS_LAYOUT_AUTO;
-          break;
-      }
+      se_screen_place_t places[3];
+      se_nds_layout_places(*nds_layout,places,&native_w,&native_h);
     }
     float lcd_aspect= native_h/native_w;
 
@@ -8414,114 +11819,20 @@ static void se_draw_lcd_in_rect(float lcd_render_x, float lcd_render_y, float lc
   if(emu_state.system==SYSTEM_GBA){
     se_draw_lcd_defer(core.gba.framebuffer,GBA_LCD_W,GBA_LCD_H,lx,ly, lw, lh,rotation,false);
   }else if (emu_state.system==SYSTEM_NDS){
-    if(nds_layout==SE_NDS_LAYOUT_HYBRID_LARGE_TOP){
-      float p[6]={
-        0.3333* lw,- lh*0.25,
-        0.3333* lw, lh*0.25,
-        -0.1666* lw,0,
-      };
-      for(int i=0;i<3;++i){
-        float x = p[i*2+0];
-        float y = p[i*2+1];
-        p[i*2+0] = x*cos(-rotation)+y*sin(-rotation);
-        p[i*2+1] = x*-sin(-rotation)+y*cos(-rotation);
-      }
-      se_draw_lcd_defer(core.nds.framebuffer_top,NDS_LCD_W,NDS_LCD_H,lx+p[0],ly+p[1], lw/3, lh*0.5,rotation,false);
-      se_draw_lcd_defer(core.nds.framebuffer_bottom,NDS_LCD_W,NDS_LCD_H,lx+p[2],ly+p[3], lw/3, lh*0.5,rotation,true);
-      se_draw_lcd_defer(core.nds.framebuffer_top,NDS_LCD_W,NDS_LCD_H,lx+p[4],ly+p[5], lw*2/3, lh,rotation,false);
-    }else if(nds_layout==SE_NDS_LAYOUT_HYBRID_LARGE_BOTTOM){
-      float p[6]={
-        0.3333* lw,- lh*0.25,
-        0.3333* lw, lh*0.25,
-        -0.1666* lw,0,
-      };
-      for(int i=0;i<3;++i){
-        float x = p[i*2+0];
-        float y = p[i*2+1];
-        p[i*2+0] = x*cos(-rotation)+y*sin(-rotation);
-        p[i*2+1] = x*-sin(-rotation)+y*cos(-rotation);
-      }
-      se_draw_lcd_defer(core.nds.framebuffer_top,NDS_LCD_W,NDS_LCD_H,lx+p[0],ly+p[1], lw/3, lh*0.5,rotation,false);
-      se_draw_lcd_defer(core.nds.framebuffer_bottom,NDS_LCD_W,NDS_LCD_H,lx+p[2],ly+p[3], lw/3, lh*0.5,rotation,true);
-      se_draw_lcd_defer(core.nds.framebuffer_bottom,NDS_LCD_W,NDS_LCD_H,lx+p[4],ly+p[5], lw*2/3, lh,rotation,true);
-    }else if(nds_layout==SE_NDS_LAYOUT_HORIZONTAL){
-      float p[4]={
-        0.25* lw,0,
-        -0.25* lw,0,
-      };
-      for(int i=0;i<2;++i){
-        float x = p[i*2+0];
-        float y = p[i*2+1];
-        p[i*2+0] = x*cos(-rotation)+y*sin(-rotation);
-        p[i*2+1] = x*-sin(-rotation)+y*cos(-rotation);
-      }
-      se_draw_lcd_defer(core.nds.framebuffer_top,NDS_LCD_W,NDS_LCD_H,lx+p[0],ly+p[1], lw/2, lh,rotation,false);
-      se_draw_lcd_defer(core.nds.framebuffer_bottom,NDS_LCD_W,NDS_LCD_H,lx+p[2],ly+p[3], lw/2, lh,rotation,true);
-    }else if(nds_layout==SE_NDS_LAYOUT_HORIZONTAL_LARGE_TOP){
-      float p[4]={
-        -0.166666* lw,0,
-        0.3333333* lw,0,
-      };
-      for(int i=0;i<2;++i){
-        float x = p[i*2+0];
-        float y = p[i*2+1];
-        p[i*2+0] = x*cos(-rotation)+y*sin(-rotation);
-        p[i*2+1] = x*-sin(-rotation)+y*cos(-rotation);
-      }
-      se_draw_lcd_defer(core.nds.framebuffer_top,NDS_LCD_W,NDS_LCD_H,lx+p[0],ly+p[1], lw*2/3, lh,rotation,false);
-      se_draw_lcd_defer(core.nds.framebuffer_bottom,NDS_LCD_W,NDS_LCD_H,lx+p[2],ly+p[3], lw/3, lh*0.5,rotation,true);
-    }else if(nds_layout==SE_NDS_LAYOUT_HORIZONTAL_LARGE_BOTTOM){
-      float p[4]={
-        -0.3333333* lw,0,
-        0.166666* lw,0,
-      };
-      for(int i=0;i<2;++i){
-        float x = p[i*2+0];
-        float y = p[i*2+1];
-        p[i*2+0] = x*cos(-rotation)+y*sin(-rotation);
-        p[i*2+1] = x*-sin(-rotation)+y*cos(-rotation);
-      }
-      se_draw_lcd_defer(core.nds.framebuffer_top,NDS_LCD_W,NDS_LCD_H,lx+p[0],ly+p[1], lw/3, lh*0.5,rotation,false);
-      se_draw_lcd_defer(core.nds.framebuffer_bottom,NDS_LCD_W,NDS_LCD_H,lx+p[2],ly+p[3], lw*2/3, lh,rotation,true);
-    }else if(nds_layout==SE_NDS_LAYOUT_VERTICAL_LARGE_TOP){
-      float p[4]={
-        0,-0.1666666*lh,
-        0, 0.33333333*lh,
-      };
-      for(int i=0;i<2;++i){
-        float x = p[i*2+0];
-        float y = p[i*2+1];
-        p[i*2+0] = x*cos(-rotation)+y*sin(-rotation);
-        p[i*2+1] = x*-sin(-rotation)+y*cos(-rotation);
-      }
-      se_draw_lcd_defer(core.nds.framebuffer_top,NDS_LCD_W,NDS_LCD_H,lx+p[0],ly+p[1], lw, lh*2/3,rotation,false);
-      se_draw_lcd_defer(core.nds.framebuffer_bottom,NDS_LCD_W,NDS_LCD_H,lx+p[2],ly+p[3], lw*0.5, lh/3,rotation,true);
-    }else if(nds_layout==SE_NDS_LAYOUT_VERTICAL_LARGE_BOTTOM){
-      float p[4]={
-        0,-0.333333*lh,
-        0,0.16666666*lh,
-      };
-      for(int i=0;i<2;++i){
-        float x = p[i*2+0];
-        float y = p[i*2+1];
-        p[i*2+0] = x*cos(-rotation)+y*sin(-rotation);
-        p[i*2+1] = x*-sin(-rotation)+y*cos(-rotation);
-      }
-      se_draw_lcd_defer(core.nds.framebuffer_top,NDS_LCD_W,NDS_LCD_H,lx+p[0],ly+p[1], lw*0.5, lh/3,rotation,false);
-      se_draw_lcd_defer(core.nds.framebuffer_bottom,NDS_LCD_W,NDS_LCD_H,lx+p[2],ly+p[3], lw, lh*2/3,rotation,true);
-    }else{
-      float p[4]={
-        0,- lh*0.25,
-        0,lh*0.25
-      };
-      for(int i=0;i<2;++i){
-        float x = p[i*2+0];
-        float y = p[i*2+1];
-        p[i*2+0] = x*cos(-rotation)+y*sin(-rotation);
-        p[i*2+1] = x*-sin(-rotation)+y*cos(-rotation);
-      }
-      se_draw_lcd_defer(core.nds.framebuffer_top,NDS_LCD_W,NDS_LCD_H,lx+p[0],ly+p[1], lw, lh*0.5,rotation,false);
-      se_draw_lcd_defer(core.nds.framebuffer_bottom,NDS_LCD_W,NDS_LCD_H,lx+p[2],ly+p[3], lw, lh*0.5,rotation,true);
+    // Auto is resolved by se_compute_draw_lcd_rect, except when stretching to fit
+    if(nds_layout<=SE_NDS_LAYOUT_AUTO||nds_layout>=SE_NDS_NUM_LAYOUTS)nds_layout = SE_NDS_LAYOUT_VERTICAL;
+    se_screen_place_t places[3];
+    float box_w = 1, box_h = 1;
+    int count = se_nds_layout_places(nds_layout,places,&box_w,&box_h);
+    for(int i=0;i<count;++i){
+      // The center of the screen relative to the center of the box, rotated with the box
+      float x = (places[i].x+places[i].w*0.5f-box_w*0.5f)/box_w*lw;
+      float y = (places[i].y+places[i].h*0.5f-box_h*0.5f)/box_h*lh;
+      float px = x*cos(-rotation)+y*sin(-rotation);
+      float py = x*-sin(-rotation)+y*cos(-rotation);
+      bool bottom = places[i].screen==SE_NDS_SCREEN_BOTTOM;
+      se_draw_lcd_defer(bottom? core.nds.framebuffer_bottom : core.nds.framebuffer_top,NDS_LCD_W,NDS_LCD_H,
+                        lx+px,ly+py,places[i].w/box_w*lw,places[i].h/box_h*lh,rotation,bottom);
     }
   }else if (emu_state.system==SYSTEM_GB){
     se_draw_lcd_defer(core.gb.lcd.framebuffer,SB_LCD_W,SB_LCD_H,lx,ly, lw, lh,rotation,false);
@@ -8549,7 +11860,9 @@ static float se_compute_touchscreen_controls_min_dim(float w, float h, bool * po
 }
 static int se_draw_theme_region_tint_partial(int region, float x, float y, float w, float h, float w_ratio, float h_ratio, uint32_t tint){
   se_theme_region_t* r = &gui_state.theme.regions[region];
-  if(!r->active)return 0; 
+  if(!se_theme_region_active(region))return 0;
+  // The design systems keep the layout of the skin's bezel but show their own background
+  if(gui_state.design_active&&(region==SE_REGION_BEZEL_PORTRAIT||region==SE_REGION_BEZEL_LANDSCAPE||region==SE_REGION_NO_BEZEL))tint&=0x00ffffff;
   if(w==0||h==0)return 0;
 
   int lod = log2(fmin(r->w/w,r->h/h))-0.5;
@@ -8637,7 +11950,7 @@ static int se_draw_theme_region_tint_partial(int region, float x, float y, float
     SE_RPT2 non_fixed_pixels[r]      = dims[r]-fixed_pixels[r]-lcd_dims[r];
     SE_RPT2 non_fixed_pixels_scale[r]= (non_fixed_pixels[r])/(rdims[r]*uniform_scale_factor-fixed_pixels[r]-screen_pixels[r]);
 
-    bool touch_controller_active = gui_state.last_touch_time>=0||gui_state.settings.auto_hide_touch_controls==false;
+    bool touch_controller_active = se_touch_controller_shown()||gui_state.touch_editor_open;
     if(!touch_controller_active)min_dim = 0;
     float adj[2]={0,0};
     //Shrink screen to fit gamepad
@@ -9251,6 +12564,11 @@ static bool se_load_theme_from_image(uint8_t* im, uint32_t im_w, uint32_t im_h, 
   
     theme->im_h=im_h;
     theme->im_w=im_w;
+    // Release the images of the previously loaded skin once the frame using them is rendered
+    for(int m = 0; m<SE_THEME_IMAGE_MIPS;++m){
+      if(gui_state.theme.image[m].id!=SG_INVALID_ID)se_free_image_deferred(gui_state.theme.image[m]);
+      gui_state.theme.image[m].id = SG_INVALID_ID;
+    }
   
     int num_mips = 0;
     uint8_t* data2 = im;
@@ -9329,12 +12647,16 @@ static bool se_load_theme_from_memory(const uint8_t* data, int64_t size, bool in
   return ret; 
 }
 static bool se_reload_theme(){
-  if(gui_state.settings.theme ==SE_THEME_CUSTOM){
+  // The design systems draw their own widgets and only need the layout regions of the default skin
+  bool design = se_design_resolve(gui_state.settings.design_system)!=SE_DESIGN_CLASSIC;
+  int theme = design? SE_THEME_DARK : gui_state.settings.theme;
+  gui_state.loaded_skin_key = design? -1 : (int)gui_state.settings.theme;
+  if(theme ==SE_THEME_CUSTOM){
     return se_load_theme_from_file(gui_state.paths.theme);
   }else{
     uint64_t size; 
     const uint8_t* theme_data = se_get_resource(SE_THEME_DEFAULT,&size);
-    return se_load_theme_from_memory(theme_data,size, gui_state.settings.theme==SE_THEME_LIGHT,gui_state.settings.theme==SE_THEME_BLACK);
+    return se_load_theme_from_memory(theme_data,size, theme==SE_THEME_LIGHT,theme==SE_THEME_BLACK);
   }
   return false;
 }
@@ -9442,6 +12764,8 @@ static void init(void) {
   #endif
 }
 static void cleanup(void) {
+  // Finishes recordings, so their files are complete
+  se_rec_stop_all();
   simgui_shutdown();
   se_free_all_images();
 #ifdef ENABLE_RETRO_ACHIEVEMENTS
@@ -9547,6 +12871,101 @@ void Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1load_1rom(JNIEnv *e
 void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1load_1rom(JNIEnv *env, jobject thiz, jstring filePath) {
     Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1load_1rom(env, thiz, filePath);
 }
+jboolean Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1load_1patch(JNIEnv *env, jobject thiz, jstring filePath) {
+  const char *nativeFilePath = (*env)->GetStringUTFChars(env, filePath, 0);
+  bool applied = se_load_patch(nativeFilePath);
+  (*env)->ReleaseStringUTFChars(env, filePath, nativeFilePath);
+  return applied? JNI_TRUE : JNI_FALSE;
+}
+jstring Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1patch_1status(JNIEnv *env, jobject thiz) {
+  return (*env)->NewStringUTF(env, se_get_patch_status());
+}
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1soft_1patching(JNIEnv *env, jobject thiz, jint value) { se_set_soft_patching((int) value); }
+jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1soft_1patching(JNIEnv *env, jobject thiz) { return (jint) se_get_soft_patching(); }
+jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1add_1cheat(JNIEnv *env, jobject thiz, jstring name, jstring code, jint enabled) {
+  if(!code)return -1;
+  const char *native_name = name? (*env)->GetStringUTFChars(env, name, 0) : NULL;
+  const char *native_code = (*env)->GetStringUTFChars(env, code, 0);
+  int index = se_add_cheat(native_name, native_code, (int) enabled);
+  if(native_name)(*env)->ReleaseStringUTFChars(env, name, native_name);
+  (*env)->ReleaseStringUTFChars(env, code, native_code);
+  return (jint) index;
+}
+jboolean Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1remove_1cheat(JNIEnv *env, jobject thiz, jint index) {
+  return se_remove_cheat((int) index)? JNI_TRUE : JNI_FALSE;
+}
+jboolean Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1cheat_1enabled(JNIEnv *env, jobject thiz, jint index, jint enabled) {
+  return se_set_cheat_enabled((int) index, (int) enabled)? JNI_TRUE : JNI_FALSE;
+}
+jstring Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1cheats_1json(JNIEnv *env, jobject thiz) {
+  return (*env)->NewStringUTF(env, se_get_cheats_json());
+}
+jboolean Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1cheat_1search_1start(JNIEnv *env, jobject thiz, jint value_size, jint is_signed) {
+  return se_cheat_search_start((int) value_size, (int) is_signed)? JNI_TRUE : JNI_FALSE;
+}
+jlong Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1cheat_1search_1filter(JNIEnv *env, jobject thiz, jint compare, jlong value) {
+  return (jlong) se_cheat_search_filter((int) compare, (uint32_t) value);
+}
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1cheat_1search_1reset(JNIEnv *env, jobject thiz) { se_cheat_search_reset(); }
+jstring Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1cheat_1search_1json(JNIEnv *env, jobject thiz, jint first, jint max) {
+  return (*env)->NewStringUTF(env, se_get_cheat_search_json((uint32_t) first, (uint32_t) max));
+}
+jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1cheat_1search_1add_1code(JNIEnv *env, jobject thiz, jlong address, jlong value, jstring name) {
+  const char *native_name = name? (*env)->GetStringUTFChars(env, name, 0) : NULL;
+  int index = se_cheat_search_add_code((uint32_t) address, (uint32_t) value, native_name);
+  if(native_name)(*env)->ReleaseStringUTFChars(env, name, native_name);
+  return (jint) index;
+}
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1ra_1login(JNIEnv *env, jobject thiz, jstring username, jstring password) {
+  if(!username||!password)return;
+  const char *native_username = (*env)->GetStringUTFChars(env, username, 0);
+  const char *native_password = (*env)->GetStringUTFChars(env, password, 0);
+  se_ra_login(native_username, native_password);
+  (*env)->ReleaseStringUTFChars(env, username, native_username);
+  (*env)->ReleaseStringUTFChars(env, password, native_password);
+}
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1ra_1logout(JNIEnv *env, jobject thiz) { se_ra_logout(); }
+jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1ra_1get_1login_1state(JNIEnv *env, jobject thiz) { return (jint) se_ra_get_login_state(); }
+jstring Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1ra_1get_1login_1error(JNIEnv *env, jobject thiz) {
+  return (*env)->NewStringUTF(env, se_ra_get_login_error());
+}
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1ra_1unofficial(JNIEnv *env, jobject thiz, jint value) { se_set_ra_unofficial((int) value); }
+jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1ra_1unofficial(JNIEnv *env, jobject thiz) { return (jint) se_get_ra_unofficial(); }
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1ra_1spectator(JNIEnv *env, jobject thiz, jint value) { se_set_ra_spectator((int) value); }
+jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1ra_1spectator(JNIEnv *env, jobject thiz) { return (jint) se_get_ra_spectator(); }
+jstring Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1achievements_1json(JNIEnv *env, jobject thiz) {
+  return (*env)->NewStringUTF(env, se_get_achievements_json());
+}
+jboolean Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1start_1video_1recording(JNIEnv *env, jobject thiz) { return se_start_video_recording()? JNI_TRUE : JNI_FALSE; }
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1stop_1video_1recording(JNIEnv *env, jobject thiz) { se_stop_video_recording(); }
+jboolean Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1is_1recording_1video(JNIEnv *env, jobject thiz) { return se_is_recording_video()? JNI_TRUE : JNI_FALSE; }
+jboolean Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1start_1audio_1recording(JNIEnv *env, jobject thiz) { return se_start_audio_recording()? JNI_TRUE : JNI_FALSE; }
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1stop_1audio_1recording(JNIEnv *env, jobject thiz) { se_stop_audio_recording(); }
+jboolean Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1is_1recording_1audio(JNIEnv *env, jobject thiz) { return se_is_recording_audio()? JNI_TRUE : JNI_FALSE; }
+jboolean Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1save_1screenshot(JNIEnv *env, jobject thiz) { return se_save_screenshot()? JNI_TRUE : JNI_FALSE; }
+jboolean Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1save_1replay(JNIEnv *env, jobject thiz) { return se_save_replay()? JNI_TRUE : JNI_FALSE; }
+jstring Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1last_1recording_1path(JNIEnv *env, jobject thiz) { return (*env)->NewStringUTF(env, se_get_last_recording_path()); }
+jstring Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1recording_1json(JNIEnv *env, jobject thiz) { return (*env)->NewStringUTF(env, se_get_recording_json()); }
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1record_1scale(JNIEnv *env, jobject thiz, jint value) { se_set_record_scale((int) value); }
+jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1record_1scale(JNIEnv *env, jobject thiz) { return (jint) se_get_record_scale(); }
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1record_1format(JNIEnv *env, jobject thiz, jint value) { se_set_record_format((int) value); }
+jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1record_1format(JNIEnv *env, jobject thiz) { return (jint) se_get_record_format(); }
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1record_1audio(JNIEnv *env, jobject thiz, jint value) { se_set_record_audio((int) value); }
+jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1record_1audio(JNIEnv *env, jobject thiz) { return (jint) se_get_record_audio(); }
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1replay_1seconds(JNIEnv *env, jobject thiz, jint value) { se_set_replay_seconds((int) value); }
+jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1replay_1seconds(JNIEnv *env, jobject thiz) { return (jint) se_get_replay_seconds(); }
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1screenshot_1scale(JNIEnv *env, jobject thiz, jint value) { se_set_screenshot_scale((int) value); }
+jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1screenshot_1scale(JNIEnv *env, jobject thiz) { return (jint) se_get_screenshot_scale(); }
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1stream_1scale(JNIEnv *env, jobject thiz, jint value) { se_set_stream_scale((int) value); }
+jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1stream_1scale(JNIEnv *env, jobject thiz) { return (jint) se_get_stream_scale(); }
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1stream_1fps(JNIEnv *env, jobject thiz, jint value) { se_set_stream_fps((int) value); }
+jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1stream_1fps(JNIEnv *env, jobject thiz) { return (jint) se_get_stream_fps(); }
+jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1make_1cheat(JNIEnv *env, jobject thiz, jlong address, jlong value, jint value_size, jstring name) {
+  const char *native_name = name? (*env)->GetStringUTFChars(env, name, 0) : NULL;
+  int index = se_make_cheat((uint32_t) address, (uint32_t) value, (int) value_size, native_name);
+  if(native_name)(*env)->ReleaseStringUTFChars(env, name, native_name);
+  return (jint) index;
+}
 void Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1load_1file(JNIEnv *env, jobject thiz, jstring filePath) {
   const char *nativeFilePath = (*env)->GetStringUTFChars(env, filePath, 0);
   se_file_browser_accept(nativeFilePath);
@@ -9635,6 +13054,12 @@ void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1gba_1color_1correcti
 jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1gba_1color_1correction_1mode(JNIEnv *env, jobject thiz) { return (jint)se_get_gba_color_correction_mode(); }
 void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1nds_1layout(JNIEnv *env, jobject thiz, jint layout) { se_set_nds_layout((uint32_t)layout); }
 jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1nds_1layout(JNIEnv *env, jobject thiz) { return (jint)se_get_nds_layout(); }
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1nds_1swap_1screens(JNIEnv *env, jobject thiz, jint value) { se_set_nds_swap_screens((uint32_t)value); }
+jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1nds_1swap_1screens(JNIEnv *env, jobject thiz) { return (jint)se_get_nds_swap_screens(); }
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1nds_1screen_1gap(JNIEnv *env, jobject thiz, jint value) { se_set_nds_screen_gap((uint32_t)value); }
+jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1nds_1screen_1gap(JNIEnv *env, jobject thiz) { return (jint)se_get_nds_screen_gap(); }
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1nds_1small_1screen(JNIEnv *env, jobject thiz, jint value) { se_set_nds_small_screen((uint32_t)value); }
+jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1nds_1small_1screen(JNIEnv *env, jobject thiz) { return (jint)se_get_nds_small_screen(); }
 void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1show_1screen_1bezel(JNIEnv *env, jobject thiz, jint value) { se_set_show_screen_bezel((uint32_t)value); }
 jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1show_1screen_1bezel(JNIEnv *env, jobject thiz) { return (jint)se_get_show_screen_bezel(); }
 void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1language(JNIEnv *env, jobject thiz, jint language) { se_set_language_int((uint32_t)language); }
@@ -9824,6 +13249,78 @@ jint Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1get_1theme(JNIEnv *
 
 jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1theme(JNIEnv *env, jobject thiz) {
   return Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1get_1theme(env, thiz);
+}
+
+/* Design system: 0 native, 1 classic, 2 Material 3, 3 Fluent, 4 Adwaita. Color scheme: 0 system, 1 light,
+   2 dark, 3 black. Accent: 0xRRGGBB, or -1 (0xFFFFFFFF) to follow the system accent. */
+void Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1set_1design_1system(JNIEnv *env, jobject thiz, jint value) {
+  se_set_design_system((uint32_t) value);
+}
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1design_1system(JNIEnv *env, jobject thiz, jint value) {
+  Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1set_1design_1system(env, thiz, value);
+}
+jint Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1get_1design_1system(JNIEnv *env, jobject thiz) { return (jint) se_get_design_system(); }
+jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1design_1system(JNIEnv *env, jobject thiz) {
+  return Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1get_1design_1system(env, thiz);
+}
+
+void Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1set_1color_1scheme(JNIEnv *env, jobject thiz, jint value) {
+  se_set_color_scheme((uint32_t) value);
+}
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1color_1scheme(JNIEnv *env, jobject thiz, jint value) {
+  Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1set_1color_1scheme(env, thiz, value);
+}
+jint Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1get_1color_1scheme(JNIEnv *env, jobject thiz) { return (jint) se_get_color_scheme(); }
+jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1color_1scheme(JNIEnv *env, jobject thiz) {
+  return Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1get_1color_1scheme(env, thiz);
+}
+
+void Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1set_1accent_1color(JNIEnv *env, jobject thiz, jint value) {
+  se_set_accent_color((uint32_t) value);
+}
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1accent_1color(JNIEnv *env, jobject thiz, jint value) {
+  Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1set_1accent_1color(env, thiz, value);
+}
+jint Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1get_1accent_1color(JNIEnv *env, jobject thiz) { return (jint) se_get_accent_color(); }
+jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1accent_1color(JNIEnv *env, jobject thiz) {
+  return Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1get_1accent_1color(env, thiz);
+}
+
+/* On-screen controller: shown (1) or off (0), Rewind / Fast Forward buttons, layout reset.
+   Game controller face buttons: 0 match the labels, 1 match the GBA positions. */
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1touch_1controller(JNIEnv *env, jobject thiz, jint value) { se_set_touch_controller((int) value); }
+jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1touch_1controller(JNIEnv *env, jobject thiz) { return (jint) se_get_touch_controller(); }
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1touch_1controls_1show_1speed(JNIEnv *env, jobject thiz, jint value) { se_set_touch_controls_show_speed((uint32_t) value); }
+jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1touch_1controls_1show_1speed(JNIEnv *env, jobject thiz) { return (jint) se_get_touch_controls_show_speed(); }
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1reset_1touch_1layout(JNIEnv *env, jobject thiz) { se_reset_touch_layout(); }
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1controller_1face_1layout(JNIEnv *env, jobject thiz, jint value) { se_set_controller_face_layout((uint32_t) value); }
+jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1controller_1face_1layout(JNIEnv *env, jobject thiz) { return (jint) se_get_controller_face_layout(); }
+
+/* Contrast: 0 follow the system, 1 standard, 2 high */
+void Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1set_1contrast(JNIEnv *env, jobject thiz, jint value) {
+  se_set_contrast((uint32_t) value);
+}
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1contrast(JNIEnv *env, jobject thiz, jint value) {
+  Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1set_1contrast(env, thiz, value);
+}
+jint Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1get_1contrast(JNIEnv *env, jobject thiz) { return (jint) se_get_contrast(); }
+jint Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1get_1contrast(JNIEnv *env, jobject thiz) {
+  return Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1get_1contrast(env, thiz);
+}
+/* Host apps that use their own activity report the system high contrast setting (1/0/-1) */
+void Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1set_1system_1high_1contrast(JNIEnv *env, jobject thiz, jint value) {
+  se_set_system_high_contrast((int) value);
+}
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1system_1high_1contrast(JNIEnv *env, jobject thiz, jint value) {
+  Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1set_1system_1high_1contrast(env, thiz, value);
+}
+
+/* Host apps that use their own activity report the system appearance (dark: 1/0/-1, accent: ARGB or -1) */
+void Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1set_1system_1appearance(JNIEnv *env, jobject thiz, jint dark, jint accent) {
+  se_set_system_appearance((int) dark, accent==-1? SE_ACCENT_NONE : ((uint32_t) accent)&0xffffff);
+}
+void Java_com_sky_SkyEmu_MainSkyEmuObject_se_1android_1set_1system_1appearance(JNIEnv *env, jobject thiz, jint dark, jint accent) {
+  Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1set_1system_1appearance(env, thiz, dark, accent);
 }
 
 void Java_com_sky_SkyEmu_EnhancedNativeActivity_se_1android_1set_1integer_1scaling(JNIEnv *env,
@@ -10054,7 +13551,7 @@ SKYEMU_API int win_main(int argc, char* argv[]) {
 }
 #endif /* SE_PLATFORM_WINDOWS_DLL */
 
-#if defined(SE_PLATFORM_IOS) || TARGET_OS_MACCATALYST || SE_PLATFORM_ANDROID
+#ifndef SE_PLATFORM_WINDOWS_DLL
 sapp_desc sokol_main(int argc, char* argv[]) {
     emu_state.cmd_line_arg_count = argc;
     emu_state.cmd_line_args = argv;
@@ -10108,4 +13605,4 @@ sapp_desc sokol_main(int argc, char* argv[]) {
             .ios_keyboard_resizes_canvas = true
     };
 }
-#endif /* SE_PLATFORM_IOS || TARGET_OS_MACCATALYST*/
+#endif /* !SE_PLATFORM_WINDOWS_DLL */

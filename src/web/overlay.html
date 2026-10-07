@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>SkyEmu Stream Overlay</title>
+<style>
+  /* Transparent page for an OBS Browser Source. Options in the address:
+     ?inputs=0 hides the input display, ?game=0 the game and rich presence line, ?rec=0 the REC badge,
+     ?accent=ff8800 changes the color of pressed buttons, ?scale=1.5 makes everything larger. */
+  :root{ --accent:#d0bcff; --panel:rgba(20,18,24,.72); --on:#f4eff4; --dim:#cac4d0; --rec:#ff3b30; --scale:1; }
+  html,body{ margin:0; background:transparent; color:var(--on); overflow:hidden;
+    font:600 calc(16px*var(--scale))/1.3 system-ui,-apple-system,"Segoe UI",Roboto,Cantarell,sans-serif; }
+  .stack{ position:fixed; left:calc(16px*var(--scale)); bottom:calc(16px*var(--scale)); display:flex; flex-direction:column;
+    align-items:flex-start; gap:calc(10px*var(--scale)); }
+  .panel{ background:var(--panel); border-radius:calc(18px*var(--scale)); padding:calc(10px*var(--scale)) calc(14px*var(--scale));
+    backdrop-filter:blur(6px); box-shadow:0 2px 12px rgba(0,0,0,.35); }
+  #rec{ position:fixed; right:calc(16px*var(--scale)); top:calc(16px*var(--scale)); display:none; align-items:center;
+    gap:calc(8px*var(--scale)); }
+  #rec .dot{ width:calc(12px*var(--scale)); height:calc(12px*var(--scale)); border-radius:50%; background:var(--rec);
+    animation:blink 1s steps(1) infinite; }
+  @keyframes blink{ 60%{ opacity:.25; } }
+  #game .title{ font-size:1em; } #game .presence{ color:var(--dim); font-weight:500; font-size:.85em; }
+  #pad{ display:grid; grid-template-columns:auto auto auto; align-items:center; gap:calc(14px*var(--scale)); }
+  .b{ display:flex; align-items:center; justify-content:center; color:var(--dim); background:rgba(255,255,255,.12);
+    font-size:.8em; transition:background .04s, color .04s; }
+  .b.on{ background:var(--accent); color:#1d1b20; box-shadow:0 0 calc(10px*var(--scale)) var(--accent); }
+  .dpad{ display:grid; grid-template-columns:repeat(3,calc(22px*var(--scale))); grid-template-rows:repeat(3,calc(22px*var(--scale))); }
+  .dpad .b{ border-radius:calc(5px*var(--scale)); }
+  .dpad .up{ grid-area:1/2; } .dpad .left{ grid-area:2/1; } .dpad .right{ grid-area:2/3; } .dpad .down{ grid-area:3/2; }
+  .dpad .mid{ grid-area:2/2; background:rgba(255,255,255,.12); }
+  .mid-col{ display:flex; flex-direction:column; gap:calc(6px*var(--scale)); align-items:center; }
+  .shoulder{ display:flex; gap:calc(6px*var(--scale)); }
+  .shoulder .b, .small .b{ min-width:calc(46px*var(--scale)); height:calc(18px*var(--scale)); border-radius:999px; font-size:.65em; }
+  .small{ display:flex; gap:calc(6px*var(--scale)); }
+  .face{ display:grid; grid-template-columns:repeat(3,calc(24px*var(--scale))); grid-template-rows:repeat(3,calc(24px*var(--scale))); }
+  .face .b{ border-radius:50%; }
+  .face .x{ grid-area:1/2; } .face .y{ grid-area:2/1; } .face .a{ grid-area:2/3; } .face .bb{ grid-area:3/2; }
+  .face.two .x, .face.two .y{ visibility:hidden; }
+  .face.two .a{ grid-area:1/3; } .face.two .bb{ grid-area:2/2; }
+</style>
+</head>
+<body>
+<div id="rec" class="panel"><span class="dot"></span><span id="rectime">REC</span></div>
+<div class="stack">
+  <div id="game" class="panel" style="display:none"><div class="title"></div><div class="presence"></div></div>
+  <div id="inputs" class="panel">
+    <div id="pad">
+      <div class="dpad">
+        <div class="b up" data-key="Up"></div><div class="b left" data-key="Left"></div><div class="mid"></div>
+        <div class="b right" data-key="Right"></div><div class="b down" data-key="Down"></div>
+      </div>
+      <div class="mid-col">
+        <div class="shoulder" id="shoulders"><div class="b" data-key="L">L</div><div class="b" data-key="R">R</div></div>
+        <div class="small"><div class="b" data-key="Select">SEL</div><div class="b" data-key="Start">START</div></div>
+      </div>
+      <div class="face two" id="face">
+        <div class="b x" data-key="X">X</div><div class="b y" data-key="Y">Y</div>
+        <div class="b a" data-key="A">A</div><div class="b bb" data-key="B">B</div>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+"use strict";
+const options = new URLSearchParams(location.search);
+const show = (name) => options.get(name) !== "0";
+if(options.get("accent")) document.documentElement.style.setProperty("--accent", "#" + options.get("accent").replace(/[^0-9a-fA-F]/g, ""));
+if(options.get("scale")) document.documentElement.style.setProperty("--scale", parseFloat(options.get("scale")) || 1);
+if(!show("inputs")) document.getElementById("inputs").style.display = "none";
+const buttons = [...document.querySelectorAll("[data-key]")];
+
+// Inputs of the last frame, about 30 times a second
+async function pollInputs(){
+  try{
+    const state = await (await fetch("/input_state", { cache:"no-store" })).json();
+    for(const el of buttons) el.classList.toggle("on", !!(state.inputs && state.inputs[el.dataset.key]));
+    document.getElementById("face").classList.toggle("two", state.system !== "NDS");
+    document.getElementById("shoulders").style.visibility = state.system === "GB" ? "hidden" : "visible";
+    if(show("game")){
+      const game = document.getElementById("game");
+      game.querySelector(".title").textContent = state.game || "";
+      game.style.display = state.game ? "block" : "none";
+    }
+  }catch(e){}
+  setTimeout(pollInputs, show("inputs") ? 33 : 2000);
+}
+pollInputs();
+
+// What the player is doing, from RetroAchievements rich presence
+async function pollPresence(){
+  try{
+    const ra = await (await fetch("/achievements", { cache:"no-store" })).json();
+    const text = ra.game && ra.game.rich_presence ? ra.game.rich_presence : "";
+    document.querySelector("#game .presence").textContent = text;
+    if(ra.game && ra.game.title) document.querySelector("#game .title").textContent = ra.game.title;
+  }catch(e){}
+  setTimeout(pollPresence, 10000);
+}
+if(show("game")) pollPresence();
+
+// REC badge while SkyEmu records a video or sound
+async function pollRecording(){
+  try{
+    const rec = await (await fetch("/recording", { cache:"no-store" })).json();
+    const active = rec.video.recording ? rec.video : rec.audio.recording ? rec.audio : null;
+    const badge = document.getElementById("rec");
+    badge.style.display = active ? "flex" : "none";
+    if(active){
+      const s = Math.floor(active.seconds || 0);
+      document.getElementById("rectime").textContent = `REC ${Math.floor(s/60)}:${String(s%60).padStart(2,"0")}`;
+    }
+  }catch(e){}
+  setTimeout(pollRecording, 1000);
+}
+if(show("rec")) pollRecording();
+</script>
+</body>
+</html>

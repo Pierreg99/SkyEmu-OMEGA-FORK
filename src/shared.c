@@ -48,10 +48,11 @@ void se_load_cheats(const char * filename){
       continue;
     }
     if(state == 1){
-      if(cheat_name_size<SE_MAX_CHEAT_NAME_SIZE)ch->name[cheat_name_size++]=c; 
+      // Keeps the terminating zero of the name and the code
+      if(cheat_name_size<SE_MAX_CHEAT_NAME_SIZE-1)ch->name[cheat_name_size++]=c; 
     }
     if(state == 3){
-      if(cheat_name_size<SE_MAX_CHEAT_CODE_SIZE*8)cheat_buffer[cheat_code_size++]=c; 
+      if(cheat_code_size<SE_MAX_CHEAT_CODE_SIZE*8-1)cheat_buffer[cheat_code_size++]=c; 
     }
   }
   free(data);

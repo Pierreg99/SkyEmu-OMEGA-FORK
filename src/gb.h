@@ -1901,7 +1901,12 @@ static FORCE_INLINE void sb_process_audio(sb_gb_t *gb, sb_emu_state_t*emu, doubl
   int nrf_52 = sb_read8_io(gb,SB_IO_SOUND_ON_OFF)&0xf0;
 
   bool master_enable = SB_BFE(nrf_52,7,1);
-  if(!master_enable)return;
+  if(!master_enable){
+    // Sound is off and no samples are made. The sample clock keeps up, so turning the sound on
+    // later doesn't make up for the whole silent time at once.
+    audio->current_sample_generated_time = audio->current_sim_time;
+    return;
+  }
   float sample_delta_t = 1.0/SE_AUDIO_SAMPLE_RATE;
 
   const static float duty_lookup[]={0.125,0.25,0.5,0.75};
@@ -1980,7 +1985,9 @@ static FORCE_INLINE void sb_process_audio(sb_gb_t *gb, sb_emu_state_t*emu, doubl
 
     audio->current_sample_generated_time+=sample_delta_t;
     
-    if((sb_ring_buffer_size(&emu->audio_ring_buff)+3>SB_AUDIO_RING_BUFFER_SIZE)) continue;
+    // A recording gets every sample, also when playback can't keep up (fast forward)
+    bool ring_full = sb_ring_buffer_size(&emu->audio_ring_buff)+3>SB_AUDIO_RING_BUFFER_SIZE;
+    if(ring_full&&!emu->audio_tap) continue;
 
     //Advance each channel    
     for(int i=0;i<4;++i)seq->chan_t[i]  +=sample_delta_t*freq_hz[i];
@@ -2053,10 +2060,13 @@ static FORCE_INLINE void sb_process_audio(sb_gb_t *gb, sb_emu_state_t*emu, doubl
     audio->capacitor_l = (sample_volume_l-out_l)*0.996;
     audio->capacitor_r = (sample_volume_r-out_r)*0.996;
     // Quantization
+    int16_t sample_l = out_l*32760, sample_r = out_r*32760;
+    if(emu->audio_tap)emu->audio_tap(sample_l,sample_r);
+    if(ring_full)continue;
     unsigned write_entry0 = (emu->audio_ring_buff.write_ptr++)%SB_AUDIO_RING_BUFFER_SIZE;
     unsigned write_entry1 = (emu->audio_ring_buff.write_ptr++)%SB_AUDIO_RING_BUFFER_SIZE;
 
-    emu->audio_ring_buff.data[write_entry0] = out_l*32760;
-    emu->audio_ring_buff.data[write_entry1] = out_r*32760;
+    emu->audio_ring_buff.data[write_entry0] = sample_l;
+    emu->audio_ring_buff.data[write_entry1] = sample_r;
   }
 }
