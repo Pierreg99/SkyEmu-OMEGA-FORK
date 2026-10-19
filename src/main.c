@@ -7279,6 +7279,8 @@ void se_draw_menu_panel(){
       se_draw_save_states(false);
     }
   }
+#if !(defined(SE_PLATFORM_ANDROID) && !defined(SE_ANDROID_ALLOW_NETWORK))
+  /* Offline-Android: https_request liefert leer, der Login-Button waere tot. */
   se_section(ICON_FK_CLOUD " Google Drive");
   if (!cloud_state.drive){
     bool pending_login = cloud_drive_pending_login();
@@ -7327,6 +7329,7 @@ void se_draw_menu_panel(){
     igEndGroup();
   }
 
+#endif
   if(emu_state.system==SYSTEM_NDS || emu_state.system == SYSTEM_GBA || emu_state.system == SYSTEM_GB){
     se_section(ICON_FK_KEY " Action Replay Codes");
     if(gui_state.settings.hardcore_mode&&gui_state.ra_logged_in) se_text("Disabled in Hardcore Mode");

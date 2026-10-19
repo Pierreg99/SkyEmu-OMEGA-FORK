@@ -89,3 +89,15 @@ def test_android_single_touch_reaches_imgui(first, second):
                                         '_SOKOL_PRIVATE bool _sapp_android_touch_event(const AInputEvent* e)'))
     case = body[body.index(f'case {first}:'):body.index(f'case {second}:')]
     assert 'break' not in case and 'type' not in case
+
+
+def test_android_offline_hides_google_drive_section():
+    # Offline liefert https_request leer; ein sichtbarer Login-Button waere tot.
+    body = function_body(strip_comments(read('src/main.c')), 'void se_draw_menu_panel()')
+    section = body.index('" Google Drive"')
+    guard = body.rfind('#if', 0, section)
+    assert guard != -1, 'Google-Drive-Abschnitt ohne Praeprozessor-Guard'
+    line = body[guard:body.index('\n', guard)]
+    assert 'SE_PLATFORM_ANDROID' in line and 'SE_ANDROID_ALLOW_NETWORK' in line
+    end = body.index('#endif', section)
+    assert body.index('Action Replay Codes') > end
