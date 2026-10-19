@@ -111,3 +111,10 @@ def test_touch_gamepad_not_hardcoded_hidden():
         r'gui_state\.settings\.auto_hide_touch_controls\s*==\s*false\s*;',
         body,
     )
+
+
+def test_avoid_overlap_setting_controls_gamepad_mask():
+    src = strip_comments(read('src/main.c'))
+    assert re.search(r'^\s*gamepad_mask\s*=\s*0x0\s*;', src, re.MULTILINE) is None
+    assert re.search(
+        r'if\(\(gui_state\.settings\.avoid_overlaping_touchscreen&overlap_mask\)==0\)gamepad_mask\s*=\s*0x0;', src)

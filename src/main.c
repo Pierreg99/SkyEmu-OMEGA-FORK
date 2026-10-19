@@ -9401,7 +9401,7 @@ static int se_draw_theme_region_tint_partial(int region, float x, float y, float
   int skip_mask = portrait? SE_RESIZE_ONLY_LANDSCAPE : SE_RESIZE_ONLY_PORTRAIT;
   int overlap_mask = w<h? SE_AVOID_OVERLAP_PORTRAIT : SE_AVOID_OVERLAP_LANDSCAPE;
   //When overlap is allowed, just render gamepad over screen
-  gamepad_mask = 0x0;
+  if((gui_state.settings.avoid_overlaping_touchscreen&overlap_mask)==0)gamepad_mask = 0x0;
   if(gui_state.settings.auto_hide_touch_controls && gui_state.last_touch_time<0.01){
     skip_mask = SE_RESIZE_ONLY_LANDSCAPE | SE_RESIZE_ONLY_PORTRAIT;
     gamepad_mask = 0;
