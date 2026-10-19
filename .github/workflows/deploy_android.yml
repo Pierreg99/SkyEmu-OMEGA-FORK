@@ -14,8 +14,10 @@ jobs:
       - uses: android-actions/setup-android@v3
         with:
           packages: platform-tools
-      - name: Install pinned SDK, NDK and CMake
-        run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0' 'ndk;28.2.13676358' 'cmake;3.22.1'
+      - name: Accept licenses and install pinned SDK and CMake
+        run: |
+          yes | sdkmanager --licenses || true
+          sdkmanager 'platforms;android-36' 'build-tools;36.0.0' 'cmake;3.22.1'
       - name: Build Android library for all four ABIs
         working-directory: tools/android_project
         run: ./gradlew :app:assembleRelease --no-daemon --stacktrace --max-workers=2
