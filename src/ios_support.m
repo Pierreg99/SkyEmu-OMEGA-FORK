@@ -209,3 +209,13 @@ void se_ios_open_external_menu() {
     sapp_ios_open_external_menu_callback();
   }];
 }
+
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#if TARGET_OS_IPHONE
+__attribute__((weak)) int main(int argc, char* argv[]) {
+    extern int main_ios(int argc, char* argv[]);
+    return main_ios(argc, argv);
+}
+#endif
+#endif
