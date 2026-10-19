@@ -538,7 +538,11 @@ if(NOT RETRO_CORE_ONLY)
   endif()
 endif()
 
-add_library(skyemu_libretro SHARED EXCLUDE_FROM_ALL src/libretro.c src/shared.c src/localization.c)
+if(EMSCRIPTEN)
+  add_library(skyemu_libretro STATIC EXCLUDE_FROM_ALL src/libretro.c src/shared.c src/localization.c)
+else()
+  add_library(skyemu_libretro SHARED EXCLUDE_FROM_ALL src/libretro.c src/shared.c src/localization.c)
+endif()
 set_target_properties(skyemu_libretro PROPERTIES PREFIX "")
 # Mac Catalyst support for skyemu_libretro
 set_target_properties(skyemu_libretro PROPERTIES
