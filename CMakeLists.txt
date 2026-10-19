@@ -290,11 +290,7 @@ if(NOT RETRO_CORE_ONLY)
       add_library(sokol STATIC src/sokol/sokol.m ${SOKOL_HEADERS})
       if(MACOS AND (NOT IOS))
           add_definitions(-DSE_PLATFORM_MACOS)
-          if(NOT USE_SDL)
-              add_definitions(-DSOKOL_METAL=1)
-          else()
-              add_definitions(-DSOKOL_GLCORE33=1)
-          endif()
+          add_definitions(-DSOKOL_METAL=1)
           target_link_libraries(sokol PUBLIC
               "-framework QuartzCore"
               "-framework Cocoa"
@@ -538,16 +534,18 @@ if(NOT RETRO_CORE_ONLY)
   endif()
 endif()
 
-add_library(skyemu_libretro SHARED EXCLUDE_FROM_ALL src/libretro.c src/shared.c src/localization.c)
-set_target_properties(skyemu_libretro PROPERTIES PREFIX "")
-# Mac Catalyst support for skyemu_libretro
-set_target_properties(skyemu_libretro PROPERTIES
-  XCODE_ATTRIBUTE_SUPPORTED_PLATFORMS "macosx iphonesimulator maccatalyst"
-  XCODE_ATTRIBUTE_MACOSX_DEPLOYMENT_TARGET "10.15"
-)
-if (MACOS OR IOS)
-    find_library(FoundationLib CoreFoundation)
-    target_link_libraries(skyemu_libretro ${FoundationLib})
+if(NOT EMSCRIPTEN)
+  add_library(skyemu_libretro SHARED EXCLUDE_FROM_ALL src/libretro.c src/shared.c src/localization.c)
+  set_target_properties(skyemu_libretro PROPERTIES PREFIX "")
+  # Mac Catalyst support for skyemu_libretro
+  set_target_properties(skyemu_libretro PROPERTIES
+    XCODE_ATTRIBUTE_SUPPORTED_PLATFORMS "macosx iphonesimulator maccatalyst"
+    XCODE_ATTRIBUTE_MACOSX_DEPLOYMENT_TARGET "10.15"
+  )
+  if (MACOS OR IOS)
+      find_library(FoundationLib CoreFoundation)
+      target_link_libraries(skyemu_libretro ${FoundationLib})
+  endif()
 endif()
 
 if (${CMAKE_SYSTEM_NAME} MATCHES "Emscripten")
