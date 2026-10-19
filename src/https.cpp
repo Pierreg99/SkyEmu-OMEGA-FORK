@@ -327,6 +327,13 @@ void https_request(http_request_e type, const std::string& url, const std::strin
                    const std::vector<std::pair<std::string, std::string>>& headers,
                    std::function<void(const std::vector<uint8_t>&)> callback, bool do_cache)
 {
+#if defined(SE_PLATFORM_ANDROID) && !defined(SE_ANDROID_ALLOW_NETWORK)
+    // Offline: keine ausgehenden Requests auf Android, Aufrufer sehen einen fehlgeschlagenen Request.
+    (void)type; (void)url; (void)body; (void)headers; (void)do_cache;
+    // Asynchron wie der Thread-Pool, damit kein Aufrufer im eigenen Lock zurueckgerufen wird.
+    std::thread([callback]() { callback({}); }).detach();
+    return;
+#endif
     if (type == http_request_e::GET && do_cache && cache_enabled.load(std::memory_order_relaxed)) {
         std::unique_lock<std::mutex> lock(cache_mutex);
         auto it = download_cache.find(url);
@@ -497,6 +504,8 @@ extern "C" void https_open_url(const char* url)
 #ifndef TARGET_OS_MACCATALYST
     system(command.c_str());
 #endif
+#elif defined(SE_PLATFORM_ANDROID) && !defined(SE_ANDROID_ALLOW_NETWORK)
+    printf("Offline build, URL not opened: %s\n", request.c_str());
 #elif defined(SE_PLATFORM_ANDROID)
     ANativeActivity* activity = (ANativeActivity*)sapp_android_get_native_activity();
     JavaVM* pJavaVM = activity->vm;

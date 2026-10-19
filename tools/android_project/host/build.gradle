@@ -1,0 +1,134 @@
+apply plugin: 'com.android.application'
+
+// Installierbare Host-App fuer die SkyEmu-Android-Library (:app).
+// Signiert wird ausschliesslich mit dem Standard-Debug-Key von AGP (auch die Release-Variante);
+// es gibt bewusst keine eigene signingConfig und keinen Zugriff auf skyemu-open-signing-store.
+// Ausgeliefert wird die Release-Variante: Debug baut die native Bibliothek mit CMake Debug (-O0),
+// damit ist der Emulator auf dem Geraet praktisch unbenutzbar. Release = RelWithDebInfo (-O2) wie upstream.
+
+android {
+    namespace 'com.skyemu.omega'
+    compileSdk 36
+    ndkVersion '28.2.13676358'
+
+    defaultConfig {
+        applicationId 'com.skyemu.omega'
+        minSdk 24
+        targetSdk 36
+        versionCode 61
+        versionName '6.1-sol-89a26e8'
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.debug
+        }
+    }
+    packaging {
+        jniLibs {
+            // .so unkomprimiert und 16-KB-aligned im APK halten (extractNativeLibs=false).
+            useLegacyPackaging = false
+        }
+    }
+}
+
+dependencies {
+    implementation project(':app')
+    // kotlin-stdlib-jdk7/jdk8 1.6.21 (transitiv) auf kotlin-stdlib 1.8.22 ausrichten, sonst doppelte Klassen.
+    implementation platform('org.jetbrains.kotlin:kotlin-bom:1.8.22')
+}
+
+// Lizenztexte werden beim Build aus den Repo-Dateien nach assets/licenses/ kopiert bzw. extrahiert,
+// statt sie als Duplikate einzuchecken. Fehlt eine Quelle oder ein Marker, bricht der Build ab.
+def repoRootDir = rootProject.file('../..')
+
+// Ganze Dateien: Ziel-Name im APK -> Pfad relativ zur Repo-Wurzel.
+def licenseFiles = [
+    'SkyEmu-LICENSE.txt'           : 'LICENSE',
+    'ACKNOWLEDGMENTS.md'           : 'ACKNOWLEDGMENTS.md',
+    'Drastic-NDS-BIOS-LICENSE.txt' : 'src/freebios/drastic_bios_readme.txt',
+    // Einziger eingecheckter Lizenztext: Das Repo enthaelt fuer src/gba_bios.h nur den Header-Hinweis "License: MIT".
+    'Cult-of-GBA-BIOS-LICENSE.txt' : 'tools/android_project/host/licenses/Cult-of-GBA-BIOS-LICENSE.txt',
+    'OpenSSL-LICENSE.txt'          : 'src/openssl/LICENSE',
+    'curl-COPYING.txt'             : 'src/curl/COPYING',
+    'Capstone-LICENSE.txt'         : 'src/capstone/LICENSE.TXT',
+    'Capstone-LICENSE_LLVM.txt'    : 'src/capstone/LICENSE_LLVM.TXT',
+    'cimgui-LICENSE.txt'           : 'src/cimgui/LICENSE',
+    'DearImGui-LICENSE.txt'        : 'src/cimgui/imgui/LICENSE.txt',
+    'rcheevos-LICENSE.txt'         : 'src/rcheevos/LICENSE',
+    'utf8proc-LICENSE.md'          : 'src/utf8proc/LICENSE.md',
+]
+
+// Lizenzbloecke aus Quell-Headern: [Ziel, Quelle, Start-Regex, End-Regex] (Start- und Endzeile inklusive).
+def licenseBlocks = [
+    ['Lua-LICENSE.txt',     'src/lua/lua.h',          /^\* Copyright \(C\) 1994-/,                        /^\*+\/$/],
+    ['sokol-LICENSE.txt',   'src/sokol/sokol_app.h',  /zlib\/libpng license/,                             /distribution\.$/],
+    ['miniz-LICENSE.txt',   'src/miniz.c',            /Copyright 2013-2014 RAD Game Tools/,               /^ \*+\/$/],
+    ['miniz-LICENSE.txt',   'src/miniz.c',            /This is free and unencumbered software/,           /unlicense\.org/],
+    ['stb-LICENSE.txt',     'src/stb_image.h',        /This software is available under 2 licenses/,      /^\*\/$/],
+    ['xxHash-LICENSE.txt',  'src/xxhash.h',           /xxHash - Extremely Fast Hash algorithm/,           /^ \*\/$/],
+    ['tinydir-LICENSE.txt', 'src/tinydir.h',          /Copyright \(c\) 2013-2021, tinydir authors/,       /^\*\/$/],
+]
+
+abstract class CollectLicenseAssets extends DefaultTask {
+    @InputFiles
+    @PathSensitive(PathSensitivity.RELATIVE)
+    abstract ConfigurableFileCollection getSourceFiles()
+
+    @Input
+    abstract MapProperty<String, String> getFileSpecs()
+
+    @Input
+    abstract ListProperty<List<String>> getBlockSpecs()
+
+    @Internal
+    abstract DirectoryProperty getRepoRoot()
+
+    @OutputDirectory
+    abstract DirectoryProperty getOutputDir()
+
+    @TaskAction
+    void collect() {
+        def root = repoRoot.get().asFile
+        def outDir = new File(outputDir.get().asFile, 'licenses')
+        outputDir.get().asFile.deleteDir()
+        outDir.mkdirs()
+        def index = []
+        fileSpecs.get().each { dest, rel ->
+            def src = new File(root, rel)
+            if (!src.isFile()) throw new GradleException("Lizenzquelle fehlt: ${rel}")
+            new File(outDir, dest).bytes = src.bytes
+            index << "| ${dest} | ${rel} | ganze Datei |"
+        }
+        def blocks = new LinkedHashMap<String, List<String>>()
+        blockSpecs.get().each { spec ->
+            def (dest, rel, start, end) = spec
+            def src = new File(root, rel)
+            if (!src.isFile()) throw new GradleException("Lizenzquelle fehlt: ${rel}")
+            def lines = src.readLines('UTF-8')
+            int s = lines.findIndexOf { it =~ start }
+            if (s < 0) throw new GradleException("Start-Marker nicht gefunden in ${rel}: ${start}")
+            int e = lines.findIndexOf(s + 1) { it =~ end }
+            if (e < 0) throw new GradleException("End-Marker nicht gefunden in ${rel}: ${end}")
+            blocks.computeIfAbsent(dest) { [] } << ("Quelle: ${rel}, Zeilen ${s + 1}-${e + 1}\n\n" + lines[s..e].join('\n'))
+            index << "| ${dest} | ${rel} | Zeilen ${s + 1}-${e + 1} |"
+        }
+        blocks.each { dest, parts -> new File(outDir, dest).setText(parts.join('\n\n') + '\n', 'UTF-8') }
+        new File(outDir, 'THIRD-PARTY-NOTICES.md').setText((
+            ['# Lizenzhinweise SkyEmu OMEGA (Android)', '',
+             'Automatisch beim Build aus den Quelldateien des Repos erzeugt (tools/android_project/host/build.gradle).', '',
+             '| Datei | Quelle | Umfang |', '|---|---|---|'] + index + ['']).join('\n'), 'UTF-8')
+    }
+}
+
+def collectLicenseAssets = tasks.register('collectLicenseAssets', CollectLicenseAssets) {
+    repoRoot.set(repoRootDir)
+    fileSpecs.set(licenseFiles)
+    blockSpecs.set(licenseBlocks.collect { it.collect { it.toString() } })
+    sourceFiles.from((licenseFiles.values() + licenseBlocks.collect { it[1] }).unique().collect { new File(repoRootDir, it) })
+    outputDir.set(layout.buildDirectory.dir('generated/licenseAssets'))
+}
+
+androidComponents.onVariants(androidComponents.selector().all()) { variant ->
+    variant.sources.assets?.addGeneratedSourceDirectory(collectLicenseAssets) { it.outputDir }
+}

@@ -56,7 +56,7 @@ void se_settings_migrate(persistent_settings_t* s, bool mobile){
     s->auto_hide_touch_controls=1; s->touch_controls_opacity=0.5f;
     s->always_show_menubar=1; s->language=SE_LANG_DEFAULT;
     s->touch_controls_scale=1; s->touch_controls_show_turbo=1;
-    s->save_to_path=0; s->http_control_server_enable=1;
+    s->save_to_path=0; s->http_control_server_enable=0;
     s->http_control_server_port=8080; s->avoid_overlaping_touchscreen=0;
   }
   if(s->settings_file_version<3){

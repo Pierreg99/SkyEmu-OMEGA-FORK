@@ -1,0 +1,52 @@
+name: Build Android APK
+on:
+  pull_request:
+    paths:
+      - 'tools/android_project/**'
+      - 'tools/verify_android_apk.py'
+      - 'tools/tests/test_verify_android_apk.py'
+      - '.github/workflows/build_android_apk.yml'
+  workflow_dispatch:
+    inputs:
+      upload_artifact:
+        description: 'APK als Artefakt hochladen (oeffentliches Repo: nur nach ausdruecklicher Freigabe)'
+        type: boolean
+        default: false
+permissions:
+  contents: read
+jobs:
+  apk:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+      - name: Install pinned SDK, NDK and CMake
+        run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0' 'ndk;28.2.13676358' 'cmake;3.22.1'
+      - name: Unit tests for APK verification script
+        run: |
+          python3 -m pip install --user pytest
+          python3 -m pytest -q tools/tests/test_verify_android_apk.py
+      # -Pandroid.injected.build.abi setzt sonst android:testOnly=true; Geraete lehnen solche APKs ab
+      # ("Paket ungueltig"). Daher ausdruecklich -Pandroid.injected.testOnly=false.
+      # Release-Variante (native -O2, nicht debuggable), signiert mit dem Debug-Key von AGP.
+      - name: Build release APK (arm64-v8a, debug-signed)
+        working-directory: tools/android_project
+        run: ./gradlew :host:assembleRelease -Pandroid.injected.build.abi=arm64-v8a -Pandroid.injected.testOnly=false --no-daemon --stacktrace --max-workers=2
+      # Mit -Pandroid.injected.build.abi legt AGP das APK unter intermediates/apk ab, nicht unter outputs/apk.
+      - name: Verify APK (content, no testOnly, not debuggable, 16 KB zipalign, debug signer)
+        run: python3 tools/verify_android_apk.py tools/android_project/host/build/intermediates/apk/release/host-release.apk --build-tools "$ANDROID_HOME/build-tools/36.0.0"
+      # Repo ist oeffentlich: Artefakte waeren fuer jeden GitHub-Account abrufbar.
+      # Upload daher nur bei manuellem Lauf und mit kurzer Aufbewahrung (Ethics-Auflage).
+      - if: github.event_name == 'workflow_dispatch' && inputs.upload_artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: SkyEmuOmega-Android-arm64-v8a-release-debugsigned-APK
+          path: tools/android_project/host/build/intermediates/apk/release/host-release.apk
+          if-no-files-found: error
+          retention-days: 3

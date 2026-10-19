@@ -7800,7 +7800,7 @@ _SOKOL_PRIVATE bool _sapp_android_touch_event(const AInputEvent* e) {
     switch (action) {
         case AMOTION_EVENT_ACTION_DOWN:
             SOKOL_LOG("Touch: down");
-            break;
+            /* fallthrough: der erste Finger ist ein TOUCHES_BEGAN */
         case AMOTION_EVENT_ACTION_POINTER_DOWN:
             SOKOL_LOG("Touch: ptr down");
             type = SAPP_EVENTTYPE_TOUCHES_BEGAN;
@@ -7810,7 +7810,7 @@ _SOKOL_PRIVATE bool _sapp_android_touch_event(const AInputEvent* e) {
             break;
         case AMOTION_EVENT_ACTION_UP:
             SOKOL_LOG("Touch: up");
-            break;
+            /* fallthrough: der letzte Finger ist ein TOUCHES_ENDED */
         case AMOTION_EVENT_ACTION_POINTER_UP:
             SOKOL_LOG("Touch: ptr up");
             type = SAPP_EVENTTYPE_TOUCHES_ENDED;
@@ -8367,9 +8367,7 @@ _SOKOL_PRIVATE void _sapp_android_initialize(JNIEnv* env, jobject activity)
         pthread_cond_wait(&_sapp.android.pt.cond, &_sapp.android.pt.mutex);
     }
     pthread_mutex_unlock(&_sapp.android.pt.mutex);
-
-    extern void se_android_start_hcs();
-    se_android_start_hcs();
+    /* Offline: kein Autostart des HTTP Control Servers auf Android. */
 }
 
 JNIEXPORT void JNICALL
