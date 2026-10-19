@@ -1,18 +1,25 @@
 #!/usr/bin/env python3
-"""Check every packaged native library's ELF LOAD alignment in an Android AAR."""
+"""Check every packaged native library's ELF LOAD alignment in an Android AAR or APK."""
 import argparse
 import struct
 import zipfile
 
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument('aar')
+parser.add_argument('aar', help='an .aar (jni/<abi>/*.so) or .apk (lib/<abi>/*.so)')
 args = parser.parse_args()
 expected_abis = {'arm64-v8a', 'x86_64', 'armeabi-v7a', 'x86'}
 seen = set()
 with zipfile.ZipFile(args.aar) as aar:
-    for name in aar.namelist():
-        if not name.startswith('jni/') or not name.endswith('.so'):
+    for info in aar.infolist():
+        name = info.filename
+        if not name.startswith(('jni/', 'lib/')) or not name.endswith('.so'):
             continue
+        # Uncompressed libraries in an APK are mapped straight from the zip, so they must start on a 16 KB boundary.
+        if name.startswith('lib/') and info.compress_type == zipfile.ZIP_STORED:
+            aar.fp.seek(info.header_offset + 26)
+            name_length, extra_length = struct.unpack('<HH', aar.fp.read(4))
+            if (info.header_offset + 30 + name_length + extra_length) % 16384:
+                parser.exit(1, f'{name}: not stored on a 16 KB boundary in the APK\n')
         data = aar.read(name)
         if data[:4] != b'\x7fELF' or data[4] not in (1, 2) or data[5] not in (1, 2):
             parser.exit(1, f'{name}: invalid ELF header\n')

@@ -11,7 +11,7 @@ Xcode projects and the Emscripten web build.
 | Windows | `build/bin/<Config>/SkyEmu.dll` | [Windows](#windows) |
 | macOS | `build/bin/SkyEmu.app` or a static library | [macOS](#macos) |
 | iOS | Static library | [iOS](#ios) |
-| Android | `libSkyEmu.so` inside an Android library | [Android](#android) |
+| Android | `libSkyEmu.so` inside an Android library, and a stand-alone APK | [Android](#android) |
 | Web | `SkyEmu.html` + WebAssembly | [Web](#web) |
 | libretro | `skyemu_libretro` core | [libretro](#libretro-core) |
 
@@ -119,8 +119,12 @@ It is an **Android library module** (namespace `com.skyemu`) that host apps depe
 
 ```sh
 cd tools/android_project
-./gradlew assembleRelease
+./gradlew :app:assembleRelease   # Android library (.aar) for host apps
+./gradlew :apk:assembleRelease   # stand-alone app: apk/build/outputs/apk/release/apk-release.apk
 ```
+
+The `apk` module packages the library as an installable app signed with the debug key, for sideloading
+(`adb install`). Re-sign it with your own key before distributing it.
 
 ## Web
 

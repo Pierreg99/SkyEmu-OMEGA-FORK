@@ -6,9 +6,9 @@
 
 **A low-level Game Boy, Game Boy Color, Game Boy Advance and Nintendo DS emulator<br>that looks native on every platform and embeds into your own apps.**
 
-[![License: MIT](https://img.shields.io/github/license/Pierreg99/SkyEmu-OMEGA-FORK?color=6750A4)](LICENSE)
-[![Upstream: SkyEmu](https://img.shields.io/badge/upstream-SkyEmu-3584E4)](https://github.com/skylersaleh/SkyEmu)
-[![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Linux%20%7C%20macOS%20%7C%20Android%20%7C%20iOS%20%7C%20Web-0078D4)](#-platforms)
+[![License: MIT](https://img.shields.io/github/license/Pierreg99/SkyEmu-OMEGA-FORK?style=flat-square&color=6750A4)](LICENSE)
+[![Upstream: SkyEmu](https://img.shields.io/badge/upstream-SkyEmu-3584E4?style=flat-square)](https://github.com/skylersaleh/SkyEmu)
+[![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Linux%20%7C%20macOS%20%7C%20Android%20%7C%20iOS%20%7C%20Web-0078D4?style=flat-square)](#-platforms)
 
 [![Linux](https://github.com/Pierreg99/SkyEmu-OMEGA-FORK/actions/workflows/deploy_linux.yml/badge.svg)](https://github.com/Pierreg99/SkyEmu-OMEGA-FORK/actions/workflows/deploy_linux.yml)
 [![Windows](https://github.com/Pierreg99/SkyEmu-OMEGA-FORK/actions/workflows/deploy_win.yml/badge.svg)](https://github.com/Pierreg99/SkyEmu-OMEGA-FORK/actions/workflows/deploy_win.yml)
@@ -16,6 +16,9 @@
 [![Android](https://github.com/Pierreg99/SkyEmu-OMEGA-FORK/actions/workflows/deploy_android.yml/badge.svg)](https://github.com/Pierreg99/SkyEmu-OMEGA-FORK/actions/workflows/deploy_android.yml)
 [![iOS](https://github.com/Pierreg99/SkyEmu-OMEGA-FORK/actions/workflows/deploy_ios.yml/badge.svg)](https://github.com/Pierreg99/SkyEmu-OMEGA-FORK/actions/workflows/deploy_ios.yml)
 [![Web](https://github.com/Pierreg99/SkyEmu-OMEGA-FORK/actions/workflows/deploy_web.yml/badge.svg)](https://github.com/Pierreg99/SkyEmu-OMEGA-FORK/actions/workflows/deploy_web.yml)
+
+<a href="https://github.com/Pierreg99/SkyEmu-OMEGA-FORK/actions/workflows/deploy_android.yml"><img alt="Download the Android APK" src="https://img.shields.io/badge/Android-Download%20APK-3DDC84?style=for-the-badge&logo=android&logoColor=white"></a>
+<a href="https://github.com/Pierreg99/SkyEmu-OMEGA-FORK/actions"><img alt="All builds" src="https://img.shields.io/badge/All%20platforms-Builds-6750A4?style=for-the-badge&logo=githubactions&logoColor=white"></a>
 
 [**Get started**](#-get-started) · [**Build**](docs/BUILDING.md) · [**Embed**](docs/EMBEDDING.md) · [**Design systems**](docs/DESIGN_SYSTEMS.md) · [**All docs**](docs/README.md)
 
@@ -36,23 +39,21 @@
 > cores are SkyEmu's. This fork adds platform native design systems and turns SkyEmu into a component that other
 > apps can host on Windows, Android and iOS.
 
-## Sol6.1 upgrade branch
+> [!TIP]
+> **Sol6.1 upgrade:** CRT scanline, aperture grille and soft LCD shaders; display color controls; high contrast
+> and layout options; settings, file I/O and audio fixes; and modern Android, Linux and Windows builds.
+> See [the upgrade notes and validation steps](docs/SOL6_1_UPGRADE.md).
 
-The `Sol6.1VeryHighAccurateCodexversion` branch adds CRT scanlines, aperture grille
-and soft LCD shaders; display color controls; high contrast and layout options;
-settings, file I/O and audio fixes; and modern Android, Linux and Windows builds.
-See [the upgrade notes and validation steps](docs/SOL6_1_UPGRADE.md).
-
-## Contents
-
-- [Highlights](#-highlights)
-- [What OMEGA adds](#-what-omega-adds)
-- [Platforms](#-platforms)
-- [Get started](#-get-started)
-- [Controls](#-controls)
-- [Accuracy](#-accuracy)
-- [Documentation](#-documentation)
-- [Credits and license](#-credits-and-license)
+<p align="center">
+<a href="#-highlights">Highlights</a> ·
+<a href="#-what-omega-adds">What OMEGA adds</a> ·
+<a href="#-platforms">Platforms</a> ·
+<a href="#-get-started">Get started</a> ·
+<a href="#-controls">Controls</a> ·
+<a href="#-accuracy">Accuracy</a> ·
+<a href="#-documentation">Documentation</a> ·
+<a href="#-credits-and-license">Credits</a>
+</p>
 
 ## ✨ Highlights
 
@@ -133,6 +134,26 @@ See [the upgrade notes and validation steps](docs/SOL6_1_UPGRADE.md).
 | **iOS / macOS** | Stand-alone app | Static libraries for host apps (the macOS app bundle is still available) |
 | **Host APIs** | HTTP control server | Framebuffer access, key injection, UI and menu callbacks, save state slots, every setting |
 
+<details>
+<summary><b>Every design in light and dark</b></summary>
+<br>
+<img alt="Material 3, Fluent and Adwaita, each in dark and light mode" src="docs/images/design-systems.png">
+</details>
+
+```mermaid
+flowchart LR
+    subgraph host["Your app"]
+        W["Windows host<br/>(C / C#)"]
+        A["Android host<br/>(Java / Kotlin)"]
+        I["iOS / macOS host<br/>(Swift / ObjC)"]
+    end
+    W -- "C API" --> DLL["SkyEmu.dll"]
+    A -- "JNI" --> AAR["SkyEmu .aar<br/>libSkyEmu.so"]
+    I -- "ios_support.h" --> LIB["libSkyEmu.a"]
+    DLL & AAR & LIB --> CORE["SkyEmu cores<br/>GB · GBC · GBA · NDS"]
+    HTTP["Scripts and bots"] -- "HTTP control server" --> CORE
+```
+
 The design systems are described in [docs/DESIGN_SYSTEMS.md](docs/DESIGN_SYSTEMS.md) and the host APIs in [docs/EMBEDDING.md](docs/EMBEDDING.md).
 
 ## 📦 Platforms
@@ -142,7 +163,7 @@ The design systems are described in [docs/DESIGN_SYSTEMS.md](docs/DESIGN_SYSTEMS
 | **Windows** 10 / 11 | `SkyEmu.dll` | Fluent | Started by a host app through `win_main()` |
 | **Linux** | `SkyEmu` executable | Adwaita | X11 or XWayland, ALSA audio |
 | **FreeBSD** | `SkyEmu` executable | Adwaita | |
-| **Android** 7.0+ | `libSkyEmu.so` in an Android library | Material 3 | Material You colors on Android 12+ |
+| **Android** 7.0+ | Installable APK, and `libSkyEmu.so` in an Android library | Material 3 | Material You colors on Android 12+ |
 | **macOS** | `SkyEmu.app`, or a static library | SkyEmu Classic | |
 | **iOS** 15+ | Static library | SkyEmu Classic | The host app provides `main()` and calls `main_ios()` |
 | **Web** | WebAssembly progressive web app | Material 3 | Follows the browser's color scheme |
@@ -154,7 +175,20 @@ The design systems are described in [docs/DESIGN_SYSTEMS.md](docs/DESIGN_SYSTEMS
 
 Every push builds all platforms on GitHub Actions. Open a workflow run under
 [**Actions**](https://github.com/Pierreg99/SkyEmu-OMEGA-FORK/actions) and download its artifact
-(`LinuxRelease`, `WindowsRelease`, `AndroidRelease`, ...).
+(`LinuxRelease`, `WindowsRelease`, `AndroidRelease-APK`, ...).
+
+### Install on Android
+
+1. Open the latest green [**Build Android**](https://github.com/Pierreg99/SkyEmu-OMEGA-FORK/actions/workflows/deploy_android.yml)
+   run and download **AndroidRelease-APK** (GitHub wraps it in a `.zip`; extract `apk-release.apk`).
+2. Copy it to your phone and open it, allowing installs from that app when Android asks.
+   Or, with USB debugging on: `adb install apk-release.apk`.
+3. Launch **SkyEmu** and tap **Load Game**. One ~100 MB APK covers Android 7.0+ on ARM and x86 devices.
+
+> [!NOTE]
+> CI APKs are signed with a throwaway debug key, so Android may warn about an unknown developer and you
+> cannot update over an install signed with another key. Build it yourself with
+> `cd tools/android_project && ./gradlew :apk:assembleRelease`.
 
 Stand-alone releases of upstream SkyEmu, including a version that runs in the browser, are at
 [github.com/skylersaleh/SkyEmu/releases](https://github.com/skylersaleh/SkyEmu/releases) and
