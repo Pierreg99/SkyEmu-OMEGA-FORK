@@ -20,9 +20,9 @@ jobs:
         working-directory: tools/android_project
         run: ./gradlew :app:assembleRelease --no-daemon --stacktrace --max-workers=2
       - name: Verify 16 KB native library alignment
-        run: python3 tools/verify_android_pages.py tools/android_project/app/build/outputs/aar/app-release.aar
+        run: python3 tools/verify_android_pages.py tools/android_project/app/build/outputs/apk/release/app-release-unsigned.apk
       - uses: actions/upload-artifact@v7
         with:
-          name: AndroidRelease-AAR
-          path: tools/android_project/app/build/outputs/aar/app-release.aar
+          name: AndroidRelease-APK
+          path: tools/android_project/app/build/outputs/apk/release/app-release-unsigned.apk
           if-no-files-found: error
