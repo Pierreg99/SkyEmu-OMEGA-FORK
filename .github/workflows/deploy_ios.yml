@@ -10,7 +10,7 @@ jobs:
         run: |
           mkdir build
           cd build
-          cmake -GXcode -DSOKOL_BACKEND=SOKOL_METAL -DCMAKE_SYSTEM_NAME=iOS -DBUILD_IOS_STATIC_LIB=OFF ../
+          cmake -GXcode -DSOKOL_BACKEND=SOKOL_METAL -DCMAKE_SYSTEM_NAME=iOS ../
           cmake --build . --config Release
           mkdir Payload
           cp -R bin/Release/SkyEmu.app Payload/SkyEmu.app
