@@ -12,6 +12,11 @@ Control Server** and pick the port (8080 by default). Try it from a browser:
 http://localhost:8080/ping
 ```
 
+> [!NOTE]
+> On desktop the server listens on every network interface. On Android and iOS it only listens on `127.0.0.1`,
+> so host apps on the same device can use it but other devices on the Wi-Fi cannot. To reach it from a computer,
+> forward the port over USB: `adb forward tcp:8080 tcp:8080`, then use `http://localhost:8080` on the computer.
+
 > [!TIP]
 > For bots and automated testing, start SkyEmu headless. It then skips the GUI and runs as fast as possible
 > instead of in real time:

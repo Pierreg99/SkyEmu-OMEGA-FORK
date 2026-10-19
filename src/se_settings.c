@@ -57,7 +57,7 @@ void se_settings_migrate(persistent_settings_t* s, bool mobile){
     s->always_show_menubar=1; s->language=SE_LANG_DEFAULT;
     s->touch_controls_scale=1; s->touch_controls_show_turbo=1;
     s->save_to_path=0; s->http_control_server_enable=1;
-    s->http_control_server_port=8080; s->avoid_overlaping_touchscreen=0;
+    s->http_control_server_port=8080; s->avoid_overlaping_touchscreen=SE_AVOID_OVERLAP_PORTRAIT;
   }
   if(s->settings_file_version<3){
     s->gui_scale_factor=1; s->custom_font_scale=1; s->hardcore_mode=0;
@@ -76,6 +76,14 @@ void se_settings_migrate(persistent_settings_t* s, bool mobile){
     s->curvature=0.08f; s->vignette=0.15f;
     s->display_brightness=1; s->display_saturation=1; s->display_contrast=1;
     s->high_contrast=0; s->ui_density=0; s->corner_radius_scale=1;
+  }
+  if(s->settings_file_version<6){
+    // Before version 6 the layout ignored this setting and always drew the touch controls over the screen,
+    // so stored values were never a visible choice. Start from the upstream default: no overlap in portrait.
+    s->avoid_overlaping_touchscreen=SE_AVOID_OVERLAP_PORTRAIT;
+    // The default skin's portrait bezel pins the screen to the bottom of a phone with the controls on top of it,
+    // and the design systems draw that bezel transparent anyway. Phones use the bezel-less layout.
+    if(mobile)s->show_screen_bezel=0;
   }
   s->settings_file_version=SE_SETTINGS_VERSION;
   se_settings_validate(s);

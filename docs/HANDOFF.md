@@ -8,7 +8,6 @@ Technical notes for whoever continues this work, human or agent. The owner-facin
 | | |
 |---|---|
 | Branch | `ccr-e41ac3c8-r3njjn` |
-| Commit | `5758736` *Android: build an installable APK and refine README visuals* |
 | Base | `89a26e8` *Fix Android JNI lifetimes and support current Windows and Android CI toolchains* |
 | Pull request | None opened yet |
 | Date | 2026-10-19 |
@@ -17,92 +16,92 @@ Technical notes for whoever continues this work, human or agent. The owner-facin
 
 | Item | State |
 |---|---|
-| APK builds locally | ✅ `:apk:assembleRelease` succeeds: one APK per ABI (~22 MB each) plus a universal one (~77 MB) |
-| APK signature | ✅ `apksigner verify` passes (Android debug key) |
-| Launcher entry | ✅ `aapt2 dump badging` shows `launchable-activity: com.sky.SkyEmu.EnhancedNativeActivity` |
-| 16 KB pages | ✅ `tools/verify_android_pages.py` passes on the APK and the AAR; `zipalign -c -P 16` passes |
-| Library (`:app`) build | ✅ unchanged, still produces `app-release.aar` |
-| Android CI with the new steps | ✅ runs 67 (`5758736`) and 68 (`c409740`) passed; the per-ABI split change is verified locally and runs in CI on its push |
-| APK runs on a device | ❌ not tested: no device or emulator was used |
+| APK builds locally | ✅ `:apk:assembleRelease`: one APK per ABI (~22 MB each) plus a universal one (~77 MB), `versionCode 2` |
+| APK signature, launcher, 16 KB pages | ✅ `apksigner verify`, `aapt2 dump badging` (launchable activity), `tools/verify_android_pages.py` |
+| Runs in an emulator | ✅ Android 11 x86_64 emulator (software rendering): launches, menu opens, **Load ROM** opens the system picker, a picked ROM runs, recent games reload, a ROM opened from another app (`content://` VIEW intent) runs, on-screen D-pad / A / B / Start / Select appear on touch |
+| Runs on a real phone | ❌ not confirmed. The owner's phone could install the second build but reported *no functions* (fixed below) |
+| Regression tests | ✅ `cmake -DSKYEMU_TESTS_ONLY=ON` + `ctest`: 3/3 pass, including new settings migration checks |
+| Android CI | ✅ runs 67 and 68 passed on earlier commits; later commits run on push |
+| Sound | ⚠️ not checked; the emulator's audio server was busy and its log showed constant `AudioTrack` stop/start, which may only be emulator slowness |
 | README rendering on GitHub | ❌ not checked on github.com (callouts, Mermaid, badges) |
 
 ## What changed
 
+### Packaging
+
 | File | Change |
 |---|---|
-| `tools/android_project/apk/build.gradle` | **New** application module. `applicationId com.sky.SkyEmu.omega`, ABI splits plus a universal APK, compressed native libs (`useLegacyPackaging = true`), namespace `com.sky.SkyEmu.standalone`, `versionCode 1`, `versionName 6.1-omega`, release signed with `signingConfigs.debug`, `ndkVersion 28.2.13676358`, depends on `project(':app')` and the Kotlin BOM 1.8.22 |
-| `tools/android_project/apk/src/main/res/values/strings.xml` | **New.** App name *SkyEmu OMEGA* (overrides the library's *SkyEmu*) |
-| `tools/android_project/apk/src/main/AndroidManifest.xml` | **New.** App icon / round icon / label and a `MAIN` + `LAUNCHER` intent filter for `EnhancedNativeActivity`. Everything else merges in from the library manifest |
+| `tools/android_project/apk/build.gradle` | **New** application module. `applicationId com.sky.SkyEmu.omega`, ABI splits plus a universal APK, compressed native libs (`useLegacyPackaging = true`), `ndkVersion 28.2.13676358`, release signed with `signingConfigs.debug`, depends on `project(':app')` and the Kotlin BOM 1.8.22 |
+| `tools/android_project/apk/src/main/res/values/strings.xml` | **New.** App name *SkyEmu OMEGA* |
+| `tools/android_project/apk/src/main/AndroidManifest.xml` | **New.** App icon and a `MAIN` + `LAUNCHER` filter for `EnhancedNativeActivity`; everything else merges in from the library |
 | `tools/android_project/settings.gradle` | `include ':apk'` |
-| `.github/workflows/deploy_android.yml` | Builds `:app` and `:apk`, verifies both, uploads `AndroidRelease-APK` next to `AndroidRelease-AAR` |
-| `tools/verify_android_pages.py` | Accepts APKs (`lib/<abi>/*.so`), checks that uncompressed libraries start on a 16 KB boundary inside the zip, and takes `--abis` for single-ABI APKs |
-| `README.md` | Flat-square badges, *Download APK* / *All builds* buttons, Sol6.1 note as a `[!TIP]` callout, one-line section nav, collapsible light/dark design gallery, Mermaid embedding diagram, *Install on Android* section |
-| `docs/BUILDING.md`, `tools/android_project/README.md` | Document the `apk` module and its output path |
+| `.github/workflows/deploy_android.yml` | Builds `:app` and `:apk`, verifies every APK, uploads `AndroidRelease-APK` next to `AndroidRelease-AAR` |
+| `tools/verify_android_pages.py` | Accepts APKs, checks zip offsets of uncompressed libraries, `--abis` for single-ABI APKs |
+
+### Runtime fixes ("the app has no functions")
+
+| File | Change |
+|---|---|
+| `src/sokol/sokol_app.h` | `_sapp_android_touch_event`: `ACTION_DOWN` / `ACTION_UP` produce `TOUCHES_BEGAN` / `TOUCHES_ENDED` again, as in upstream sokol and upstream SkyEmu. Commit `4274165` (*add test logic without touch logic*) had added a `break` after each, so a one-finger tap never reached the GUI: no button worked |
+| `src/main.c` `se_draw_emulated_system_screen` | `touch_controller_active` is computed from the last touch time again (upstream). It was hard-coded to `false`, which sized the on-screen gamepad to zero |
+| `src/main.c` `se_draw_theme_region_tint_partial` | `gamepad_mask` is cleared only when *Avoid overlapping touchscreen* is off (upstream). It was cleared unconditionally, so the setting did nothing |
+| `src/se_settings.{h,c}` | Settings version 6. Defaults and a one-time migration: avoid overlap in portrait (upstream default) and, on phones, the bezel-less layout. The default skin's portrait bezel pins the screen to the bottom with the controls over it, and the design systems draw that bezel transparent anyway. `SE_AVOID_OVERLAP_*` moved here from `main.c` |
+| `src/http_control_server.cpp` | On Android and iOS the server listens on `127.0.0.1` instead of `0.0.0.0`. This fork enables it by default for host apps, which made every phone's emulator controllable from the local Wi-Fi with no authentication |
+| `tools/se_runtime_test.c` | Checks for the new defaults and the v6 migration |
+
+### Docs
+
+`README.md` (badges, APK button, callouts, nav, design gallery, Mermaid diagram, *Install on Android*),
+`docs/BUILDING.md`, `tools/android_project/README.md`, `docs/HTTP_CONTROL_SERVER.md` (phones bind to localhost,
+use `adb forward`).
 
 ## Why it is built this way
 
-- **Separate module, library untouched.** `:app` stays a `com.android.library` so host apps keep embedding it;
-  `:apk` is a thin wrapper with no code of its own.
-- **Launcher filter in the APK manifest.** The library's only `LAUNCHER` category sits in a `VIEW` filter for the
-  `skyemu://oauth` link, with no `MAIN` action, so without the added filter the app installs with no icon.
-  It is added in `:apk`, not `:app`, so host apps don't inherit a second launcher entry.
-- **`ndkVersion` in `:apk`.** Without it AGP looks for its own default NDK, logs *Unable to strip …
-  libSkyEmu.so* and ships unstripped libraries (the first universal APK was 247 MB).
-- **Kotlin BOM.** AndroidX brings `kotlin-stdlib` 1.8.22 next to `kotlin-stdlib-jdk7/jdk8` 1.6.21 and
-  `checkReleaseDuplicateClasses` fails. The BOM aligns them. Only the app module needs it.
-- **Debug signing.** The committed `skyemu-open-signing-store` keystore has no known passwords or alias in the
-  repo, so it is not used. Each CI runner generates its own debug key, so CI APKs cannot update one another.
-- **Own application ID, `com.sky.SkyEmu.omega`.** The first build reused `com.sky.SkyEmu`, the ID of upstream
-  SkyEmu's Android app (see `app/release/output-metadata.json`), and the owner reported it *could not be installed*:
-  Android refuses to install over an existing app with the same ID and a different signing key. OMEGA now installs
-  next to upstream SkyEmu. The only hard-coded `com.sky.SkyEmu` left is the cosmetic fake path in
-  `se_replace_fake_path` (`src/main.c`), which only masks real paths in the UI.
-- **Compressed native libs and ABI splits.** The first APK stored the libraries uncompressed for all four ABIs
-  (106 MB). Compressed, extracted-on-install libraries are the most compatible layout for sideloading, and
-  per-ABI APKs bring the common arm64 download to ~22 MB. The ELF segments stay 16 KB aligned.
+- **Separate `:apk` module, library untouched.** Host apps keep depending on `:app`; `:apk` has no code.
+- **Launcher filter in `:apk`.** The library's only `LAUNCHER` category is in a `VIEW` filter (no `MAIN`), so
+  without it the app has no icon. Adding it in `:app` would give every host app a second launcher entry.
+- **Own application ID.** `com.sky.SkyEmu` is upstream SkyEmu's ID; installing over it with another key fails.
+- **`ndkVersion` in `:apk`** so AGP can strip `libSkyEmu.so` (unstripped universal APK: 247 MB).
+- **Kotlin BOM** to resolve duplicate `kotlin-stdlib` 1.8 / `-jdk7`/`-jdk8` 1.6 classes.
+- **Debug signing.** The committed `skyemu-open-signing-store` has no known password or alias.
+- **Touch and layout fixes restore upstream behaviour** instead of adding new options. Host apps that embed
+  SkyEmu through `NativeBridge` and their own `SurfaceView` don't receive events from the native input queue, so
+  the sokol change doesn't affect them. Hosts that want SkyEmu's own controls hidden can set
+  `se_android_set_touch_controls_opacity(0)` or use `HideUI()`.
+- **Localhost binding instead of turning the server off.** The fork's host-app integration (`LoadHtml`,
+  `/input`, `/ping`, `/external_menu` callbacks) relies on the server; binding to loopback keeps that working.
 
 ## Reproduce
 
 ```sh
-# SDK packages used (same as CI)
 sdkmanager 'platforms;android-36' 'build-tools;36.0.0' 'ndk;28.2.13676358' 'cmake;3.22.1' 'platform-tools'
-
 cd tools/android_project
-export ANDROID_HOME=/path/to/sdk           # or local.properties
+export ANDROID_HOME=/path/to/sdk
 ./gradlew :app:assembleRelease :apk:assembleRelease
+python3 ../verify_android_pages.py --abis arm64-v8a apk/build/outputs/apk/release/apk-arm64-v8a-release.apk
+adb install -r apk/build/outputs/apk/release/apk-arm64-v8a-release.apk
 
-APK=apk/build/outputs/apk/release/apk-arm64-v8a-release.apk
-python3 ../verify_android_pages.py --abis arm64-v8a "$APK"
-python3 ../verify_android_pages.py apk/build/outputs/apk/release/apk-universal-release.apk
-$ANDROID_HOME/build-tools/36.0.0/apksigner verify --print-certs "$APK"
-$ANDROID_HOME/build-tools/36.0.0/aapt2 dump badging "$APK" | grep launchable
-adb install -r "$APK"
+# Settings regression tests (host)
+cmake -S ../.. -B /tmp/se-tests -DSKYEMU_TESTS_ONLY=ON -G Ninja && cmake --build /tmp/se-tests && (cd /tmp/se-tests && ctest)
 ```
 
-Gotchas seen in this session:
-
-- Maven Central answered `429 Too Many Requests` on the first dependency fetch. Retrying with a pause worked;
-  later builds can use `--offline` once the Gradle cache is warm.
-- A full native build for four ABIs takes about 5–6 minutes on 4 cores.
+Testing without a phone: an x86_64 system image runs with `emulator -accel off -gpu swiftshader_indirect` when
+there is no KVM. It needs ~10 minutes to boot and renders at ~7 fps, so taps must be held (`input swipe x y x y
+400`), and the system file picker is easier to drive with `input keyevent` (Tab, Down, Enter). The HTTP control
+server (`adb forward tcp:18080 tcp:8080`, `/settings`, `/setting?...`) is handy for flipping settings.
 
 ## Next steps
 
-1. **Check the CI run** of *Build Android* for the per-ABI split commit. If it is red, the likely spots are the new
-   `:apk:assembleRelease` task (dependency resolution) and the second `verify_android_pages.py` call.
-2. **Run the APK on a device or emulator** (the owner's first install attempt failed before the ID change; if it
-   still fails, get the exact message, or `adb install` output, which names the reason): launch from the home screen, open a ROM through **Load Game**,
-   open a `.gba` from a file manager (file associations), and check Material You colors on Android 12+.
-3. **Check the README on github.com**: the `[!TIP]` / `[!NOTE]` callouts, the Mermaid diagram and the badge
-   buttons only render there.
-4. **Open a pull request** when 1–3 pass (none exists yet).
-5. Optional, larger:
-   - Real release signing: keystore in GitHub secrets plus a `signingConfigs.release` read from environment
-     variables, so CI APKs keep one identity and can update each other.
-   - An AAB for the Play Store (`tools/gen_playstore.py` exists for store assets).
-   - Version from git tags instead of the hard-coded `versionCode 1` (per-ABI APKs share it today).
-   - Publish the APK on a GitHub Release so the README's *Download APK* button can link straight to a file.
+1. **Try it on the owner's phone**: open a game, play with the on-screen controls, check sound, save states
+   and Material You colours. Existing installs migrate their settings to version 6 on first launch.
+2. **Sound**: if it crackles or is silent on a real phone, look at `se_init_audio` / sokol_audio's OpenSL ES
+   backend (the emulator log showed a stop/start loop).
+3. **Check the README on github.com** and the CI run for the latest commit.
+4. **Open a pull request** (none exists yet).
+5. Optional: real release signing from GitHub secrets, an AAB for the Play Store, version from git tags, and a
+   GitHub Release so *Download APK* links straight to a file.
 
 ## Out of scope
 
-`Pierreg99/KiBlox-VoxelGame` shares the branch name but was not changed. It is a browser game with no Android
-target, and its README is generated by the owner's own template tooling.
+`Pierreg99/KiBlox-VoxelGame` shares the branch name but was not changed: it is a browser game with no Android
+target, and its README comes from the owner's own template tooling.

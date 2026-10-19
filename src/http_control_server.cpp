@@ -38,7 +38,12 @@ struct HCSServer{
             return httplib::Server::HandlerResponse::Unhandled;
         });
         std::cout<<"Starting HCS: http://localhost:"<<server->port<<std::endl;
+#if defined(SE_PLATFORM_ANDROID) || defined(SE_PLATFORM_IOS)
+        // Phones keep the server on for host apps on the same device; it must not be reachable over Wi-Fi.
+        server->svr.listen("127.0.0.1",server->port);
+#else
         server->svr.listen("0.0.0.0",server->port);
+#endif
         std::cout<<"Terminating HCS: http://localhost:"<<server->port<<std::endl;
     }
     HCSServer(int64_t port, hcs_callback call){

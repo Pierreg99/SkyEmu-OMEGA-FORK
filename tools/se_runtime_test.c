@@ -27,6 +27,8 @@ static void test_settings(void){
   CHECK(s.volume==0.8f && s.only_one_notification==1);
   CHECK(s.screen_shader==SE_SHADER_SUBPIXELS && s.display_brightness==1);
   CHECK(s.gb_palette[0]==0x388F81 && s.gb_palette[3]==0x2D4A31);
+  CHECK(s.avoid_overlaping_touchscreen==SE_AVOID_OVERLAP_PORTRAIT && s.touch_controls_opacity==0.5f);
+  CHECK(s.show_screen_bezel==0); // Mobile.
   s.volume=0.25f; s.design_system=SE_DESIGN_FLUENT;
   s.custom_accent=0x123456; s.use_custom_accent=1;
   s.settings_file_version=4;
@@ -38,6 +40,18 @@ static void test_settings(void){
   persistent_settings_t migrated=s;
   se_settings_migrate(&s,false);
   CHECK(memcmp(&migrated,&s,sizeof(s))==0); // Migration is idempotent.
+  s.settings_file_version=5; s.avoid_overlaping_touchscreen=0;
+  se_settings_migrate(&s,false);
+  CHECK(s.avoid_overlaping_touchscreen==SE_AVOID_OVERLAP_PORTRAIT); // v6 resets the formerly ignored value.
+  s.avoid_overlaping_touchscreen=SE_AVOID_OVERLAP_LANDSCAPE;
+  se_settings_migrate(&s,false);
+  CHECK(s.avoid_overlaping_touchscreen==SE_AVOID_OVERLAP_LANDSCAPE); // Later choices are kept.
+  memset(&s,0,sizeof(s)); s.settings_file_version=5; s.show_screen_bezel=1;
+  se_settings_migrate(&s,false);
+  CHECK(s.show_screen_bezel==1); // Desktop keeps the bezel.
+  s.settings_file_version=5;
+  se_settings_migrate(&s,true);
+  CHECK(s.show_screen_bezel==0);
   s.volume=NAN; s.ghosting=INFINITY; s.color_correction=-INFINITY;
   s.gui_scale_factor=NAN; s.custom_font_scale=NAN; s.touch_controls_scale=NAN;
   s.display_brightness=INFINITY; s.display_saturation=-2; s.curvature=2;

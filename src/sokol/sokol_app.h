@@ -7798,25 +7798,20 @@ _SOKOL_PRIVATE bool _sapp_android_touch_event(const AInputEvent* e) {
     int32_t action = action_idx & AMOTION_EVENT_ACTION_MASK;
     sapp_event_type type = SAPP_EVENTTYPE_INVALID;
     switch (action) {
+        /* The first finger arrives as ACTION_DOWN/UP and further fingers as POINTER_DOWN/UP;
+           both must produce touch events or single-finger taps never reach the GUI. */
         case AMOTION_EVENT_ACTION_DOWN:
-            SOKOL_LOG("Touch: down");
-            break;
         case AMOTION_EVENT_ACTION_POINTER_DOWN:
-            SOKOL_LOG("Touch: ptr down");
             type = SAPP_EVENTTYPE_TOUCHES_BEGAN;
             break;
         case AMOTION_EVENT_ACTION_MOVE:
             type = SAPP_EVENTTYPE_TOUCHES_MOVED;
             break;
         case AMOTION_EVENT_ACTION_UP:
-            SOKOL_LOG("Touch: up");
-            break;
         case AMOTION_EVENT_ACTION_POINTER_UP:
-            SOKOL_LOG("Touch: ptr up");
             type = SAPP_EVENTTYPE_TOUCHES_ENDED;
             break;
         case AMOTION_EVENT_ACTION_CANCEL:
-            SOKOL_LOG("Touch: cancel");
             type = SAPP_EVENTTYPE_TOUCHES_CANCELLED;
             break;
         default:

@@ -185,7 +185,9 @@ Every push builds all platforms on GitHub Actions. Open a workflow run under
    last ten years, or `apk-universal-release.apk` (about 77 MB) if you are unsure.
 3. Copy it to your phone and open it, allowing installs from that app when Android asks.
    Or, with USB debugging on: `adb install apk-arm64-v8a-release.apk`.
-4. Launch **SkyEmu OMEGA** and tap **Load Game**. Android 7.0 or newer is required.
+4. Launch **SkyEmu OMEGA** and tap **Load Game**, or open a ROM from your file manager with SkyEmu OMEGA.
+   Touch the screen to bring up the on-screen D-pad and buttons; they fade out after a few seconds without a
+   touch (turn off *Hide when inactive* in **Menu → Touch Control Settings** to keep them). Android 7.0 or newer is required.
 
 > [!NOTE]
 > OMEGA installs as its own app (`com.sky.SkyEmu.omega`), next to upstream SkyEmu. CI APKs are signed with a

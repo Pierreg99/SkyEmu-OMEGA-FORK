@@ -24,15 +24,19 @@ All of it is on branch `ccr-e41ac3c8-r3njjn`. No pull request has been opened.
 1. Download **AndroidRelease-APK** from a green *Build Android* run and unzip it.
 2. Use `apk-arm64-v8a-release.apk` (almost every phone) or `apk-universal-release.apk` if unsure.
 3. Open it on the phone and allow installing from that app, or run `adb install apk-arm64-v8a-release.apk`.
-4. Start **SkyEmu OMEGA** and tap **Load Game**.
+4. Start **SkyEmu OMEGA** and tap **Load Game**, or open a ROM from your file manager with SkyEmu OMEGA.
+5. Touch the screen to bring up the D-pad and buttons. They fade out after a few seconds without a touch.
 
 ## Things to know
 
 | | |
 |---|---|
-| ⚠️ **First install failed** | The first APK reused upstream SkyEmu's app ID, which Android refuses to install over an existing SkyEmu (or another build) signed with a different key; that is the most likely cause. Changed: own ID, compressed and much smaller files. Not yet confirmed on a phone. If it still fails, the exact error message tells us why. |
-| ⚠️ **Test signature** | The APK is signed with a throwaway test key. Android may warn about an unknown developer, and a newer build can't be installed over an older one without uninstalling first. Before publishing anywhere, it needs your own signing key. |
-| ✅ **CI** | The automatic Android build with the APK step passed (runs 67 and 68). The new per-device APKs build on the next run. |
+| ✅ **"It has no functions" fixed** | Earlier embedding work in this fork had switched off one-finger touch (so no button reacted), hidden the on-screen gamepad and forced a layout with the game pinned to the bottom. All three are back to upstream SkyEmu's behaviour. Tested in an Android emulator: menu, Load ROM, the file picker, recent games, opening a ROM from another app and the on-screen controls all work. |
+| ✅ **Safer by default** | The built-in HTTP control server was reachable by anyone on the same Wi-Fi. On phones it now only answers apps on the phone itself. |
+| ⚠️ **Not yet tried on your phone** | Please try a game. Sound was not checked: the emulator was too slow to judge it. |
+| ⚠️ **First install failed** | The first APK reused upstream SkyEmu's app ID; now the app has its own ID (`com.sky.SkyEmu.omega`). |
+| ⚠️ **Test signature** | The APK is signed with a throwaway test key. Android may warn about an unknown developer, and an APK from a different machine or CI run can't be installed over another without uninstalling first. Before publishing anywhere, it needs your own signing key. |
+| ✅ **CI** | The automatic Android build with the APK step passed on earlier commits; the latest commit builds on push. |
 | ℹ️ **KiBlox** | The KiBlox repository was not changed: it is a browser game with no Android version. |
 
 ## Decisions for you

@@ -269,9 +269,6 @@ _Static_assert(sizeof(se_search_paths_t)==SB_FILE_PATH_SIZE*8, "se_search_paths_
 #define SE_UI_IOS     2
 #define SE_UI_WEB     3
 
-#define SE_AVOID_OVERLAP_PORTRAIT 1
-#define SE_AVOID_OVERLAP_LANDSCAPE 2
-
 typedef struct{
   char path[SE_MAX_BIOS_FILES][SB_FILE_PATH_SIZE];
   char name[SE_MAX_BIOS_FILES][SE_BIOS_NAME_SIZE];
@@ -3507,7 +3504,7 @@ static void se_draw_emulated_system_screen(bool preview){
   float dims[2]={scr_w/se_dpi_scale(),scr_h/se_dpi_scale()};
   bool portrait = false; 
   float min_dim = se_compute_touchscreen_controls_min_dim(scr_w,scr_h, &portrait);
-  bool touch_controller_active = false;
+  bool touch_controller_active = gui_state.last_touch_time>=0||gui_state.settings.auto_hide_touch_controls==false;
   if(!touch_controller_active)min_dim = 0;
 
   float native_w = dims[0], native_h = dims[1];
@@ -9401,7 +9398,7 @@ static int se_draw_theme_region_tint_partial(int region, float x, float y, float
   int skip_mask = portrait? SE_RESIZE_ONLY_LANDSCAPE : SE_RESIZE_ONLY_PORTRAIT;
   int overlap_mask = w<h? SE_AVOID_OVERLAP_PORTRAIT : SE_AVOID_OVERLAP_LANDSCAPE;
   //When overlap is allowed, just render gamepad over screen
-  gamepad_mask = 0x0;
+  if((gui_state.settings.avoid_overlaping_touchscreen&overlap_mask)==0)gamepad_mask = 0x0;
   if(gui_state.settings.auto_hide_touch_controls && gui_state.last_touch_time<0.01){
     skip_mask = SE_RESIZE_ONLY_LANDSCAPE | SE_RESIZE_ONLY_PORTRAIT;
     gamepad_mask = 0;

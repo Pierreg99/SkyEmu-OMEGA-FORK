@@ -2,7 +2,9 @@
 #define SE_SETTINGS_H
 #include <stdint.h>
 #include <stdbool.h>
-#define SE_SETTINGS_VERSION 5u
+#define SE_SETTINGS_VERSION 6u
+#define SE_AVOID_OVERLAP_PORTRAIT 1
+#define SE_AVOID_OVERLAP_LANDSCAPE 2
 #define SE_SHADER_PIXELATE 0u
 #define SE_SHADER_BILINEAR 1u
 #define SE_SHADER_LCD 2u
