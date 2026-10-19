@@ -453,8 +453,10 @@ if(NOT RETRO_CORE_ONLY)
     include_directories(src/rcheevos/include src/lua)
   endif()
   
-  if(IOS)
+  if(IOS OR MACOS)
       set(SKYEMU_SRC ${SKYEMU_SRC} src/ios_support.m)
+  endif()
+  if(IOS)
       add_definitions(-DSE_PLATFORM_IOS)
   endif()
 
