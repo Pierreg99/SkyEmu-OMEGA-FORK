@@ -8,7 +8,7 @@
 
 ### 🛠️ Build and run
 - [**Building**](BUILDING.md): dependencies and build steps for Linux, Windows, macOS, iOS, Android, the web and libretro
-- [**Android project**](../tools/android_project/README.md): the Gradle library module
+- [**Android project**](../tools/android_project/README.md): the Gradle library module and the stand-alone APK
 
 </td>
 <td width="50%" valign="top">
@@ -37,3 +37,7 @@
 </td>
 </tr>
 </table>
+
+### 🤝 Project handover
+- [**Handover**](HANDOVER.md): what the Android APK work delivered and the decisions left for the owner
+- [**Handoff**](HANDOFF.md): technical state, reasoning, reproduction steps and next steps for whoever continues
