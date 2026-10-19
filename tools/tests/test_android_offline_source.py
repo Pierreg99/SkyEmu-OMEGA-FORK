@@ -101,3 +101,13 @@ def test_android_offline_hides_google_drive_section():
     assert 'SE_PLATFORM_ANDROID' in line and 'SE_ANDROID_ALLOW_NETWORK' in line
     end = body.index('#endif', section)
     assert body.index('Action Replay Codes') > end
+
+
+def test_touch_gamepad_not_hardcoded_hidden():
+    body = strip_comments(function_body(read('src/main.c'), 'static void se_draw_emulated_system_screen(bool preview)'))
+    assert re.search(r'bool\s+touch_controller_active\s*=\s*false\s*;', body) is None
+    assert re.search(
+        r'bool\s+touch_controller_active\s*=\s*gui_state\.last_touch_time\s*>=\s*0\s*\|\|\s*'
+        r'gui_state\.settings\.auto_hide_touch_controls\s*==\s*false\s*;',
+        body,
+    )
