@@ -11,7 +11,7 @@ expected_abis = {'arm64-v8a', 'x86_64', 'armeabi-v7a', 'x86'}
 seen = set()
 with zipfile.ZipFile(args.aar) as aar:
     for name in aar.namelist():
-        if not name.startswith('jni/') or not name.endswith('.so'):
+        if not (name.startswith('jni/') or name.startswith('lib/')) or not name.endswith('.so'):
             continue
         data = aar.read(name)
         if data[:4] != b'\x7fELF' or data[4] not in (1, 2) or data[5] not in (1, 2):

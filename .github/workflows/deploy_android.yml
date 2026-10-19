@@ -16,13 +16,13 @@ jobs:
           packages: platform-tools
       - name: Install pinned SDK, NDK and CMake
         run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0' 'ndk;28.2.13676358' 'cmake;3.22.1'
-      - name: Build Android library for all four ABIs
+      - name: Build Android APK for all four ABIs
         working-directory: tools/android_project
         run: ./gradlew :app:assembleRelease --no-daemon --stacktrace --max-workers=2
       - name: Verify 16 KB native library alignment
-        run: python3 tools/verify_android_pages.py tools/android_project/app/build/outputs/aar/app-release.aar
+        run: python3 tools/verify_android_pages.py tools/android_project/app/build/outputs/apk/release/app-release.apk
       - uses: actions/upload-artifact@v7
         with:
-          name: AndroidRelease-AAR
-          path: tools/android_project/app/build/outputs/aar/app-release.aar
+          name: AndroidRelease-APK
+          path: tools/android_project/app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
