@@ -6,8 +6,10 @@ import zipfile
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('aar', help='an .aar (jni/<abi>/*.so) or .apk (lib/<abi>/*.so)')
+parser.add_argument('--abis', default='arm64-v8a,x86_64,armeabi-v7a,x86',
+                    help='comma separated ABIs that must be present (default: all four)')
 args = parser.parse_args()
-expected_abis = {'arm64-v8a', 'x86_64', 'armeabi-v7a', 'x86'}
+expected_abis = set(args.abis.split(','))
 seen = set()
 with zipfile.ZipFile(args.aar) as aar:
     for info in aar.infolist():

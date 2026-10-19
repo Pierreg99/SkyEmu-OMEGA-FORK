@@ -120,10 +120,11 @@ It is an **Android library module** (namespace `com.skyemu`) that host apps depe
 ```sh
 cd tools/android_project
 ./gradlew :app:assembleRelease   # Android library (.aar) for host apps
-./gradlew :apk:assembleRelease   # stand-alone app: apk/build/outputs/apk/release/apk-release.apk
+./gradlew :apk:assembleRelease   # stand-alone app: apk/build/outputs/apk/release/apk-<abi>-release.apk
 ```
 
-The `apk` module packages the library as an installable app signed with the debug key, for sideloading
+The `apk` module packages the library as an installable app (`com.sky.SkyEmu.omega`, one APK per ABI plus a
+universal one) signed with the debug key, for sideloading
 (`adb install`). Re-sign it with your own key before distributing it.
 
 ## Web

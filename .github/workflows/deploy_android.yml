@@ -22,7 +22,10 @@ jobs:
       - name: Verify 16 KB native library alignment
         run: |
           python3 tools/verify_android_pages.py tools/android_project/app/build/outputs/aar/app-release.aar
-          python3 tools/verify_android_pages.py tools/android_project/apk/build/outputs/apk/release/apk-release.apk
+          python3 tools/verify_android_pages.py tools/android_project/apk/build/outputs/apk/release/apk-universal-release.apk
+          for abi in arm64-v8a armeabi-v7a x86 x86_64; do
+            python3 tools/verify_android_pages.py --abis "$abi" "tools/android_project/apk/build/outputs/apk/release/apk-$abi-release.apk"
+          done
       - uses: actions/upload-artifact@v7
         with:
           name: AndroidRelease-AAR
@@ -31,5 +34,5 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: AndroidRelease-APK
-          path: tools/android_project/apk/build/outputs/apk/release/apk-release.apk
+          path: tools/android_project/apk/build/outputs/apk/release/*.apk
           if-no-files-found: error

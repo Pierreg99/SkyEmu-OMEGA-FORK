@@ -25,12 +25,12 @@ colors on Android 12 and later.
 ```sh
 cd tools/android_project
 ./gradlew :app:assembleRelease   # library: app/build/outputs/aar/app-release.aar
-./gradlew :apk:assembleRelease   # app:     apk/build/outputs/apk/release/apk-release.apk
-adb install apk/build/outputs/apk/release/apk-release.apk
+./gradlew :apk:assembleRelease   # app:     apk/build/outputs/apk/release/apk-<abi>-release.apk (+ universal)
+adb install apk/build/outputs/apk/release/apk-arm64-v8a-release.apk
 ```
 
 Or open this folder in Android Studio and let it sync. Host applications depend on the library and sign their
-own APK. The stand-alone APK (application ID `com.sky.SkyEmu`) is signed with the local debug key so it can be
+own APK. The stand-alone APK (application ID `com.sky.SkyEmu.omega`, so it installs next to upstream SkyEmu) is signed with the local debug key so it can be
 sideloaded; re-sign it with `apksigner` before distributing it.
 Configure `ANDROID_HOME` or an untracked `local.properties` for your SDK path.
 Native libraries use 16 KB LOAD alignment. See [upgrade notes](../../docs/SOL6_1_UPGRADE.md)
@@ -40,7 +40,7 @@ for validation and host packaging requirements.
 
 | Path | Contents |
 |---|---|
-| `apk/build.gradle` | Application module (`com.sky.SkyEmu`) that packages the library as an installable app |
+| `apk/build.gradle` | Application module (`com.sky.SkyEmu.omega`, per-ABI and universal APKs) that packages the library as an installable app |
 | `app/build.gradle` | Library module (`com.android.library`, namespace `com.skyemu`) and the NDK / CMake setup |
 | `app/src/main/AndroidManifest.xml` | `EnhancedNativeActivity`, file associations for `.gb`, `.gbc`, `.gba`, `.nds` and `.zip`, and the `skyemu://oauth` link used for sign-in |
 | `app/src/main/java/com/sky/SkyEmu/EnhancedNativeActivity.java` | The `NativeActivity` that runs SkyEmu: controllers, keyboard, file picker, system theme |

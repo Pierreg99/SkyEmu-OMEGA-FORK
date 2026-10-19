@@ -180,15 +180,17 @@ Every push builds all platforms on GitHub Actions. Open a workflow run under
 ### Install on Android
 
 1. Open the latest green [**Build Android**](https://github.com/Pierreg99/SkyEmu-OMEGA-FORK/actions/workflows/deploy_android.yml)
-   run and download **AndroidRelease-APK** (GitHub wraps it in a `.zip`; extract `apk-release.apk`).
-2. Copy it to your phone and open it, allowing installs from that app when Android asks.
-   Or, with USB debugging on: `adb install apk-release.apk`.
-3. Launch **SkyEmu** and tap **Load Game**. One ~100 MB APK covers Android 7.0+ on ARM and x86 devices.
+   run and download **AndroidRelease-APK** (GitHub wraps it in a `.zip`; extract it).
+2. Pick the APK for your device: **`apk-arm64-v8a-release.apk`** (about 22 MB) for almost every phone from the
+   last ten years, or `apk-universal-release.apk` (about 77 MB) if you are unsure.
+3. Copy it to your phone and open it, allowing installs from that app when Android asks.
+   Or, with USB debugging on: `adb install apk-arm64-v8a-release.apk`.
+4. Launch **SkyEmu OMEGA** and tap **Load Game**. Android 7.0 or newer is required.
 
 > [!NOTE]
-> CI APKs are signed with a throwaway debug key, so Android may warn about an unknown developer and you
-> cannot update over an install signed with another key. Build it yourself with
-> `cd tools/android_project && ./gradlew :apk:assembleRelease`.
+> OMEGA installs as its own app (`com.sky.SkyEmu.omega`), next to upstream SkyEmu. CI APKs are signed with a
+> throwaway debug key: if Play Protect warns, choose *Install anyway*, and if an older OMEGA build is installed,
+> uninstall it first. Build it yourself with `cd tools/android_project && ./gradlew :apk:assembleRelease`.
 
 Stand-alone releases of upstream SkyEmu, including a version that runs in the browser, are at
 [github.com/skylersaleh/SkyEmu/releases](https://github.com/skylersaleh/SkyEmu/releases) and

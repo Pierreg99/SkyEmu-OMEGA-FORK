@@ -8,30 +8,31 @@ A short summary for the project owner. The technical details, reasoning and repr
 ## What you now have
 
 - **An installable Android app.** Until now the Android project only built a library for other apps to embed.
-  It now also builds **SkyEmu** as an app you can put on a phone: one APK of about 106 MB, Android 7.0 and newer,
-  for ARM and x86 devices, with its own home-screen icon.
+  It now also builds **SkyEmu OMEGA** as an app you can put on a phone: about 22 MB for a typical (arm64) phone,
+  or a 77 MB universal APK, Android 7.0 and newer, with its own home-screen icon. It installs next to upstream
+  SkyEmu instead of clashing with it.
 - **Automatic APK builds.** Every push builds the APK on GitHub Actions. Download it as the
   **AndroidRelease-APK** artifact of a [Build Android](https://github.com/Pierreg99/SkyEmu-OMEGA-FORK/actions/workflows/deploy_android.yml)
   run.
 - **A refreshed README**: a *Download APK* button, tidier badges, a one-line section menu, the light and dark
   design gallery, a diagram of how other apps embed SkyEmu, and step-by-step Android install instructions.
 
-All of it is on branch `ccr-e41ac3c8-r3njjn` (commit `5758736`). No pull request has been opened.
+All of it is on branch `ccr-e41ac3c8-r3njjn`. No pull request has been opened.
 
 ## Installing it
 
-1. Download **AndroidRelease-APK** from a green *Build Android* run and unzip it to get `apk-release.apk`.
-2. Open it on the phone and allow installing from that app, or run `adb install apk-release.apk`.
-3. Start **SkyEmu** and tap **Load Game**.
+1. Download **AndroidRelease-APK** from a green *Build Android* run and unzip it.
+2. Use `apk-arm64-v8a-release.apk` (almost every phone) or `apk-universal-release.apk` if unsure.
+3. Open it on the phone and allow installing from that app, or run `adb install apk-arm64-v8a-release.apk`.
+4. Start **SkyEmu OMEGA** and tap **Load Game**.
 
 ## Things to know
 
 | | |
 |---|---|
-| ⚠️ **Not yet tried on a phone** | The APK was built and checked automatically, but nobody has run it on a device yet. |
+| ⚠️ **First install failed** | The first APK reused upstream SkyEmu's app ID, which Android refuses to install over an existing SkyEmu (or another build) signed with a different key; that is the most likely cause. Changed: own ID, compressed and much smaller files. Not yet confirmed on a phone. If it still fails, the exact error message tells us why. |
 | ⚠️ **Test signature** | The APK is signed with a throwaway test key. Android may warn about an unknown developer, and a newer build can't be installed over an older one without uninstalling first. Before publishing anywhere, it needs your own signing key. |
-| ⏳ **First CI run** | The first automatic build with the APK step was still running at handover. |
-| ℹ️ **Size** | About 106 MB because one file covers all four processor types. Separate per-device files would be smaller. |
+| ✅ **CI** | The automatic Android build with the APK step passed (runs 67 and 68). The new per-device APKs build on the next run. |
 | ℹ️ **KiBlox** | The KiBlox repository was not changed: it is a browser game with no Android version. |
 
 ## Decisions for you
