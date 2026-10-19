@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Fail-closed-Pruefung des SkyEmu-Android-APK (Inhalt, Lizenzen, 16-KB-Alignment, Debug-Signatur).
+"""Fail-closed-Pruefung des SkyEmu-Android-APK (Inhalt, Lizenzen, 16-KB-Alignment, Debug-Signatur, kein testOnly).
 
 Nutzung: python3 tools/verify_android_apk.py <apk> [--build-tools <dir>]
-Ohne --build-tools wird $ANDROID_HOME bzw. $ANDROID_SDK_ROOT/build-tools/36.0.0 verwendet.
+aapt2, zipalign und apksigner kommen aus --build-tools. Ohne --build-tools wird $ANDROID_HOME bzw. $ANDROID_SDK_ROOT/build-tools/36.0.0 verwendet.
 Exit-Code 0 nur, wenn alle Pruefungen bestehen.
 """
 import argparse
 import os
 import posixpath
+import re
 import struct
 import subprocess
 import sys
@@ -47,6 +48,10 @@ REQUIRED_TEXT = {
     'assets/licenses/curl-COPYING.txt': 'Daniel Stenberg',
 }
 DEBUG_SIGNER = 'CN=Android Debug'
+# android:testOnly hat die Ressourcen-ID 0x01010272. Ein APK mit testOnly=true lehnt der
+# Paketinstaller auf Geraeten ab ("Paket ungueltig"); nur ein ausdrueckliches false/0 ist erlaubt.
+TESTONLY_RE = re.compile(r':testOnly\(0x01010272\)=(\S+)')
+TESTONLY_FALSE = {'false', '0', '0x0', '0x00000000'}
 
 
 def check_entries(apk):
@@ -119,6 +124,17 @@ def check_signer_output(output):
     return []
 
 
+def check_manifest_xmltree(output):
+    """Prueft die Ausgabe von `aapt2 dump xmltree --file AndroidManifest.xml` (fail-closed)."""
+    if not re.search(r'^\s*E: manifest\b', output, re.MULTILINE):
+        return ['aapt2: kein <manifest>-Element in der xmltree-Ausgabe']
+    errors = []
+    for value in TESTONLY_RE.findall(output):
+        if value.lower() not in TESTONLY_FALSE:
+            errors.append(f'Manifest: android:testOnly={value} (Geraete lehnen das APK ab)')
+    return errors
+
+
 def run_tool(cmd):
     print('+ ' + ' '.join(cmd), flush=True)
     proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -134,7 +150,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('apk')
     parser.add_argument('--build-tools', default=default_build_tools(),
-                        help='Verzeichnis mit zipalign und apksigner (Default: $ANDROID_HOME/build-tools/36.0.0)')
+                        help='Verzeichnis mit aapt2, zipalign und apksigner (Default: $ANDROID_HOME/build-tools/36.0.0)')
     args = parser.parse_args(argv)
     if not args.build_tools or not os.path.isdir(args.build_tools):
         print(f'FEHLER: build-tools nicht gefunden: {args.build_tools}', file=sys.stderr)
@@ -144,6 +160,16 @@ def main(argv=None):
     if not errors:
         print(f'Inhalt: OK ({len(REQUIRED_ENTRIES)} Pflichteintraege, keine Keystores, keine fremden .bin)')
     errors.extend(check_native_libs(args.apk))
+
+    code, out = run_tool([os.path.join(args.build_tools, 'aapt2'), 'dump', 'xmltree', '--file',
+                          'AndroidManifest.xml', args.apk])
+    if code != 0:
+        errors.append(f'aapt2 dump xmltree fehlgeschlagen (Exit {code}):\n{out[-2000:]}')
+    else:
+        manifest_errors = check_manifest_xmltree(out)
+        errors.extend(manifest_errors)
+        if not manifest_errors:
+            print('Manifest: OK (kein android:testOnly=true)')
 
     code, out = run_tool([os.path.join(args.build_tools, 'zipalign'), '-c', '-P', '16', '-v', '4', args.apk])
     if code != 0:

@@ -98,3 +98,72 @@ def test_elf_16k_aligned_ok():
 
 def test_elf_4k_aligned_rejected():
     assert v.check_elf_alignment('x.so', _elf64(4096, 0, 0)) == ['x.so: LOAD-Segment nicht 16-KB-kompatibel']
+
+
+XMLTREE_HEAD = '''N: android=http://schemas.android.com/apk/res/android (line=2)
+  E: manifest (line=2)
+    A: package="com.skyemu.omega" (Raw: "com.skyemu.omega")
+      E: application (line=29)
+        A: http://schemas.android.com/apk/res/android:label(0x01010001)=@0x7f0e001c
+'''
+
+
+def test_manifest_without_testonly_ok():
+    assert v.check_manifest_xmltree(XMLTREE_HEAD) == []
+
+
+@pytest.mark.parametrize('value', ['false', '0x00000000', '0'])
+def test_manifest_testonly_false_ok(value):
+    out = XMLTREE_HEAD + f'        A: http://schemas.android.com/apk/res/android:testOnly(0x01010272)={value}\n'
+    assert v.check_manifest_xmltree(out) == []
+
+
+@pytest.mark.parametrize('value', ['true', '0xffffffff', '1', '@0x7f050001', 'garbage'])
+def test_manifest_testonly_true_rejected(value):
+    out = XMLTREE_HEAD + f'        A: http://schemas.android.com/apk/res/android:testOnly(0x01010272)={value}\n'
+    errors = v.check_manifest_xmltree(out)
+    assert errors and 'testOnly' in errors[0]
+
+
+def test_manifest_xmltree_without_manifest_rejected():
+    assert v.check_manifest_xmltree('') != []
+    assert v.check_manifest_xmltree('ERROR: something went wrong') != []
+
+
+def _run_main(tmp_path, monkeypatch, xmltree, aapt2_code=0):
+    apk = make_apk(tmp_path / 'ok.apk')
+    bt = tmp_path / 'bt'
+    bt.mkdir()
+    calls = []
+
+    def fake_run_tool(cmd):
+        calls.append(cmd)
+        tool = os.path.basename(cmd[0])
+        if tool == 'aapt2':
+            return aapt2_code, xmltree
+        if tool == 'apksigner':
+            return 0, 'Signer #1 certificate DN: C=US, O=Android, CN=Android Debug\n'
+        return 0, 'Verification succesful\n'
+
+    monkeypatch.setattr(v, 'run_tool', fake_run_tool)
+    monkeypatch.setattr(v, 'check_native_libs', lambda apk: [])
+    code = v.main([apk, '--build-tools', str(bt)])
+    return code, calls
+
+
+def test_main_runs_aapt2_xmltree(tmp_path, monkeypatch):
+    code, calls = _run_main(tmp_path, monkeypatch, XMLTREE_HEAD)
+    assert code == 0
+    assert any(os.path.basename(c[0]) == 'aapt2' and c[1:5] == ['dump', 'xmltree', '--file', 'AndroidManifest.xml']
+               for c in calls)
+
+
+def test_main_fails_on_testonly_true(tmp_path, monkeypatch):
+    out = XMLTREE_HEAD + '        A: http://schemas.android.com/apk/res/android:testOnly(0x01010272)=true\n'
+    code, _ = _run_main(tmp_path, monkeypatch, out)
+    assert code == 1
+
+
+def test_main_fails_when_aapt2_fails(tmp_path, monkeypatch):
+    code, _ = _run_main(tmp_path, monkeypatch, XMLTREE_HEAD, aapt2_code=1)
+    assert code == 1
