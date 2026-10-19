@@ -1,5 +1,17 @@
 name: Build Android APK
-on: [workflow_dispatch]
+on:
+  pull_request:
+    paths:
+      - 'tools/android_project/**'
+      - 'tools/verify_android_apk.py'
+      - 'tools/tests/test_verify_android_apk.py'
+      - '.github/workflows/build_android_apk.yml'
+  workflow_dispatch:
+    inputs:
+      upload_artifact:
+        description: 'APK als Artefakt hochladen (oeffentliches Repo: nur nach ausdruecklicher Freigabe)'
+        type: boolean
+        default: false
 permissions:
   contents: read
 jobs:
@@ -28,7 +40,7 @@ jobs:
         run: python3 tools/verify_android_apk.py tools/android_project/host/build/intermediates/apk/debug/host-debug.apk --build-tools "$ANDROID_HOME/build-tools/36.0.0"
       # Repo ist oeffentlich: Artefakte waeren fuer jeden GitHub-Account abrufbar.
       # Upload daher nur bei manuellem Lauf und mit kurzer Aufbewahrung (Ethics-Auflage).
-      - if: github.event_name == 'workflow_dispatch'
+      - if: github.event_name == 'workflow_dispatch' && inputs.upload_artifact
         uses: actions/upload-artifact@v7
         with:
           name: SkyEmu-Android-arm64-v8a-debug-APK
