@@ -1,7 +1,10 @@
 apply plugin: 'com.android.application'
 
 // Installierbare Host-App fuer die SkyEmu-Android-Library (:app).
-// Signiert wird ausschliesslich mit dem Standard-Debug-Key von AGP; es gibt bewusst keine signingConfig.
+// Signiert wird ausschliesslich mit dem Standard-Debug-Key von AGP (auch die Release-Variante);
+// es gibt bewusst keine eigene signingConfig und keinen Zugriff auf skyemu-open-signing-store.
+// Ausgeliefert wird die Release-Variante: Debug baut die native Bibliothek mit CMake Debug (-O0),
+// damit ist der Emulator auf dem Geraet praktisch unbenutzbar. Release = RelWithDebInfo (-O2) wie upstream.
 
 android {
     namespace 'com.skyemu.omega'
@@ -18,6 +21,7 @@ android {
     buildTypes {
         release {
             minifyEnabled false
+            signingConfig signingConfigs.debug
         }
     }
     packaging {

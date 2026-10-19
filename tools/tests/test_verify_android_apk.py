@@ -105,6 +105,9 @@ XMLTREE_HEAD = '''N: android=http://schemas.android.com/apk/res/android (line=2)
     A: package="com.skyemu.omega" (Raw: "com.skyemu.omega")
       E: application (line=29)
         A: http://schemas.android.com/apk/res/android:label(0x01010001)=@0x7f0e001c
+          E: meta-data (line=125)
+            A: http://schemas.android.com/apk/res/android:name(0x01010003)="android.app.lib_name" (Raw: "android.app.lib_name")
+            A: http://schemas.android.com/apk/res/android:value(0x01010024)="SkyEmu" (Raw: "SkyEmu")
 '''
 
 
@@ -166,4 +169,29 @@ def test_main_fails_on_testonly_true(tmp_path, monkeypatch):
 
 def test_main_fails_when_aapt2_fails(tmp_path, monkeypatch):
     code, _ = _run_main(tmp_path, monkeypatch, XMLTREE_HEAD, aapt2_code=1)
+    assert code == 1
+
+
+@pytest.mark.parametrize('value', ['true', '0xffffffff'])
+def test_manifest_debuggable_rejected(value):
+    # Debug-Variante = native -O0 (CMake Debug): Emulator praktisch unbenutzbar langsam.
+    out = XMLTREE_HEAD + f'        A: http://schemas.android.com/apk/res/android:debuggable(0x0101000f)={value}\n'
+    errors = v.check_manifest_xmltree(out)
+    assert errors and 'debuggable' in errors[0]
+
+
+def test_manifest_debuggable_false_ok():
+    out = XMLTREE_HEAD + '        A: http://schemas.android.com/apk/res/android:debuggable(0x0101000f)=false\n'
+    assert v.check_manifest_xmltree(out) == []
+
+
+def test_manifest_without_lib_name_rejected():
+    out = XMLTREE_HEAD.split('          E: meta-data')[0]
+    errors = v.check_manifest_xmltree(out)
+    assert errors and 'lib_name' in errors[0]
+
+
+def test_main_fails_on_debuggable(tmp_path, monkeypatch):
+    out = XMLTREE_HEAD + '        A: http://schemas.android.com/apk/res/android:debuggable(0x0101000f)=true\n'
+    code, _ = _run_main(tmp_path, monkeypatch, out)
     assert code == 1

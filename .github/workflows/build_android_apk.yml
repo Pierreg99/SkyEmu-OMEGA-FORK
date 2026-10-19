@@ -34,18 +34,19 @@ jobs:
           python3 -m pytest -q tools/tests/test_verify_android_apk.py
       # -Pandroid.injected.build.abi setzt sonst android:testOnly=true; Geraete lehnen solche APKs ab
       # ("Paket ungueltig"). Daher ausdruecklich -Pandroid.injected.testOnly=false.
-      - name: Build debug APK (arm64-v8a)
+      # Release-Variante (native -O2, nicht debuggable), signiert mit dem Debug-Key von AGP.
+      - name: Build release APK (arm64-v8a, debug-signed)
         working-directory: tools/android_project
-        run: ./gradlew :host:assembleDebug -Pandroid.injected.build.abi=arm64-v8a -Pandroid.injected.testOnly=false --no-daemon --stacktrace --max-workers=2
+        run: ./gradlew :host:assembleRelease -Pandroid.injected.build.abi=arm64-v8a -Pandroid.injected.testOnly=false --no-daemon --stacktrace --max-workers=2
       # Mit -Pandroid.injected.build.abi legt AGP das APK unter intermediates/apk ab, nicht unter outputs/apk.
-      - name: Verify APK (content, no testOnly, 16 KB zipalign, debug signer)
-        run: python3 tools/verify_android_apk.py tools/android_project/host/build/intermediates/apk/debug/host-debug.apk --build-tools "$ANDROID_HOME/build-tools/36.0.0"
+      - name: Verify APK (content, no testOnly, not debuggable, 16 KB zipalign, debug signer)
+        run: python3 tools/verify_android_apk.py tools/android_project/host/build/intermediates/apk/release/host-release.apk --build-tools "$ANDROID_HOME/build-tools/36.0.0"
       # Repo ist oeffentlich: Artefakte waeren fuer jeden GitHub-Account abrufbar.
       # Upload daher nur bei manuellem Lauf und mit kurzer Aufbewahrung (Ethics-Auflage).
       - if: github.event_name == 'workflow_dispatch' && inputs.upload_artifact
         uses: actions/upload-artifact@v7
         with:
-          name: SkyEmu-Android-arm64-v8a-debug-APK
-          path: tools/android_project/host/build/intermediates/apk/debug/host-debug.apk
+          name: SkyEmuOmega-Android-arm64-v8a-release-debugsigned-APK
+          path: tools/android_project/host/build/intermediates/apk/release/host-release.apk
           if-no-files-found: error
           retention-days: 3

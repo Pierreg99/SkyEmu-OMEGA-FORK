@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed-Pruefung des SkyEmu-Android-APK (Inhalt, Lizenzen, 16-KB-Alignment, Debug-Signatur, kein testOnly).
+"""Fail-closed-Pruefung des SkyEmu-Android-APK (Inhalt, Lizenzen, 16-KB-Alignment, Debug-Signatur, kein testOnly, nicht debuggable).
 
 Nutzung: python3 tools/verify_android_apk.py <apk> [--build-tools <dir>]
 aapt2, zipalign und apksigner kommen aus --build-tools. Ohne --build-tools wird $ANDROID_HOME bzw. $ANDROID_SDK_ROOT/build-tools/36.0.0 verwendet.
@@ -52,6 +52,9 @@ DEBUG_SIGNER = 'CN=Android Debug'
 # Paketinstaller auf Geraeten ab ("Paket ungueltig"); nur ein ausdrueckliches false/0 ist erlaubt.
 TESTONLY_RE = re.compile(r':testOnly\(0x01010272\)=(\S+)')
 TESTONLY_FALSE = {'false', '0', '0x0', '0x00000000'}
+DEBUGGABLE_RE = re.compile(r':debuggable\(0x0101000f\)=(\S+)')
+# NativeActivity laedt die Bibliothek ueber diese meta-data; fehlt sie, sucht Android libmain.so.
+LIB_NAME_RE = re.compile(r':name\(0x01010003\)="android\.app\.lib_name"[^\n]*\n\s*A: \S+:value\(0x01010024\)="SkyEmu"')
 
 
 def check_entries(apk):
@@ -132,6 +135,11 @@ def check_manifest_xmltree(output):
     for value in TESTONLY_RE.findall(output):
         if value.lower() not in TESTONLY_FALSE:
             errors.append(f'Manifest: android:testOnly={value} (Geraete lehnen das APK ab)')
+    for value in DEBUGGABLE_RE.findall(output):
+        if value.lower() not in TESTONLY_FALSE:
+            errors.append(f'Manifest: android:debuggable={value} (Debug-Variante, native Bibliothek -O0)')
+    if not LIB_NAME_RE.search(output):
+        errors.append('Manifest: meta-data android.app.lib_name="SkyEmu" fehlt')
     return errors
 
 
@@ -169,7 +177,7 @@ def main(argv=None):
         manifest_errors = check_manifest_xmltree(out)
         errors.extend(manifest_errors)
         if not manifest_errors:
-            print('Manifest: OK (kein android:testOnly=true)')
+            print('Manifest: OK (kein testOnly/debuggable, lib_name=SkyEmu)')
 
     code, out = run_tool([os.path.join(args.build_tools, 'zipalign'), '-c', '-P', '16', '-v', '4', args.apk])
     if code != 0:
