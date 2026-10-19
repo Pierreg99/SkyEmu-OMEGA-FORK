@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed-Pruefung des SkyEmu-Android-APK (Inhalt, Lizenzen, 16-KB-Alignment, Debug-Signatur, kein testOnly, nicht debuggable).
+"""Fail-closed-Pruefung des SkyEmu-Android-APK (Inhalt, Lizenzen, 16-KB-Alignment, Debug-Signatur, kein testOnly, nicht debuggable, offline ohne INTERNET).
 
 Nutzung: python3 tools/verify_android_apk.py <apk> [--build-tools <dir>]
 aapt2, zipalign und apksigner kommen aus --build-tools. Ohne --build-tools wird $ANDROID_HOME bzw. $ANDROID_SDK_ROOT/build-tools/36.0.0 verwendet.
@@ -54,6 +54,9 @@ TESTONLY_RE = re.compile(r':testOnly\(0x01010272\)=(\S+)')
 TESTONLY_FALSE = {'false', '0', '0x0', '0x00000000'}
 DEBUGGABLE_RE = re.compile(r':debuggable\(0x0101000f\)=(\S+)')
 # NativeActivity laedt die Bibliothek ueber diese meta-data; fehlt sie, sucht Android libmain.so.
+# Offline-Build: Netzwerk-Permissions sind verboten, damit kein Socket (HCS, curl) moeglich ist.
+FORBIDDEN_PERMISSIONS = ('android.permission.INTERNET',)
+USES_PERMISSION_RE = re.compile(r"^uses-permission(?:-sdk-23)?: name='([^']+)'", re.MULTILINE)
 LIB_NAME_RE = re.compile(r':name\(0x01010003\)="android\.app\.lib_name"[^\n]*\n\s*A: \S+:value\(0x01010024\)="SkyEmu"')
 
 
@@ -143,6 +146,14 @@ def check_manifest_xmltree(output):
     return errors
 
 
+def check_permissions(output):
+    """Prueft die Ausgabe von `aapt2 dump permissions` (fail-closed)."""
+    if not re.search(r'^package: \S+', output, re.MULTILINE):
+        return ['aapt2: keine package-Zeile in der permissions-Ausgabe']
+    return [f'Manifest: verbotene Permission {name} (Offline-Build)'
+            for name in USES_PERMISSION_RE.findall(output) if name in FORBIDDEN_PERMISSIONS]
+
+
 def run_tool(cmd):
     print('+ ' + ' '.join(cmd), flush=True)
     proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -178,6 +189,15 @@ def main(argv=None):
         errors.extend(manifest_errors)
         if not manifest_errors:
             print('Manifest: OK (kein testOnly/debuggable, lib_name=SkyEmu)')
+
+    code, out = run_tool([os.path.join(args.build_tools, 'aapt2'), 'dump', 'permissions', args.apk])
+    if code != 0:
+        errors.append(f'aapt2 dump permissions fehlgeschlagen (Exit {code}):\n{out[-2000:]}')
+    else:
+        permission_errors = check_permissions(out)
+        errors.extend(permission_errors)
+        if not permission_errors:
+            print('Permissions: OK (kein android.permission.INTERNET)')
 
     code, out = run_tool([os.path.join(args.build_tools, 'zipalign'), '-c', '-P', '16', '-v', '4', args.apk])
     if code != 0:

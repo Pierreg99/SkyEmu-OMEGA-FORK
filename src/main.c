@@ -5651,14 +5651,8 @@ void se_android_request_permissions(){
   }
 }
 void se_android_start_hcs() {
-#ifdef ENABLE_HTTP_CONTROL_SERVER
-    if (gui_state.settings.http_control_server_port == 0) {
-        gui_state.settings.http_control_server_port = 8080;
-    }
-    gui_state.settings.http_control_server_enable = true;
-    hcs_update(true, gui_state.settings.http_control_server_port, se_hcs_callback);
-    LOGI("HTTP Control Server started on port %d", gui_state.settings.http_control_server_port);
-#endif
+    /* Offline: auf Android startet der HTTP Control Server nie automatisch. */
+    gui_state.settings.http_control_server_enable = false;
 }
 #endif
 #ifdef EMSCRIPTEN
@@ -6311,6 +6305,9 @@ static void se_poll_sdl(){
 
 void se_update_frame() {
   #ifdef ENABLE_HTTP_CONTROL_SERVER
+  #ifdef SE_PLATFORM_ANDROID
+  gui_state.settings.http_control_server_enable = false;
+  #endif
   hcs_update(gui_state.settings.http_control_server_enable,gui_state.settings.http_control_server_port,se_hcs_callback);
   if(gui_state.settings.http_control_server_enable){
     for(int i=0;i<SE_NUM_KEYBINDS;++i)emu_state.joy.inputs[i]+=gui_state.hcs_joypad.inputs[i];
@@ -7869,7 +7866,7 @@ void se_draw_menu_panel(){
 #ifdef ENABLE_HTTP_CONTROL_SERVER
   bool enable_hcs = gui_state.settings.http_control_server_enable;
   se_checkbox("Enable HTTP Control Server",&enable_hcs);
-  gui_state.settings.http_control_server_enable = true;
+  gui_state.settings.http_control_server_enable = enable_hcs;
   if(enable_hcs){
     int port = gui_state.settings.http_control_server_port;
     se_field_label("Server Port");igSameLine(SE_FIELD_INDENT,0);
@@ -10178,7 +10175,9 @@ static void se_init(){
     gui_state.settings.http_control_server_port = atoi(emu_state.cmd_line_args[2]);
     emu_state.cmd_line_arg_count =emu_state.cmd_line_arg_count-2;
     emu_state.cmd_line_args =emu_state.cmd_line_args+2;
+#ifndef SE_PLATFORM_ANDROID
     gui_state.settings.http_control_server_enable=true;
+#endif
     http_server_mode=true;
     // HTTP Server mode only has frame stepping which is not allowed in hardcore mode.
     gui_state.settings.hardcore_mode = false; // TODO: this doesn't do much as it can be re-enabled

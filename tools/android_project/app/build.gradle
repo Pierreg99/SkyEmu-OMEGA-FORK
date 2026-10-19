@@ -12,7 +12,9 @@ android {
         externalNativeBuild {
             cmake {
                 arguments '-DANDROID_STL=c++_static', '-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON',
-                        '-DHAVE_LIBZ=0', '-DUSE_SDL=OFF'
+                        '-DHAVE_LIBZ=0', '-DUSE_SDL=OFF',
+                        // Offline: RetroAchievements (Login, Badges, Server-Calls) ist auf Android nicht einkompiliert.
+                        '-DENABLE_RETRO_ACHIEVEMENTS=OFF'
                 targets 'SkyEmu'
             }
         }

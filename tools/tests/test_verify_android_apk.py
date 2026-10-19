@@ -133,7 +133,16 @@ def test_manifest_xmltree_without_manifest_rejected():
     assert v.check_manifest_xmltree('ERROR: something went wrong') != []
 
 
-def _run_main(tmp_path, monkeypatch, xmltree, aapt2_code=0):
+PERMISSIONS_OK = """package: com.skyemu.omega
+uses-permission: name='android.permission.WRITE_EXTERNAL_STORAGE' maxSdkVersion='28'
+uses-permission: name='android.permission.READ_EXTERNAL_STORAGE' maxSdkVersion='32'
+permission: com.skyemu.omega.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION
+uses-permission: name='com.skyemu.omega.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION'
+"""
+PERMISSIONS_INTERNET = PERMISSIONS_OK + "uses-permission: name='android.permission.INTERNET'\n"
+
+
+def _run_main(tmp_path, monkeypatch, xmltree, aapt2_code=0, permissions=PERMISSIONS_OK, permissions_code=0):
     apk = make_apk(tmp_path / 'ok.apk')
     bt = tmp_path / 'bt'
     bt.mkdir()
@@ -142,6 +151,8 @@ def _run_main(tmp_path, monkeypatch, xmltree, aapt2_code=0):
     def fake_run_tool(cmd):
         calls.append(cmd)
         tool = os.path.basename(cmd[0])
+        if tool == 'aapt2' and cmd[2] == 'permissions':
+            return permissions_code, permissions
         if tool == 'aapt2':
             return aapt2_code, xmltree
         if tool == 'apksigner':
@@ -194,4 +205,36 @@ def test_manifest_without_lib_name_rejected():
 def test_main_fails_on_debuggable(tmp_path, monkeypatch):
     out = XMLTREE_HEAD + '        A: http://schemas.android.com/apk/res/android:debuggable(0x0101000f)=true\n'
     code, _ = _run_main(tmp_path, monkeypatch, out)
+    assert code == 1
+
+
+def test_permissions_offline_ok():
+    assert v.check_permissions(PERMISSIONS_OK) == []
+
+
+@pytest.mark.parametrize('line', ["uses-permission: name='android.permission.INTERNET'",
+                                  "uses-permission-sdk-23: name='android.permission.INTERNET'"])
+def test_permissions_internet_rejected(line):
+    errors = v.check_permissions(PERMISSIONS_OK + line + '\n')
+    assert errors == ['Manifest: verbotene Permission android.permission.INTERNET (Offline-Build)']
+
+
+@pytest.mark.parametrize('output', ['', 'ERROR: failed opening zip'])
+def test_permissions_without_package_rejected(output):
+    assert v.check_permissions(output) == ['aapt2: keine package-Zeile in der permissions-Ausgabe']
+
+
+def test_main_runs_aapt2_permissions(tmp_path, monkeypatch):
+    code, calls = _run_main(tmp_path, monkeypatch, XMLTREE_HEAD)
+    assert code == 0
+    assert any(os.path.basename(c[0]) == 'aapt2' and c[1:3] == ['dump', 'permissions'] for c in calls)
+
+
+def test_main_fails_on_internet_permission(tmp_path, monkeypatch):
+    code, _ = _run_main(tmp_path, monkeypatch, XMLTREE_HEAD, permissions=PERMISSIONS_INTERNET)
+    assert code == 1
+
+
+def test_main_fails_when_aapt2_permissions_fails(tmp_path, monkeypatch):
+    code, _ = _run_main(tmp_path, monkeypatch, XMLTREE_HEAD, permissions_code=1)
     assert code == 1
