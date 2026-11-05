@@ -38,6 +38,7 @@
 #include "res.h"
 #include "se_design.h"
 #include "se_settings.h"
+#include "se_cheat_finder.h"
 #include "atlas.h"
 #include "retro_achievements.h"
 #include "sokol_app.h"
@@ -3287,6 +3288,8 @@ se_lcd_info_t se_get_lcd_info(){
     .gamma = 2.2
   };
 }
+static void se_cheat_finder_frame(void);
+static void se_record_frame(void);
 static void se_emulate_single_frame(){
   if(emu_state.system == SYSTEM_GB){
     if(gui_state.test_runner_mode){
@@ -3319,6 +3322,8 @@ static void se_emulate_single_frame(){
   }
 #endif
   se_run_all_ar_cheats(se_run_ar_cheat);
+  se_cheat_finder_frame();
+  se_record_frame();
 }
 static void se_screenshot(uint8_t * output_buffer, int * out_width, int * out_height){
   *out_height=*out_width=0;
@@ -4692,6 +4697,49 @@ static const char* se_design_touch_label_for(int input_id, int hold_id, int turb
   }
   return NULL;
 }
+enum {ROUND,DPAD,RECT};
+typedef struct{int input_id; int theme_region; int mode; bool enable; int type; float pos[2]; float size[2];}se_button_info_t;
+static int se_touch_group_of(int input_id){
+  switch(input_id){
+    case SE_KEY_UP: return SE_TOUCH_GROUP_DPAD;
+    case SE_KEY_A: case SE_KEY_B: case SE_KEY_X: case SE_KEY_Y: return SE_TOUCH_GROUP_FACE;
+    case SE_KEY_L: case SE_KEY_R: return SE_TOUCH_GROUP_SHOULDER;
+    default: return SE_TOUCH_GROUP_SYSTEM; // Start, Select, Hold and Turbo
+  }
+}
+// Moves and resizes each group of buttons around its own center (per side of the controller), as set in the
+// touch layout editor. Positions are in controller widths, full_h is the controller height in widths.
+static void se_apply_touch_layout(se_button_info_t* buttons, int count, float full_h){
+  for(int g=0;g<SE_TOUCH_GROUP_COUNT;++g){
+    const float* layout = gui_state.settings.touch_layout[g];
+    if(layout[0]==0&&layout[1]==0&&layout[2]==1)continue;
+    for(int side=SE_GAMEPAD_LEFT;side<=SE_GAMEPAD_RIGHT;side<<=1){
+      float center[2]={0,0}; int n=0;
+      for(int i=0;i<count;++i){
+        se_button_info_t* b = &buttons[i];
+        if(b->mode!=side||se_touch_group_of(b->input_id)!=g)continue;
+        bool rect = b->type==RECT;
+        center[0]+=b->pos[0]+(rect?b->size[0]*0.5f:0);
+        center[1]+=b->pos[1]+(rect?b->size[1]*0.5f:0);
+        n++;
+      }
+      if(!n)continue;
+      center[0]/=n; center[1]/=n;
+      for(int i=0;i<count;++i){
+        se_button_info_t* b = &buttons[i];
+        if(b->mode!=side||se_touch_group_of(b->input_id)!=g)continue;
+        bool rect = b->type==RECT;
+        float c[2]={b->pos[0]+(rect?b->size[0]*0.5f:0),b->pos[1]+(rect?b->size[1]*0.5f:0)};
+        c[0]=center[0]+(c[0]-center[0])*layout[2]+layout[0];
+        c[1]=center[1]+(c[1]-center[1])*layout[2]+layout[1]*full_h;
+        if(b->type!=DPAD){ b->size[0]*=layout[2]; b->size[1]*=layout[2]; }
+        else b->size[0]*=layout[2]; // D-pad: size[0] is its radius
+        b->pos[0]=c[0]-(rect?b->size[0]*0.5f:0);
+        b->pos[1]=c[1]-(rect?b->size[1]*0.5f:0);
+      }
+    }
+  }
+}
 void se_draw_onscreen_controller(sb_emu_state_t*state, int mode, float win_x, float win_y, float win_w, float win_h, bool preview, bool center){  
   if (!show_ui)
     return;
@@ -4750,8 +4798,6 @@ void se_draw_onscreen_controller(sb_emu_state_t*state, int mode, float win_x, fl
   }
   ImDrawList*dl= igGetWindowDrawList();
 
-  enum {ROUND,DPAD,RECT};
-  typedef struct{int input_id; int theme_region; int mode; bool enable; int type; float pos[2]; float size[2];}se_button_info_t;
 
   bool abxy= emu_state.system==SYSTEM_NDS;
   bool lr_en = emu_state.system!=SYSTEM_GB;
@@ -4803,6 +4849,7 @@ void se_draw_onscreen_controller(sb_emu_state_t*state, int mode, float win_x, fl
     {SE_KEY_START  ,SE_REGION_KEY_START,  SE_GAMEPAD_RIGHT, true, RECT, {(ht_en?0.33:0.00)+(ht_en?0.67:1.01)-start_sel_row_w-rect_offset,start_sel_row_y}, {start_sel_row_w,row_h}},
     {SE_KEY_TURBO  ,SE_REGION_KEY_TURBO,  SE_GAMEPAD_RIGHT, ht_en,RECT, {0.01-rect_offset,start_sel_row_y}, {hold_turbo_w,row_h}},
   };
+  se_apply_touch_layout(buttons,sizeof(buttons)/sizeof(buttons[0]),full_h);
   bool touch_only_key_pressed[3] = {0};
 
   int button_pressed_mask = 0;
@@ -7052,6 +7099,19 @@ void se_draw_touch_controls_settings(){
   bool button_labels = gui_state.settings.touch_screen_show_button_labels;
   se_checkbox("Button Labels",&button_labels);
   gui_state.settings.touch_screen_show_button_labels = button_labels;
+
+  // Touch layout editor: move and resize each group of buttons, the previews above update live.
+  static int group = SE_TOUCH_GROUP_DPAD;
+  se_field_label("Edit Buttons");igSameLine(SE_FIELD_INDENT,0);
+  se_combo_str("##TouchLayoutGroup",&group,"D-Pad\0A / B / X / Y\0L / R Shoulders\0Start / Select Row\0",0);
+  float* layout = gui_state.settings.touch_layout[group];
+  se_field_label("Horizontal");igSameLine(SE_FIELD_INDENT,0);
+  se_slider_float("##TouchLayoutX",&layout[0],-0.5f,0.5f,"%.2f");
+  se_field_label("Vertical");igSameLine(SE_FIELD_INDENT,0);
+  se_slider_float("##TouchLayoutY",&layout[1],-0.5f,0.5f,"%.2f");
+  se_field_label("Size");igSameLine(SE_FIELD_INDENT,0);
+  se_slider_float("##TouchLayoutSize",&layout[2],0.5f,2.0f,"%.2fx");
+  if(se_button(ICON_FK_UNDO " Reset Button Layout",(ImVec2){0,0}))se_settings_reset_touch_layout(&gui_state.settings);
   igPopItemWidth();
 }
 void se_draw_save_states(bool cloud){
@@ -7255,11 +7315,279 @@ static void se_draw_design_settings(){
     }else se_text_disabled("Not found, using the bundled font");
   }
 }
+/*** Gameplay recording: MP4 video with sound, encoded by EnhancedNativeActivity (Android) ***/
+static struct{
+  bool active;
+  int width, height;
+  uint32_t audio_ptr;   // next sample of the emulator's audio ring that goes into the recording
+  uint64_t frames;
+  uint64_t game;        // recording stops when another game is loaded
+}se_recording;
+#ifdef SE_PLATFORM_ANDROID
+static uint8_t se_recording_video[SE_MAX_SCREENSHOT_SIZE];
+static int16_t se_recording_audio[SB_AUDIO_RING_BUFFER_SIZE];
+static JNIEnv* se_android_acquire_env(bool* attached){
+  *attached = false;
+  ANativeActivity* activity=(ANativeActivity*)sapp_android_get_native_activity();
+  if(!activity||!activity->vm)return NULL;
+  JavaVM* vm = activity->vm;
+  JNIEnv* env = NULL;
+  jint status = (*vm)->GetEnv(vm,(void**)&env,JNI_VERSION_1_6);
+  if(status==JNI_EDETACHED){
+    if((*vm)->AttachCurrentThread(vm,&env,NULL)!=JNI_OK)return NULL;
+    *attached = true;
+  }else if(status!=JNI_OK)return NULL;
+  return env;
+}
+static void se_android_release_env(JNIEnv* env, bool attached){
+  if((*env)->ExceptionCheck(env))(*env)->ExceptionClear(env);
+  if(attached){
+    ANativeActivity* activity=(ANativeActivity*)sapp_android_get_native_activity();
+    (*activity->vm)->DetachCurrentThread(activity->vm);
+  }
+}
+// Calls a boolean or void method of the activity. Hosts without the method just get false.
+static bool se_android_call_activity(JNIEnv* env, const char* name, const char* sig, const jvalue* args, bool returns_bool){
+  ANativeActivity* activity=(ANativeActivity*)sapp_android_get_native_activity();
+  jclass cls = (*env)->GetObjectClass(env,activity->clazz);
+  jmethodID method = cls? (*env)->GetMethodID(env,cls,name,sig) : NULL;
+  bool result = false;
+  if(method){
+    if(returns_bool)result = (*env)->CallBooleanMethodA(env,activity->clazz,method,args);
+    else{ (*env)->CallVoidMethodA(env,activity->clazz,method,args); result = true; }
+    if((*env)->ExceptionCheck(env)){ (*env)->ExceptionClear(env); result = false; }
+  }else if((*env)->ExceptionCheck(env))(*env)->ExceptionClear(env);
+  if(cls)(*env)->DeleteLocalRef(env,cls);
+  return result;
+}
+static bool se_recording_supported(void){ return true; }
+static void se_recording_stop(void){
+  if(!se_recording.active)return;
+  se_recording.active = false;
+  bool attached;
+  JNIEnv* env = se_android_acquire_env(&attached);
+  if(!env)return;
+  se_android_call_activity(env,"stopRecording","()V",NULL,false);
+  se_android_release_env(env,attached);
+}
+static void se_recording_start(void){
+  if(se_recording.active||!emu_state.rom_loaded)return;
+  int w=0,h=0;
+  se_screenshot(se_recording_video,&w,&h);
+  if(!w||!h)return;
+  // Integer upscale to roughly 480p and above; every size stays a multiple of 16 for the H.264 encoder.
+  int scale = emu_state.system==SYSTEM_NDS? 2 : emu_state.system==SYSTEM_GBA? 3 : 4;
+  float fps = emu_state.system==SYSTEM_NDS? 59.8261f : 59.7275f;
+  bool attached;
+  JNIEnv* env = se_android_acquire_env(&attached);
+  if(!env)return;
+  jvalue args[5];
+  args[0].i=w; args[1].i=h; args[2].i=scale; args[3].i=SE_AUDIO_SAMPLE_RATE; args[4].f=fps;
+  bool started = se_android_call_activity(env,"startRecording","(IIIIF)Z",args,true);
+  se_android_release_env(env,attached);
+  if(!started)return;
+  se_recording.active = true;
+  se_recording.width = w;
+  se_recording.height = h;
+  se_recording.frames = 0;
+  se_recording.game = emu_state.game_checksum;
+  se_recording.audio_ptr = emu_state.audio_ring_buff.write_ptr;
+}
+static void se_record_frame(void){
+  if(!se_recording.active)return;
+  int w=0,h=0;
+  se_screenshot(se_recording_video,&w,&h);
+  if(w!=se_recording.width||h!=se_recording.height||emu_state.game_checksum!=se_recording.game){
+    se_recording_stop();
+    return;
+  }
+  // The audio this frame produced: everything written to the ring since the previous frame.
+  uint32_t write_ptr = emu_state.audio_ring_buff.write_ptr;
+  uint32_t samples = write_ptr-se_recording.audio_ptr;
+  if(samples>SB_AUDIO_RING_BUFFER_SIZE){ se_recording.audio_ptr = write_ptr; samples = 0; } // ring was reset
+  samples &= ~1u;
+  for(uint32_t i=0;i<samples;++i)
+    se_recording_audio[i]=emu_state.audio_ring_buff.data[(se_recording.audio_ptr+i)%SB_AUDIO_RING_BUFFER_SIZE];
+  se_recording.audio_ptr += samples;
+  bool attached;
+  JNIEnv* env = se_android_acquire_env(&attached);
+  if(!env)return;
+  jvalue args[2];
+  args[0].l = (*env)->NewDirectByteBuffer(env,se_recording_video,(jlong)w*h*4);
+  args[1].l = samples? (*env)->NewDirectByteBuffer(env,se_recording_audio,(jlong)samples*2) : NULL;
+  // false: the recorder failed or was stopped by Android (e.g. the app went to the background)
+  if(!se_android_call_activity(env,"recordFrame","(Ljava/nio/ByteBuffer;Ljava/nio/ByteBuffer;)Z",args,true))
+    se_recording.active = false;
+  if(args[0].l)(*env)->DeleteLocalRef(env,args[0].l);
+  if(args[1].l)(*env)->DeleteLocalRef(env,args[1].l);
+  se_android_release_env(env,attached);
+  se_recording.frames++;
+}
+#else
+static bool se_recording_supported(void){ return false; }
+static void se_recording_start(void){}
+static void se_recording_stop(void){}
+static void se_record_frame(void){}
+#endif
+static void se_draw_recording_section(void){
+  if(!se_recording_supported())return;
+  se_section(ICON_FK_VIDEO_CAMERA " Recording");
+  if(!emu_state.rom_loaded&&!se_recording.active){ se_text("Load a game to record it"); return; }
+  if(!se_recording.active){
+    if(se_button(ICON_FK_CIRCLE " Start Recording",(ImVec2){0,0}))se_recording_start();
+    se_text_disabled("Records the game screen and sound to an MP4 video in Movies/SkyEmu.");
+  }else{
+    int seconds = (int)(se_recording.frames/60);
+    if(se_button(ICON_FK_STOP " Stop Recording",(ImVec2){0,0}))se_recording_stop();
+    igSameLine(0,8);
+    igAlignTextToFramePadding();
+    se_text("%02d:%02d",seconds/60,seconds%60);
+  }
+}
+// Red dot and running time in the top right corner while a recording is in progress.
+static void se_draw_recording_indicator(float menu_height){
+  if(!se_recording.active)return;
+  ImDrawList* fg = igGetForegroundDrawListNil();
+  float w = igGetIO()->DisplaySize.x;
+  int seconds = (int)(se_recording.frames/60);
+  char label[32];
+  snprintf(label,sizeof(label),"REC %02d:%02d",seconds/60,seconds%60);
+  ImVec2 ts; igCalcTextSize(&ts,label,NULL,false,-1);
+  ImVec2 p = {w-ts.x-34,menu_height+8};
+  ImDrawList_AddRectFilled(fg,(ImVec2){p.x-8,p.y-4},(ImVec2){w-6,p.y+ts.y+4},0xB0000000,(ts.y+8)*0.5f,ImDrawCornerFlags_All);
+  if(fmod(se_time(),1.0)<0.65)ImDrawList_AddCircleFilled(fg,(ImVec2){p.x+5,p.y+ts.y*0.5f},5,0xff3030ff,16);
+  ImDrawList_AddTextVec2(fg,(ImVec2){p.x+16,p.y},0xffffffff,label,NULL);
+}
+/*** Cheat finder (RAM search), see se_cheat_finder.h ***/
+static se_cheat_finder_t se_cheat_finder;
+static uint64_t se_cheat_finder_game = 0; // checksum of the game the search and frozen values belong to
+static se_cf_read_fn se_cheat_finder_reader(void){
+  if(emu_state.system==SYSTEM_GB)return gb_byte_read;
+  if(emu_state.system==SYSTEM_GBA)return gba_byte_read;
+  if(emu_state.system==SYSTEM_NDS)return nds9_byte_read;
+  return null_byte_read;
+}
+static se_cf_write_fn se_cheat_finder_writer(void){
+  if(emu_state.system==SYSTEM_GB)return gb_byte_write;
+  if(emu_state.system==SYSTEM_GBA)return gba_byte_write;
+  if(emu_state.system==SYSTEM_NDS)return nds9_byte_write;
+  return null_byte_write;
+}
+// Work RAM of each console, where games keep lives, money, health and timers.
+static int se_cheat_finder_regions(se_cf_region_desc_t* out){
+  if(emu_state.system==SYSTEM_GB){
+    out[0]=(se_cf_region_desc_t){0xC000,0x2000,"WRAM"};
+    out[1]=(se_cf_region_desc_t){0xA000,0x2000,"Cartridge RAM"};
+    out[2]=(se_cf_region_desc_t){0xFF80,0x7F,"HRAM"};
+    return 3;
+  }
+  if(emu_state.system==SYSTEM_GBA){
+    out[0]=(se_cf_region_desc_t){0x02000000,0x40000,"EWRAM"};
+    out[1]=(se_cf_region_desc_t){0x03000000,0x8000,"IWRAM"};
+    return 2;
+  }
+  if(emu_state.system==SYSTEM_NDS){
+    out[0]=(se_cf_region_desc_t){0x02000000,0x400000,"Main RAM"};
+    return 1;
+  }
+  return 0;
+}
+static bool se_cheat_finder_allowed(void){
+  return emu_state.rom_loaded&&!(gui_state.settings.hardcore_mode&&gui_state.ra_logged_in);
+}
+static void se_cheat_finder_frame(void){
+  if(!se_cheat_finder.num_frozen||!se_cheat_finder_allowed())return;
+  if(se_cheat_finder_game!=emu_state.game_checksum)return;
+  se_cf_apply_frozen(&se_cheat_finder,se_cheat_finder_writer());
+}
+static void se_draw_cheat_finder(void){
+  se_section(ICON_FK_SEARCH " Cheat Finder");
+  if(!se_cheat_finder_allowed()){
+    se_text(emu_state.rom_loaded? "Disabled in Hardcore Mode" : "Load a game to search its memory");
+    return;
+  }
+  if(se_cheat_finder_game!=emu_state.game_checksum){
+    se_cf_reset(&se_cheat_finder);
+    se_cheat_finder.num_frozen = 0;
+    se_cheat_finder_game = emu_state.game_checksum;
+  }
+  static int size_index = 0, op = SE_CF_EQUAL, value = 0;
+  se_text_disabled("Find where the game stores a number (lives, money, health): search for its value, change it "
+                   "in the game, search again until a few addresses are left, then set or freeze one.");
+  igPushItemWidth(-1);
+  se_field_label("Value Size");igSameLine(SE_FIELD_INDENT,0);
+  int old_size = size_index;
+  se_combo_str("##CheatFinderSize",&size_index,"8-bit (0-255)\00016-bit (0-65535)\00032-bit\0",0);
+  if(old_size!=size_index)se_cf_reset(&se_cheat_finder);
+  se_field_label("Compare");igSameLine(SE_FIELD_INDENT,0);
+  se_combo_str("##CheatFinderOp",&op,"Equal to value\0Not equal to value\0Greater than value\0Less than value\0"
+               "Changed\0Unchanged\0Increased\0Decreased\0",0);
+  bool uses_value = op<SE_CF_CHANGED;
+  if(!uses_value)se_push_disabled();
+  se_field_label("Value");igSameLine(SE_FIELD_INDENT,0);
+  se_input_int("##CheatFinderValue",&value,1,10,ImGuiInputTextFlags_None);
+  if(!uses_value)se_pop_disabled();
+  igPopItemWidth();
+  int value_size = size_index==0?1:size_index==1?2:4;
+  se_cf_read_fn read = se_cheat_finder_reader();
+  if(se_button(ICON_FK_UNDO " New Search",(ImVec2){0,0})){
+    se_cf_region_desc_t regions[SE_CF_MAX_REGIONS];
+    se_cf_begin(&se_cheat_finder,regions,se_cheat_finder_regions(regions),value_size,read);
+  }
+  igSameLine(0,6);
+  bool needs_snapshot = se_cheat_finder.num_regions==0;
+  if(needs_snapshot&&!uses_value)se_push_disabled();
+  if(se_button(ICON_FK_SEARCH " Search",(ImVec2){0,0})){
+    if(se_cheat_finder.num_regions==0){
+      se_cf_region_desc_t regions[SE_CF_MAX_REGIONS];
+      se_cf_begin(&se_cheat_finder,regions,se_cheat_finder_regions(regions),value_size,read);
+    }
+    se_cf_filter(&se_cheat_finder,(se_cf_op_t)op,(uint32_t)value,read);
+  }
+  if(needs_snapshot&&!uses_value)se_pop_disabled();
+  if(se_cheat_finder.num_regions==0){
+    se_text_disabled("Comparisons with the previous search (Changed, Increased...) need a New Search first.");
+  }else{
+    se_text("%u matching addresses after %d searches",se_cheat_finder.num_candidates,se_cheat_finder.searches);
+    enum{max_shown=40};
+    se_cf_result_t results[max_shown];
+    int n = se_cf_results(&se_cheat_finder,results,max_shown);
+    if(se_cheat_finder.num_candidates>max_shown)se_text_disabled("Showing the first %d. Keep searching to narrow it down.",max_shown);
+    float win_w = igGetWindowContentRegionWidth();
+    for(int i=0;i<n;++i){
+      igPushIDInt(i);
+      uint32_t current = se_cf_read_value(read,results[i].address,value_size);
+      igPushFont(gui_state.mono_font);
+      se_text("%08X = %u",results[i].address,current);
+      igPopFont();
+      igSameLine(win_w-150,0);
+      if(se_button("Set",(ImVec2){70,0}))se_cf_write_value(se_cheat_finder_writer(),results[i].address,(uint32_t)value,value_size);
+      igSameLine(0,6);
+      if(se_button(ICON_FK_SNOWFLAKE_O " Freeze",(ImVec2){-1,0}))se_cf_freeze(&se_cheat_finder,results[i].address,current,value_size);
+      igPopID();
+    }
+  }
+  if(se_cheat_finder.num_frozen){
+    se_text("Frozen (rewritten every frame):");
+    float win_w = igGetWindowContentRegionWidth();
+    for(int i=0;i<se_cheat_finder.num_frozen;++i){
+      igPushIDInt(1000+i);
+      se_cf_frozen_t* f = &se_cheat_finder.frozen[i];
+      igPushFont(gui_state.mono_font);
+      se_text("%08X = %u",f->address,f->value);
+      igPopFont();
+      igSameLine(win_w-40,0);
+      if(se_button(ICON_FK_TRASH,(ImVec2){-1,0})){ se_cf_unfreeze(&se_cheat_finder,i); igPopID(); break; }
+      igPopID();
+    }
+  }
+}
 void se_draw_menu_panel(){
     if (!show_ui)
         return;
   ImGuiStyle *style = igGetStyle();
   int win_w = igGetWindowContentRegionWidth();
+  se_draw_recording_section();
   se_section(ICON_FK_FLOPPY_O " Save States");
   if(gui_state.settings.hardcore_mode&&gui_state.ra_logged_in)se_text("Disabled in Hardcore Mode");
   else{
@@ -7390,6 +7718,7 @@ void se_draw_menu_panel(){
         }
       }
     }
+    se_draw_cheat_finder();
   }
   #ifdef ENABLE_RETRO_ACHIEVEMENTS
   se_section(ICON_FK_TROPHY " RetroAchievements");
@@ -7727,19 +8056,28 @@ void se_draw_menu_panel(){
   int v = gui_state.settings.screen_shader;
   igPushItemWidth(-1);
   se_field_label("Screen Shader");igSameLine(SE_FIELD_INDENT,0);
-  se_combo_str("##Screen Shader",&v,"Pixelate\0Bilinear\0LCD\0LCD & Subpixels\0Smooth Upscale (xBRZ)\0CRT Scanlines\0CRT Aperture Grille\0Soft LCD\0",0);
+  se_combo_str("##Screen Shader",&v,"Pixelate\0Bilinear\0LCD\0LCD & Subpixels\0Smooth Upscale (xBRZ)\0CRT Scanlines\0CRT Aperture Grille\0Soft LCD\0"
+               "Ultra CRT\0Game Boy LCD (DMG/GBC)\0Pixel-Art Smoothing\0GBA Backlit LCD\0",0);
   gui_state.settings.screen_shader=v;
-  if(v>=SE_SHADER_CRT){
-    se_field_label("Scanlines");igSameLine(SE_FIELD_INDENT,0);
-    se_slider_float("##Scanlines",&gui_state.settings.scanline_strength,0,1,"%.2f");
-    se_field_label("Pixel Mask");igSameLine(SE_FIELD_INDENT,0);
-    se_slider_float("##PixelMask",&gui_state.settings.mask_strength,0,1,"%.2f");
-    if(v!=SE_SHADER_SOFT_LCD){
-      se_field_label("Curvature");igSameLine(SE_FIELD_INDENT,0);
-      se_slider_float("##Curvature",&gui_state.settings.curvature,0,0.25f,"%.2f");
-      se_field_label("Vignette");igSameLine(SE_FIELD_INDENT,0);
-      se_slider_float("##Vignette",&gui_state.settings.vignette,0,1,"%.2f");
-    }
+  // Each shader family reuses the four effect sliders under its own names; NULL hides a slider.
+  const char* effect_labels[4]={NULL,NULL,NULL,NULL};
+  if(v==SE_SHADER_CRT||v==SE_SHADER_CRT_APERTURE||v==SE_SHADER_ULTRA_CRT){
+    effect_labels[0]="Scanlines"; effect_labels[1]=v==SE_SHADER_ULTRA_CRT?"Shadow Mask":"Pixel Mask";
+    effect_labels[2]="Curvature"; effect_labels[3]="Vignette";
+  }else if(v==SE_SHADER_SOFT_LCD){
+    effect_labels[0]="Scanlines"; effect_labels[1]="Pixel Mask";
+  }else if(v==SE_SHADER_GB_LCD){
+    effect_labels[0]="Pixel Shadow"; effect_labels[1]="Pixel Grid"; effect_labels[3]="Vignette";
+  }else if(v==SE_SHADER_GBA_LCD){
+    effect_labels[0]="Row Gaps"; effect_labels[1]="Subpixel Stripes"; effect_labels[3]="Backlight Glow";
+  }
+  float* effect_values[4]={&gui_state.settings.scanline_strength,&gui_state.settings.mask_strength,
+                           &gui_state.settings.curvature,&gui_state.settings.vignette};
+  for(int e=0;e<4;++e){
+    if(!effect_labels[e])continue;
+    char id[32]; snprintf(id,sizeof(id),"##ShaderEffect%d",e);
+    se_field_label(effect_labels[e]);igSameLine(SE_FIELD_INDENT,0);
+    se_slider_float(id,effect_values[e],0,e==2?0.25f:1.0f,"%.2f");
   }
   se_field_label("Brightness");igSameLine(SE_FIELD_INDENT,0);
   se_slider_float("##Brightness",&gui_state.settings.display_brightness,0.5f,1.5f,"%.2f");
@@ -7766,6 +8104,39 @@ void se_draw_menu_panel(){
     bool b = gui_state.settings.ghosting;
     se_checkbox("Screen Ghosting", &b);
     gui_state.settings.ghosting=b;
+  }
+  {
+    // Screen layout presets set the layout options below together; "Custom" when they match no preset.
+    typedef struct{const char* name; uint32_t avoid_overlap, integer_scaling, stretch, rotation, bezel;}se_layout_preset_t;
+    static const se_layout_preset_t presets[]={
+      {"Screen on top, controls below",SE_AVOID_OVERLAP_PORTRAIT,0,0,0,0},
+      {"Large screen, controls over it",0,0,0,0,0},
+      {"Pixel perfect (integer scale)",SE_AVOID_OVERLAP_PORTRAIT,1,0,0,0},
+      {"Stretch to fill",0,0,1,0,0},
+      {"Controls beside the screen",SE_AVOID_OVERLAP_PORTRAIT|SE_AVOID_OVERLAP_LANDSCAPE,0,0,0,0},
+      {"Sideways (rotated 90 degrees)",SE_AVOID_OVERLAP_PORTRAIT,0,0,1,0},
+      {"Classic skin with bezel",SE_AVOID_OVERLAP_PORTRAIT,0,0,0,1},
+    };
+    enum{num_presets=sizeof(presets)/sizeof(presets[0])};
+    persistent_settings_t* st = &gui_state.settings;
+    int current = 0;
+    for(int i=0;i<num_presets;++i){
+      const se_layout_preset_t* l = &presets[i];
+      if(st->avoid_overlaping_touchscreen==l->avoid_overlap&&st->integer_scaling==l->integer_scaling&&
+         st->stretch_to_fit==l->stretch&&st->screen_rotation==l->rotation&&st->show_screen_bezel==l->bezel){current=i+1;break;}
+    }
+    char items[512]; int off = snprintf(items,sizeof(items),"Custom")+1;
+    for(int i=0;i<num_presets&&off<(int)sizeof(items)-2;++i)
+      off += snprintf(items+off,sizeof(items)-off,"%s",presets[i].name)+1;
+    items[off<(int)sizeof(items)?off:(int)sizeof(items)-1]=0;
+    se_field_label("Screen Layout");igSameLine(SE_FIELD_INDENT,0);
+    int chosen = current;
+    se_combo_str("##ScreenLayoutPreset",&chosen,items,0);
+    if(chosen!=current&&chosen>0){
+      const se_layout_preset_t* l = &presets[chosen-1];
+      st->avoid_overlaping_touchscreen=l->avoid_overlap; st->integer_scaling=l->integer_scaling;
+      st->stretch_to_fit=l->stretch; st->screen_rotation=l->rotation; st->show_screen_bezel=l->bezel;
+    }
   }
   {
     bool b = gui_state.settings.integer_scaling;
@@ -8811,6 +9182,7 @@ static void frame(void) {
     se_end_menu_bar();
   }
   igPopStyleVar(2);
+  se_draw_recording_indicator(menu_height);
   bool active = se_process_file_browser();
   if(!active){
     float screen_x = 0; 

@@ -30,6 +30,7 @@ import android.view.inputmethod.InputMethodManager;
 import android.app.NativeActivity;
 import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.Toast;
 
 import androidx.browser.customtabs.CustomTabsIntent;
 
@@ -38,6 +39,7 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.ByteBuffer;
 import java.security.Key;
 import java.util.Locale;
 import java.util.Vector;
@@ -123,6 +125,55 @@ public class EnhancedNativeActivity extends NativeActivity {
             }
         }
         return out;
+    }
+
+    /* Gameplay recording, called from native code (see se_record_frame). */
+    private GameRecorder recorder;
+
+    public boolean startRecording(int width, int height, int scale, int sampleRate, float fps) {
+        synchronized (this) {
+            if (recorder != null) return true;
+            try {
+                recorder = GameRecorder.start(this, width, height, scale, sampleRate, fps, (location, error) ->
+                        showMessage(error == null ? "Recording saved to " + location : "Recording failed: " + error));
+            } catch (Exception e) {
+                Log.e(TAG, "Could not start recording", e);
+                showMessage("Could not start recording: " + e.getMessage());
+                return false;
+            }
+        }
+        showMessage("Recording started");
+        return true;
+    }
+
+    // Returns false once the recorder is gone, so native code stops sending frames.
+    public boolean recordFrame(ByteBuffer video, ByteBuffer audio) {
+        GameRecorder current;
+        synchronized (this) { current = recorder; }
+        if (current == null) return false;
+        if (current.submit(video, audio)) return true;
+        stopRecording();
+        return false;
+    }
+
+    public void stopRecording() {
+        GameRecorder current;
+        synchronized (this) {
+            current = recorder;
+            recorder = null;
+        }
+        if (current != null) current.finish();
+    }
+
+    private void showMessage(String message) {
+        runOnUiThread(() -> Toast.makeText(this, message, Toast.LENGTH_LONG).show());
+    }
+
+    @Override
+    protected void onPause() {
+        // Finish the file now: Android may stop the app at any time once it is in the background.
+        stopRecording();
+        super.onPause();
     }
 
     public void setRemoteKeycodeCallback(String keyCode) {

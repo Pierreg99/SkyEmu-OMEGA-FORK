@@ -36,8 +36,19 @@ void se_settings_validate(persistent_settings_t* s){
   if(s->gba_color_correction_mode>1)s->gba_color_correction_mode=0;
   if(s->avoid_overlaping_touchscreen>3)s->avoid_overlaping_touchscreen=0;
   if(s->http_control_server_port==0 || s->http_control_server_port>65535)s->http_control_server_port=8080;
+  for(int g=0;g<SE_TOUCH_GROUP_COUNT;++g){
+    s->touch_layout[g][0] = bounded(s->touch_layout[g][0],-0.5f,0.5f,0);
+    s->touch_layout[g][1] = bounded(s->touch_layout[g][1],-0.5f,0.5f,0);
+    s->touch_layout[g][2] = bounded(s->touch_layout[g][2],0.5f,2.0f,1);
+  }
   s->custom_accent &= 0xffffff;
   s->high_contrast = !!s->high_contrast;
+}
+
+void se_settings_reset_touch_layout(persistent_settings_t* s){
+  for(int g=0;g<SE_TOUCH_GROUP_COUNT;++g){
+    s->touch_layout[g][0]=0; s->touch_layout[g][1]=0; s->touch_layout[g][2]=1;
+  }
 }
 
 void se_settings_migrate(persistent_settings_t* s, bool mobile){
@@ -85,6 +96,7 @@ void se_settings_migrate(persistent_settings_t* s, bool mobile){
     // and the design systems draw that bezel transparent anyway. Phones use the bezel-less layout.
     if(mobile)s->show_screen_bezel=0;
   }
+  if(s->settings_file_version<7)se_settings_reset_touch_layout(s);
   s->settings_file_version=SE_SETTINGS_VERSION;
   se_settings_validate(s);
 }

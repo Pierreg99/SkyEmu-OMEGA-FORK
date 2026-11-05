@@ -1,7 +1,8 @@
-// Regression cases for persisted settings, exact file I/O and wrapped stereo audio.
+// Regression cases for persisted settings, exact file I/O, wrapped stereo audio and the cheat finder.
 #include "sb_types.h"
 #include "se_settings.h"
 #include "se_design.h"
+#include "se_cheat_finder.h"
 #include <math.h>
 #include <stddef.h>
 #include <limits.h>
@@ -29,6 +30,8 @@ static void test_settings(void){
   CHECK(s.gb_palette[0]==0x388F81 && s.gb_palette[3]==0x2D4A31);
   CHECK(s.avoid_overlaping_touchscreen==SE_AVOID_OVERLAP_PORTRAIT && s.touch_controls_opacity==0.5f);
   CHECK(s.show_screen_bezel==0); // Mobile.
+  CHECK(s.touch_layout[SE_TOUCH_GROUP_FACE][2]==1 && s.touch_layout[SE_TOUCH_GROUP_DPAD][0]==0);
+  CHECK(offsetof(persistent_settings_t,touch_layout)==212); // Appended after the version 5 fields.
   s.volume=0.25f; s.design_system=SE_DESIGN_FLUENT;
   s.custom_accent=0x123456; s.use_custom_accent=1;
   s.settings_file_version=4;
@@ -57,7 +60,9 @@ static void test_settings(void){
   s.display_brightness=INFINITY; s.display_saturation=-2; s.curvature=2;
   s.screen_shader=UINT_MAX; s.ui_density=UINT_MAX; s.screen_rotation=UINT_MAX;
   s.http_control_server_port=UINT_MAX;
+  s.touch_layout[0][0]=NAN; s.touch_layout[1][1]=7; s.touch_layout[2][2]=0;
   se_settings_validate(&s);
+  CHECK(s.touch_layout[0][0]==0 && s.touch_layout[1][1]==0.5f && s.touch_layout[2][2]==0.5f);
   CHECK(s.volume==0.8f && s.ghosting==1 && s.color_correction==1);
   CHECK(s.gui_scale_factor==1 && s.custom_font_scale==1 && s.touch_controls_scale==1);
   CHECK(s.display_brightness==1 && s.display_saturation==0 && s.curvature==0.25f);
@@ -124,8 +129,39 @@ static void test_files(void){
 #endif
 }
 
+static uint8_t cf_ram[64];
+static uint8_t cf_read(uint64_t address){ return address>=0x100&&address<0x140? cf_ram[address-0x100] : 0xff; }
+static void cf_write(uint64_t address, uint8_t data){ if(address>=0x100&&address<0x140)cf_ram[address-0x100]=data; }
+static void test_cheat_finder(void){
+  se_cheat_finder_t cf; memset(&cf,0,sizeof(cf));
+  memset(cf_ram,0,sizeof(cf_ram));
+  cf_ram[0x10]=3; cf_ram[0x20]=3;
+  se_cf_region_desc_t region = {0x100,sizeof(cf_ram),"Test RAM"};
+  CHECK(se_cf_begin(&cf,&region,1,1,cf_read) && cf.num_candidates==64);
+  CHECK(se_cf_filter(&cf,SE_CF_EQUAL,3,cf_read)==2);
+  cf_ram[0x10]=2; // The value we are looking for went down, the decoy stays.
+  CHECK(se_cf_filter(&cf,SE_CF_DECREASED,0,cf_read)==1);
+  se_cf_result_t results[4];
+  CHECK(se_cf_results(&cf,results,4)==1 && results[0].address==0x110 && results[0].value==2 && results[0].previous==3);
+  CHECK(se_cf_filter(&cf,SE_CF_UNCHANGED,0,cf_read)==1);
+  // 16-bit searches only consider aligned addresses and read little endian.
+  cf_ram[0x30]=0x34; cf_ram[0x31]=0x12;
+  CHECK(se_cf_begin(&cf,&region,1,2,cf_read) && cf.num_candidates==32);
+  CHECK(se_cf_filter(&cf,SE_CF_EQUAL,0x1234,cf_read)==1);
+  CHECK(se_cf_results(&cf,results,4)==1 && results[0].address==0x130);
+  CHECK(se_cf_filter(&cf,SE_CF_GREATER,0x1234,cf_read)==0);
+  // Freezing rewrites the value every frame; freezing the same address again updates it.
+  CHECK(se_cf_freeze(&cf,0x130,0xBEEF,2) && se_cf_freeze(&cf,0x130,0x4242,2) && cf.num_frozen==1);
+  se_cf_apply_frozen(&cf,cf_write);
+  CHECK(se_cf_read_value(cf_read,0x130,2)==0x4242);
+  se_cf_unfreeze(&cf,0);
+  CHECK(cf.num_frozen==0);
+  se_cf_reset(&cf);
+  CHECK(cf.num_regions==0 && cf.num_candidates==0);
+}
+
 int main(void){
-  test_settings();test_audio();test_files();
+  test_settings();test_audio();test_files();test_cheat_finder();
   if(failures){fprintf(stderr,"%d failures\n",failures);return 1;}
   puts("Settings, audio wraparound and file I/O regression checks passed");return 0;
 }

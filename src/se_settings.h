@@ -2,9 +2,15 @@
 #define SE_SETTINGS_H
 #include <stdint.h>
 #include <stdbool.h>
-#define SE_SETTINGS_VERSION 6u
+#define SE_SETTINGS_VERSION 7u
 #define SE_AVOID_OVERLAP_PORTRAIT 1
 #define SE_AVOID_OVERLAP_LANDSCAPE 2
+// Groups of on-screen buttons that the touch layout editor moves and resizes together
+#define SE_TOUCH_GROUP_DPAD 0
+#define SE_TOUCH_GROUP_FACE 1     // A, B, X, Y
+#define SE_TOUCH_GROUP_SHOULDER 2 // L, R
+#define SE_TOUCH_GROUP_SYSTEM 3   // Start, Select, Hold, Turbo
+#define SE_TOUCH_GROUP_COUNT 4
 #define SE_SHADER_PIXELATE 0u
 #define SE_SHADER_BILINEAR 1u
 #define SE_SHADER_LCD 2u
@@ -13,7 +19,11 @@
 #define SE_SHADER_CRT 5u
 #define SE_SHADER_CRT_APERTURE 6u
 #define SE_SHADER_SOFT_LCD 7u
-#define SE_SHADER_COUNT 8u
+#define SE_SHADER_ULTRA_CRT 8u
+#define SE_SHADER_GB_LCD 9u
+#define SE_SHADER_PIXEL_SMOOTH 10u
+#define SE_SHADER_GBA_LCD 11u
+#define SE_SHADER_COUNT 12u
 typedef struct{
   // This structure is directly saved out for the user settings. 
   // Be very careful to keep alignment and ordering the same otherwise you will break the settings. 
@@ -63,7 +73,9 @@ typedef struct{
   uint32_t high_contrast;
   uint32_t ui_density; // 0 comfortable, 1 compact, 2 touch
   float corner_radius_scale;
-  uint32_t padding[203];
+  // Version 7: per group offset (x, y, in controller widths and heights) and size of the touch controls
+  float touch_layout[SE_TOUCH_GROUP_COUNT][3];
+  uint32_t padding[191];
 }persistent_settings_t; 
 #ifdef __cplusplus
 static_assert(sizeof(persistent_settings_t)==1024, "settings ABI must remain 1024 bytes");
@@ -76,6 +88,7 @@ extern "C" {
 #endif
 // Upgrade loaded settings, or reset an unknown version. Does not access files or graphics.
 void se_settings_migrate(persistent_settings_t* settings, bool mobile);
+void se_settings_reset_touch_layout(persistent_settings_t* settings);
 void se_settings_validate(persistent_settings_t* settings);
 #ifdef __cplusplus
 }

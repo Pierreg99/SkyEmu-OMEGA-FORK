@@ -377,8 +377,95 @@ vec4 smooth_sample(vec2 coord){
   return bilinear(sample_color_correct(base),sample_color_correct(base+vec2(1,0)/emu_lcd_size),
                   sample_color_correct(base+vec2(0,1)/emu_lcd_size),sample_color_correct(base+vec2(1,1)/emu_lcd_size),alpha);
 }
+float luma(vec3 c){ return dot(c,vec3(0.2126,0.7152,0.0722)); }
+// Sharp bilinear: nearest neighbour inside each source pixel, a one output pixel wide blend at its edges.
+vec2 sharp_uv(vec2 coord){
+  vec2 texel = coord*emu_lcd_size;
+  vec2 scale = max(render_size/emu_lcd_size,vec2(1.0));
+  vec2 range = 0.5-0.5/scale;
+  vec2 d = fract(texel)-0.5;
+  vec2 f = (d-clamp(d,-range,range))*scale+0.5;
+  return (floor(texel)+f)/emu_lcd_size;
+}
+// Brightness dependent Gaussian beam of one scanline, bright lines bloom wider like a real electron beam.
+vec3 crt_beam(vec3 c, float dist){
+  float w = mix(0.24,0.46,max(c.r,max(c.g,c.b)));
+  return c*exp(-dist*dist/(2.0*w*w));
+}
+// Effects use the shared sliders: x scanlines / shadow, y mask / grid, z curvature, w vignette / glow.
+vec3 ultra_shader(int mode, vec2 p){
+  float resolve_x = smoothstep(2.0,3.0,render_size.x/emu_lcd_size.x);
+  float resolve_y = smoothstep(1.5,2.5,render_size.y/emu_lcd_size.y);
+  vec3 color;
+  if(mode==8){
+    // Ultra CRT: curved glass, Gaussian beams, slot mask, bloom and rounded corners.
+    vec2 q = p*(1.0+shader_effects.z*1.5*vec2(p.y*p.y,p.x*p.x));
+    vec2 suv = q*0.5+0.5;
+    vec2 corner = max(abs(q)-vec2(0.92),vec2(0.0));
+    float edge = 1.0-smoothstep(0.0,0.08,length(corner));
+    if(edge<=0.0)return vec3(0.0);
+    float py = suv.y*emu_lcd_size.y;
+    float line = floor(py)+0.5;
+    float dy = py-line;
+    float other = dy<0.0? line-1.0 : line+1.0;
+    vec3 c0 = smooth_sample(vec2(suv.x,line/emu_lcd_size.y)).rgb;
+    vec3 c1 = smooth_sample(vec2(suv.x,other/emu_lcd_size.y)).rgb;
+    vec3 beams = (crt_beam(c0,dy)+crt_beam(c1,1.0-abs(dy)))*1.35;
+    color = mix(smooth_sample(suv).rgb,beams,clamp(shader_effects.x*1.5,0.0,1.0)*resolve_y);
+    float col = mod(floor(gl_FragCoord.x),3.0);
+    float row = mod(floor(gl_FragCoord.y)+(mod(floor(gl_FragCoord.x/3.0),2.0)*2.0),4.0);
+    vec3 mask = vec3(col<0.5?1.0:0.35,abs(col-1.0)<0.5?1.0:0.35,col>1.5?1.0:0.35);
+    mask *= row<0.5? 0.7 : 1.0;
+    color *= mix(vec3(1.0),mask*1.4,shader_effects.y*resolve_x);
+    vec2 o = 1.5/emu_lcd_size;
+    vec3 glow = (smooth_sample(suv+o).rgb+smooth_sample(suv-o).rgb+
+                 smooth_sample(suv+vec2(o.x,-o.y)).rgb+smooth_sample(suv+vec2(-o.x,o.y)).rgb)*0.25;
+    color += glow*glow*0.35;
+    color = adjust_display(color);
+    color *= 1.0-shader_effects.w*clamp(dot(q,q)*0.45,0.0,1.0);
+    color *= edge;
+  }else if(mode==9){
+    // Game Boy LCD: square pixels with visible gaps, a soft drop shadow and a slight response blur.
+    vec2 px = uv*emu_lcd_size;
+    vec2 cell = fract(px);
+    vec3 c = sample_color_correct((floor(px)+0.5)/emu_lcd_size).rgb;
+    c = mix(c,smooth_sample(uv).rgb,0.12);
+    float g = 0.12;
+    float grid = smoothstep(0.0,g,cell.x)*smoothstep(1.0,1.0-g,cell.x)*smoothstep(0.0,g,cell.y)*smoothstep(1.0,1.0-g,cell.y);
+    vec3 unlit = mix(c,vec3(luma(c)),0.4)*0.6+vec3(0.12);
+    color = mix(unlit,c,mix(1.0,grid,shader_effects.y*resolve_x));
+    vec3 shadow = sample_color_correct((floor(px-vec2(0.35))+0.5)/emu_lcd_size).rgb;
+    color *= 1.0-shader_effects.x*0.35*(1.0-luma(shadow))*resolve_y;
+    color = adjust_display(color);
+    color *= 1.0-shader_effects.w*clamp(dot(p,p)*0.35,0.0,1.0);
+  }else if(mode==10){
+    // Pixel-art smoothing: crisp pixels with anti-aliased edges at any (non-integer) scale.
+    color = smooth_sample(sharp_uv(uv)).rgb;
+    color = adjust_display(color);
+  }else{
+    // GBA LCD: vertical RGB subpixel stripes, thin row gaps and a soft backlight glow.
+    vec2 px = uv*emu_lcd_size;
+    vec2 cell = fract(px);
+    vec3 c = smooth_sample(sharp_uv(uv)).rgb;
+    vec3 stripes = vec3(exp(-pow((cell.x-0.1667)*4.5,2.0)),
+                        exp(-pow((cell.x-0.5)*4.5,2.0)),
+                        exp(-pow((cell.x-0.8333)*4.5,2.0)));
+    color = c*mix(vec3(1.0),stripes*1.6+0.25,shader_effects.y*resolve_x);
+    float rows = smoothstep(0.0,0.15,cell.y)*smoothstep(1.0,0.85,cell.y);
+    color *= mix(1.0,mix(0.55,1.0,rows),shader_effects.x*resolve_y);
+    vec2 o = 1.0/emu_lcd_size;
+    vec3 glow = (smooth_sample(uv+vec2(o.x,0.0)).rgb+smooth_sample(uv-vec2(o.x,0.0)).rgb+
+                 smooth_sample(uv+vec2(0.0,o.y)).rgb+smooth_sample(uv-vec2(0.0,o.y)).rgb)*0.25;
+    color += glow*0.15*shader_effects.w;
+    color = adjust_display(color);
+  }
+  return clamp(color,0.0,1.0);
+}
 void main() {
   int new_mode = int(display_mode+0.5);
+  if(new_mode>=8){
+    frag_color = vec4(ultra_shader(new_mode,uv*2.0-1.0),1.0); return;
+  }
   if(new_mode>=5){
     vec2 p = uv*2.0-1.0;
     vec2 sample_uv = uv;
