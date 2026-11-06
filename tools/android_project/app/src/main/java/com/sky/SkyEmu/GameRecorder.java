@@ -27,6 +27,7 @@ import java.util.ArrayList;
 import java.util.Date;
 import java.util.Locale;
 import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.TimeUnit;
 
 /*
  * Records the emulated screen and sound to an MP4 (H.264 + AAC). Frames arrive from the emulation thread through
@@ -45,10 +46,12 @@ final class GameRecorder {
     private static final long TIMEOUT_US = 10000;
 
     private static final class Job {
-        byte[] rgba;      // null for an audio-only job (video frame dropped) or the end of stream
+        byte[] rgba;      // null when the video frame was dropped; the previous image stays on screen
         short[] pcm;      // interleaved stereo
-        boolean end;
+        int frames = 1;   // emulated frames this job covers, more than one after the queue was full
     }
+    // Upper bound for audio held back while the encoder is behind: past it the device is too slow to record.
+    private static final int MAX_PENDING_SECONDS = 10;
 
     private final Context context;
     private final Listener listener;
@@ -69,6 +72,10 @@ final class GameRecorder {
     private long videoFrames, audioFrames;
     private volatile boolean failed;
     private volatile boolean finishing;
+    // Emulation thread only: data of frames whose job did not fit in the queue, sent with the next job.
+    private int pendingFrames;
+    private volatile boolean tooSlow;
+    private short[] pendingPcm = new short[0];
     private final Thread thread;
 
     static GameRecorder start(Context context, int width, int height, int scale, int sampleRate, float fps,
@@ -131,43 +138,54 @@ final class GameRecorder {
         thread.start();
     }
 
-    // Called from the emulation thread. Copies the data, so the caller may reuse its buffers.
+    // Called from the emulation thread. Copies the data, so the caller may reuse its buffers. Never blocks: the
+    // emulation thread also handles touch input, so waiting here would freeze the game and its stop button.
     boolean submit(ByteBuffer rgba, ByteBuffer pcm) {
         if (failed || finishing) return false;
+        short[] samples = new short[0];
+        if (pcm != null && pcm.capacity() >= 4) {
+            pcm.position(0);
+            samples = new short[pcm.capacity() / 2];
+            pcm.order(ByteOrder.nativeOrder()).asShortBuffer().get(samples);
+        }
         Job job = new Job();
+        job.frames = pendingFrames + 1;
+        job.pcm = concat(pendingPcm, samples);
         if (rgba != null && queue.remainingCapacity() > 1) {
             job.rgba = new byte[srcW * srcH * 4];
             rgba.position(0);
             rgba.get(job.rgba, 0, Math.min(job.rgba.length, rgba.remaining()));
         }
-        if (pcm != null && pcm.capacity() >= 4) {
-            pcm.position(0);
-            job.pcm = new short[pcm.capacity() / 2];
-            pcm.order(ByteOrder.nativeOrder()).asShortBuffer().get(job.pcm);
-        }
-        try {
-            queue.put(job); // only blocks when the queue is full of audio, which is tiny
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return false;
+        if (queue.offer(job)) {
+            pendingFrames = 0;
+            pendingPcm = new short[0];
+        } else {
+            pendingFrames = job.frames;
+            pendingPcm = job.pcm;
+            if (pendingPcm.length > MAX_PENDING_SECONDS * sampleRate * 2) {
+                failed = true;
+                tooSlow = true;
+                finishing = true;
+                Log.e(TAG, "The encoder fell " + MAX_PENDING_SECONDS + " s behind, stopping");
+                return false;
+            }
         }
         return !failed;
     }
 
-    // Finishes the file on the encoder thread, then publishes it and calls the listener.
+    private static short[] concat(short[] a, short[] b) {
+        if (a.length == 0) return b;
+        short[] out = new short[a.length + b.length];
+        System.arraycopy(a, 0, out, 0, a.length);
+        System.arraycopy(b, 0, out, a.length, b.length);
+        return out;
+    }
+
+    // Finishes the file on the encoder thread, then publishes it and calls the listener. Returns at once.
     void finish() {
         if (finishing) return;
         Log.i(TAG, "Finishing the recording");
         finishing = true;
-        Job end = new Job();
-        end.end = true;
-        while (true) {
-            try {
-                queue.put(end);
-                return;
-            } catch (InterruptedException ignored) {
-            }
-        }
     }
 
     private void run() {
@@ -176,11 +194,14 @@ final class GameRecorder {
             // A short block of silence makes the audio encoder report its format even if the game is silent.
             encodeAudio(new short[2048]);
             while (true) {
-                Job job = queue.take();
-                if (job.end) break;
+                Job job = queue.poll(100, TimeUnit.MILLISECONDS);
+                if (job == null) {
+                    if (finishing) break;
+                    continue;
+                }
                 if (job.rgba != null) encodeVideo(job.rgba);
-                videoFrames++; // a dropped frame keeps its time slot, the previous image stays on screen
-                if (job.pcm != null) encodeAudio(job.pcm);
+                videoFrames += job.frames; // dropped frames keep their time slots
+                if (job.pcm != null && job.pcm.length > 0) encodeAudio(job.pcm);
                 drain(video, false);
                 drain(audio, false);
             }
@@ -202,6 +223,7 @@ final class GameRecorder {
             safeRelease();
         }
         if (location != null) Log.i(TAG, "Saved " + videoFrames + " frames to " + location);
+        if (location != null && tooSlow) location += " (stopped early: this device could not encode fast enough)";
         if (listener != null) listener.onRecordingFinished(location, error);
     }
 
