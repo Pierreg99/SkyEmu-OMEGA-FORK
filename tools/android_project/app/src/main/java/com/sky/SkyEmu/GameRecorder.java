@@ -126,6 +126,7 @@ final class GameRecorder {
         }
         video = v;
         audio = a;
+        Log.i(TAG, "Recording " + outW + "x" + outH + " at " + fps + " fps to " + displayName);
         thread = new Thread(this::run, "SkyEmuRecorder");
         thread.start();
     }
@@ -156,6 +157,7 @@ final class GameRecorder {
     // Finishes the file on the encoder thread, then publishes it and calls the listener.
     void finish() {
         if (finishing) return;
+        Log.i(TAG, "Finishing the recording");
         finishing = true;
         Job end = new Job();
         end.end = true;
@@ -199,6 +201,7 @@ final class GameRecorder {
         } finally {
             safeRelease();
         }
+        if (location != null) Log.i(TAG, "Saved " + videoFrames + " frames to " + location);
         if (listener != null) listener.onRecordingFinished(location, error);
     }
 

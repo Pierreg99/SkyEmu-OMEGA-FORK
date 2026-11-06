@@ -7453,7 +7453,9 @@ static void se_draw_recording_indicator(float menu_height){
   char label[32];
   snprintf(label,sizeof(label),"REC %02d:%02d",seconds/60,seconds%60);
   ImVec2 ts; igCalcTextSize(&ts,label,NULL,false,-1);
-  ImVec2 p = {w-ts.x-34,menu_height+8};
+  // Inside the top bar, right of the playback buttons, so it never covers a panel's close button.
+  float y = menu_height>ts.y+8? (menu_height-ts.y)*0.5f : 8;
+  ImVec2 p = {w-ts.x-34,y};
   ImDrawList_AddRectFilled(fg,(ImVec2){p.x-8,p.y-4},(ImVec2){w-6,p.y+ts.y+4},0xB0000000,(ts.y+8)*0.5f,ImDrawCornerFlags_All);
   if(fmod(se_time(),1.0)<0.65)ImDrawList_AddCircleFilled(fg,(ImVec2){p.x+5,p.y+ts.y*0.5f},5,0xff3030ff,16);
   ImDrawList_AddTextVec2(fg,(ImVec2){p.x+16,p.y},0xffffffff,label,NULL);
