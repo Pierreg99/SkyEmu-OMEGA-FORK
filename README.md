@@ -104,7 +104,8 @@
 <td valign="top">
 
 ### 🖥️ Great picture
-- LCD, subpixel and xBRZ upscaling shaders
+- LCD, subpixel, xBRZ and CRT shaders, plus Ultra CRT, Game Boy LCD, GBA backlit LCD and pixel-art smoothing
+- Screen layout presets and a touch button layout editor
 - GBA color correction (SkyEmu or Higan)
 - Screen ghosting
 - Flexible DS screen layouts
@@ -113,6 +114,8 @@
 <td valign="top">
 
 ### 🧰 For tinkerers
+- Cheat Finder: search RAM for lives, money or health, then set or freeze it
+- Record gameplay to MP4 with sound (Android)
 - CPU, MMIO and memory debuggers
 - RetroAchievements with hardcore mode
 - Google Drive save state sync

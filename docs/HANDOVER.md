@@ -19,6 +19,17 @@ A short summary for the project owner. The technical details, reasoning and repr
 
 All of it is on branch `ccr-e41ac3c8-r3njjn`. No pull request has been opened.
 
+## New in this round (APK versionCode 3)
+
+- **Recording** (Menu → Recording): game screen and sound to an MP4 in Movies/SkyEmu, with a REC badge.
+- **Cheat Finder** (under Action Replay Codes): search memory for a value, narrow it down, set or freeze it.
+- **Touch layout editor** (Touch Control Settings): move and resize D-pad, A/B/X/Y, L/R and Start/Select.
+- **Screen Layout presets** (Display Settings) and four new shaders: Ultra CRT, Game Boy LCD, Pixel-Art
+  Smoothing, GBA Backlit LCD.
+- Not yet confirmed on a phone: that a finished recording plays back with sound. In the (very slow,
+  unaccelerated) test emulator recording started and ran, but the save step could not be observed.
+- Not done: a built-in cheat database (the finder searches RAM instead).
+
 ## Installing it
 
 1. Download **AndroidRelease-APK** from a green *Build Android* run and unzip it.

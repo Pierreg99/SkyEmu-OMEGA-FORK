@@ -90,6 +90,21 @@ there is no KVM. It needs ~10 minutes to boot and renders at ~7 fps, so taps mus
 400`), and the system file picker is easier to drive with `input keyevent` (Tab, Down, Enter). The HTTP control
 server (`adb forward tcp:18080 tcp:8080`, `/settings`, `/setting?...`) is handy for flipping settings.
 
+## Round 3: recording, cheat finder, layouts, shaders
+
+| Area | Where |
+|---|---|
+| Recording (Android) | `se_recording_*`, `se_record_frame` in `src/main.c` hand each emulated frame and that frame's audio to `EnhancedNativeActivity.recordFrame`; `GameRecorder.java` encodes H.264 + AAC on its own thread and publishes to Movies/SkyEmu via MediaStore. `submit()` never blocks the emulation thread (it also handles touch input); a full queue drops the video frame and carries its audio forward, 10 s of backlog stops and saves. |
+| Cheat Finder | `src/se_cheat_finder.{h,c}` (tested in `tools/se_runtime_test.c`), UI `se_draw_cheat_finder` in `src/main.c`; frozen values applied in `se_emulate_single_frame`. |
+| Touch layout editor | Settings v7 `touch_layout[4][3]`, applied by `se_apply_touch_layout` before drawing and hit testing. |
+| Layout presets | Combo in Display Settings, sets overlap / integer / stretch / rotation / bezel together. |
+| Shaders | Modes 8-11 in `src/lcd_shaders.shd` (`ultra_shader`), regenerate with `python3 tools/generate_shaders.py`. |
+
+Verified: runtime tests pass, shader header current, Android and desktop Linux builds compile, in the emulator the
+Recording and Cheat Finder sections show and recording starts (encoders configured, timer runs). Not verified: a
+finished MP4 (the unaccelerated emulator was too slow to complete the save while being driven), layout presets and
+touch editor on screen, the new shaders' look on a device.
+
 ## Next steps
 
 1. **Try it on the owner's phone**: open a game, play with the on-screen controls, check sound, save states
